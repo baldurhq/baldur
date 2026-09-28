@@ -71,8 +71,8 @@ flowchart TB
     FB -->|"no"| ERR["raise the original error — and, with dlq=True,<br/>set the work aside in the dead-letter queue"]
 ```
 
-Because the fallback is outermost, it is the single safety net for **every** way the inner chain
-can fail. And because the breaker still sits outside retry, an open breaker short-circuits *fast* —
+Because the fallback is outermost, it is the single safety net for **every** error the inner chain
+raises. And because the breaker still sits outside retry, an open breaker short-circuits *fast* —
 it never burns retry attempts against a dependency already known to be down — but instead of
 raising, it degrades to the fallback when you set one.
 
@@ -85,8 +85,13 @@ raising, it degrades to the fallback when you set one.
 | Timeout — the wall-clock bound is hit | raises `TimeoutPolicyError` | serves the fallback |
 | CB-open — the breaker rejects the call | raises `CircuitBreakerOpenError` | serves the fallback |
 
-The one thing the fallback does **not** absorb is an idempotency-duplicate rejection: a blocked
-duplicate raises `IdempotencyDuplicateError` so the caller knows the work did not run a second time.
+Two outcomes get past the fallback. A blocked idempotency duplicate raises
+`IdempotencyDuplicateError`, so the caller knows the work did not run a second time. And an error
+your client *returns* instead of raising, such as a response object carrying a 503 or a 429, comes
+back to you untouched: the breaker counts it as a failure, but retry, the fallback, and the
+dead-letter queue all see a call that returned. When you want those layers to act on error
+statuses, have the protected function raise on them (call `response.raise_for_status()` inside it,
+for example).
 
 ### What's on by default
 
@@ -135,25 +140,31 @@ how many attempts?) without catching an exception, reach one level down for
 `from baldur.protect_facade import protect_with_meta, aprotect_with_meta`: they return a
 `ProtectResult` instead of raising.
 
-### Composed, honestly
+### Caveats and finer control
 
 - **Retry does not make your call safe to repeat.** A retry runs your function again, side effects
-  and all, so a retried charge can charge twice. Pass `idempotency_key=` (or make the function
-  idempotent yourself) when the work is not naturally safe to repeat. Baldur will not silently
-  assume it is. See [Idempotency](../oss/idempotency.md).
+  and all, so a retried charge can charge twice, and `idempotency_key=` does not change that. The
+  key deduplicates whole calls (a double-submit, a redelivered message) and is checked once, before
+  the pipeline starts, so it never sees the attempts retry makes inside it. Turn `retry=` on only
+  for work that is safe to repeat on its own, for example a charge that sends the payment
+  provider's own idempotency key. Baldur will not silently assume it is. See
+  [Idempotency](../oss/idempotency.md) for the duplicate calls the key does block.
 - **`dlq=True` captures the final failure on either tier, with or without `retry=`.** A call that
-  raised, that exceeded its `timeout=`, or that an open breaker rejected is recorded with the
-  context needed to run it again. With `retry=` the capture happens once the attempts are
-  exhausted, so pair the two only when the client does not already retry; an SDK's built-in
-  retries stay where they are. The `@dlq_protect` preset pins both on, which is the setting you
-  want when losing the work is not an option. The backlog is browsable in the web console, and
-  entries can be retried once the dependency recovers, with no PRO required. PRO adds the
-  operate-at-scale surface: one-click batch replay, adaptive pacing, and archive/purge retention.
+  raised, that exceeded its `timeout=`, or that an open breaker rejected is recorded. On the
+  decorator the entry carries a snapshot of the function's plain-value arguments, which is what a
+  replay re-runs; the `baldur.protect()` form has no arguments to read, so its entry holds only
+  what you pass as `context=`. With `retry=` the capture happens once retry gives up, so pair the
+  two only when the client does not already retry; an SDK's built-in retries stay where they are.
+  The `@dlq_protect` preset pins both on, which is the setting you want when losing the work is not
+  an option. The backlog is browsable in the web console, and entries can be retried once the
+  dependency recovers, with no PRO required. A replay runs the work again, so the safe-to-repeat
+  rule above applies to it as well. PRO adds the operate-at-scale surface: one-click batch replay,
+  adaptive pacing, and archive/purge retention.
   Two limits: with `retry=` and `timeout=` together, a call the bound cuts off mid-retry is not
-  captured; and a second capture layer that fires for the same failure (the Celery signal hook on
-  the attempt Celery gives up on, the Django middleware on the resulting 5xx) records its own
-  entry as well, so use one layer per failure. See
-  [what reaches the queue and how a replay re-runs it](dlq-replay.md).
+  captured; and a second capture layer that fires for the same failure records its own entry as
+  well (the Django middleware on the resulting 5xx, or the Celery signal hook on the attempt Celery
+  gives up on, which skips only a breaker rejection the call already parked), so use one layer per
+  failure. See [what reaches the queue and how a replay re-runs it](dlq-replay.md).
 - **The fallback runs *outside* the timeout clock, so keep it cheap and local.** The timeout bounds
   the inner call; when it fires, the fallback is what runs *next*, so it cannot be bounded by the
   same clock. Serve something fast — a cached value, a static default — not a second network call.
@@ -162,14 +173,16 @@ how many attempts?) without catching an exception, reach one level down for
 
   ```python
   def fb(error: Exception):
-      if isinstance(error, TimeoutError):
+      if isinstance(error, baldur.TimeoutPolicyError):
           return cached_snapshot()
       raise error  # decline the fallback — let the original error propagate
   ```
 
-  A zero-argument `fallback()` still works unchanged. (For outcome-level conditions beyond the error
-  type, the lower-level builder in `baldur.resilience.policies` exposes a `predicate=` on its
-  `FallbackPolicy`; the facade covers the common case through the error-aware callable above.)
+  Match the `timeout=` bound on `baldur.TimeoutPolicyError`: it is not a subclass of Python's
+  built-in `TimeoutError`, so a check for the built-in never sees it. A zero-argument `fallback()`
+  still works unchanged. (For outcome-level conditions beyond the error type, the lower-level
+  builder in `baldur.resilience.policies` exposes a `predicate=` on its `FallbackPolicy`; the
+  facade covers the common case through the error-aware callable above.)
 - **On `async def` functions**, the whole pipeline composes with the same guarantees as sync —
   circuit breaker, retry, fallback, dead-letter, idempotency, and timeout — in the same order (the
   fallback outermost, then the breaker, then timeout, then retry). A given `name` shares one breaker
@@ -193,10 +206,10 @@ retry's backoff, idempotency's storage — documented in their own guides and li
 
 ## See also
 
-- [Getting Started](../../getting-started/index.md) — get a protected endpoint running in five minutes
+- [Getting Started](../../getting-started/index.md) — get a protected endpoint running with no infrastructure to set up
 - [What is self-healing?](self-healing.md) — the bigger picture this fits into
-- [Circuit Breaker](../oss/circuit-breaker.md) — the outermost layer, and a good first read
+- [Circuit Breaker](../oss/circuit-breaker.md) — the one layer on by default, and a good first read
 - [Retry](../oss/retry.md) — the retry-with-backoff stage
-- [Idempotency](../oss/idempotency.md) — make a retried side effect safe to repeat
+- [Idempotency](../oss/idempotency.md) — stop a duplicate call from running its side effect twice
 - [DLQ + Replay](dlq-replay.md) — where `dlq=True` sets a final failure aside, and how it replays
 - [Facade API reference](../../reference/baldur/facade.md) — every option and signature
