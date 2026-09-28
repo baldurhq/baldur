@@ -27,6 +27,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 from tests.architecture.conftest import (
     PROJECT_ROOT,
     collect_violations,
@@ -135,13 +137,19 @@ class TestOptionalImportsContract:
     """G13 — optional extras MUST be imported under try/except ImportError."""
 
     def test_no_unbaselined_violations(self):
+        root = PROJECT_ROOT / "src" / "baldur"
+        if not root.is_dir():
+            pytest.skip(
+                "baldur is not in this checkout — its scan runs in the repo "
+                "that ships that source"
+            )
         optional_modules = _all_optional_top_level_modules()
         assert optional_modules, (
             "optional_extras_modules() returned no modules — "
             "pyproject.toml [project.optional-dependencies] is missing or unreadable."
         )
 
-        roots = [PROJECT_ROOT / "src" / "baldur"]
+        roots = [root]
         raw: list[tuple[Path, int | None, str | None, str | None]] = []
         for path in walk_src(roots):
             for offender_path, line, extra in _scan(path, optional_modules):

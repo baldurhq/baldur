@@ -53,35 +53,44 @@ consumes this package as an ordinary dependency. The boundary is
 
 ## Enforced patterns
 
-These are mechanically checked by the fitness-function suite under
-`tests/architecture/`. When one fails, its message names the offending file and
-line. The main ones:
+These fall into two groups. The first is mechanically checked by the
+fitness-function suite under `tests/architecture/` — a failure names the
+offending file and line. The second is held in code review; nothing fails the
+build when it is broken.
 
-- **`__all__`** is declared explicitly in every module (public API is opt-in).
-- **Exception hierarchy** — domain errors inherit `BaldurError` and implement
-  `extra_context()`.
-- **Protocol vs ABC** — `Protocol` for external contracts, `ABC` for internal
-  adapter base classes.
-- **Lazy imports** — heavy or optional modules are exposed through
-  `__getattr__` (PEP 562) plus `TYPE_CHECKING`, so importing `baldur` is cheap
-  and optional extras stay optional.
-- **Singletons** — stateful services expose a `get_*()` / `reset_*()` pair
-  (the `reset_*` exists for test isolation).
-- **Enums** — `(str, Enum)` inheritance so values serialize to JSON directly.
+**Mechanically checked:**
+
+- **`__all__`** is declared explicitly in every module the API reference
+  renders (public API is opt-in).
+- **Lazy imports** — optional extras are imported under `try/except
+  ImportError` or `TYPE_CHECKING`; importing `baldur` loads no web framework
+  and stays within a pinned module floor (PEP 562 `__getattr__` barrels).
+- **Settings singletons** — every `get_*_settings()` has a matching
+  `reset_*_settings()`, and every `reset_*()` has a matching `get_*()`.
 - **Time** — use `utils.time.utc_now()`, never `datetime.now()` /
   `datetime.utcnow()` directly.
-- **No hardcoded operational values** — timeouts, thresholds, retry counts, and
-  TTLs resolve through `settings/` (`BALDUR_*`) or a named module-level
-  constant, never an inline literal at the use site.
 - **Acyclic imports** — the first-party import-time graph must have no cycles.
-- **Graceful degradation** — a disabled or failed feature must leave the system
-  in a safe state; each path decides fail-open vs fail-closed explicitly.
-- **Metrics** — Prometheus metric names are `baldur_`-prefixed; event names are
-  string literals of the form `{component}.{entity}_{action}`.
+- **Metric and event names** — Prometheus metric names are `baldur_`-prefixed;
+  string-literal event names follow `{component}.{entity}_{action}`.
 - **No `print()`** in library code — use structured logging.
 - **Changelog terseness** — every `CHANGELOG.md` entry is a single line within a
   length bound; implementation mechanics and migration tables move to the
   concept guides.
+
+**Conventions (code review, not mechanically checked):**
+
+- **Exception hierarchy** — domain errors inherit `BaldurError` and implement
+  `extra_context()`.
+- **Protocol vs ABC** — `Protocol` for external contracts, `ABC` for internal
+  adapter base classes.
+- **Other singletons** — stateful services expose a `get_*()` / `reset_*()`
+  pair (the `reset_*` exists for test isolation).
+- **Enums** — `(str, Enum)` inheritance so values serialize to JSON directly.
+- **No hardcoded operational values** — timeouts, thresholds, retry counts, and
+  TTLs resolve through `settings/` (`BALDUR_*`) or a named module-level
+  constant, never an inline literal at the use site.
+- **Graceful degradation** — a disabled or failed feature must leave the system
+  in a safe state; each path decides fail-open vs fail-closed explicitly.
 
 ## Where to look
 

@@ -27,7 +27,7 @@
 # for stable diffs and minimal merge conflicts.
 #
 # Improvements (entries that no longer match a real violation) are silently
-# accepted; per-rule tests print an INFO message asking for a baseline refresh.
+# accepted; nothing reports them — remove the entry by hand to lock the gain in.
 
 time_handling:
   - {file: src/baldur/adapters/celery/tasks/monitoring.py, symbol: check_and_report_sla_breaches, reason: pre-existing datetime.now() - pending migration to utc_now(), ticket: '506'}
