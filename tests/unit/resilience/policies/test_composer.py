@@ -1669,7 +1669,11 @@ class TestSinkTerminalRoutingBehavior:
         result = PolicyResult(value=None, outcome=outcome, error=error)
 
         assert (
-            _terminal_reaches_sinks(result, captures_open_circuit_rejections=armed)
+            _terminal_reaches_sinks(
+                result,
+                captures_open_circuit_rejections=armed,
+                captures_unretried_failures=False,
+            )
             is expected
         )
 

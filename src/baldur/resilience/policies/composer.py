@@ -23,6 +23,9 @@ Sink handling:
 - Runs synchronously (blocking), per the FailureSink Protocol
 - Reached by the FAILURE terminal, and — on a composer armed via
   ``capture_open_circuit_rejections()`` — by an open-circuit rejection too
+- A composer armed via ``capture_unretried_failures(domain)`` (a chain with no
+  retry stage to decide) marks its own FAILURE / TIMEOUT terminal for storage
+  under ``domain``, and lets the TIMEOUT terminal reach the sinks as well
 - Cost depends on the sink's own store mode: the DLQ sink's default async
   outbox path still masks and serializes the payload on this thread before
   handing it over, and a sync-store configuration additionally pays the write
@@ -257,7 +260,10 @@ def _is_open_circuit_rejection(result: PolicyResult) -> bool:
 
 
 def _terminal_reaches_sinks(
-    result: PolicyResult, *, captures_open_circuit_rejections: bool
+    result: PolicyResult,
+    *,
+    captures_open_circuit_rejections: bool,
+    captures_unretried_failures: bool,
 ) -> bool:
     """Whether a non-success terminal is delivered to the sink channel.
 
@@ -267,10 +273,42 @@ def _terminal_reaches_sinks(
     without this the work is lost precisely during the outage the DLQ exists
     for. Every other rejection shape keeps the original "REJECTED never reaches
     a sink" behavior.
+
+    A TIMEOUT terminal joins only on a composer armed for unretried failures:
+    with no retry stage in the chain, the call the wall-clock bound cut off is
+    that call's final failure. On a chain with a retry stage the bound cuts the
+    retry sequence off before it can reach a verdict, so TIMEOUT stays out.
     """
     if result.outcome == PolicyOutcome.FAILURE:
         return True
+    if result.outcome == PolicyOutcome.TIMEOUT:
+        return captures_unretried_failures
     return captures_open_circuit_rejections and _is_open_circuit_rejection(result)
+
+
+def _arm_unretried_failure(result: PolicyResult, domain: str) -> None:
+    """Mark a FAILURE / TIMEOUT terminal for storage when no stage decided.
+
+    Writes the same verdict a retry stage writes when its attempts run out,
+    sized for a call that ran once — so the sink stores it under ``domain``
+    as ``MAX_RETRIES_<ERROR_TYPE>`` with ``max_attempts=1`` visible in the
+    entry. A terminal that already carries a ``should_dlq`` verdict is left
+    as it is: a stage in the chain decided, and its decision wins. Any other
+    outcome is left untouched.
+    """
+    if result.outcome not in (PolicyOutcome.FAILURE, PolicyOutcome.TIMEOUT):
+        return
+    if "should_dlq" in result.metadata:
+        return
+    result.metadata.update(
+        {
+            "should_dlq": True,
+            "domain": domain,
+            "max_attempts": 1,
+            "retry_history": [],
+            "reason": "max_attempts",
+        }
+    )
 
 
 def _fallback_source(metadata: dict[str, Any]) -> str | None:
@@ -397,6 +435,8 @@ class PolicyComposer(Generic[T]):
         self._hooks: list[PolicyHook] = []
         self._sinks: list[FailureSink] = []
         self._captures_open_circuit_rejections = False
+        # 796 D5: armed <=> not None; the domain is the only state arming needs.
+        self._unretried_failure_domain: str | None = None
 
     # === Builder API ===
 
@@ -437,6 +477,20 @@ class PolicyComposer(Generic[T]):
         exactly the granularity the choice has.
         """
         self._captures_open_circuit_rejections = True
+        return self
+
+    def capture_unretried_failures(self, domain: str) -> PolicyComposer[T]:
+        """Store a failed or timed-out call when no retry stage decides to.
+
+        On a chain without a retry stage nothing writes the ``should_dlq``
+        verdict a sink reads, so a failure would reach the sink and be
+        dropped. Armed, the composer writes that verdict itself onto a
+        FAILURE or TIMEOUT terminal — filed under ``domain``, the name the
+        call is protected under — and delivers the TIMEOUT terminal to the
+        sinks too. A verdict a stage already wrote is kept as it is. Per
+        composer for the same reason as ``capture_open_circuit_rejections``.
+        """
+        self._unretried_failure_domain = domain
         return self
 
     # === Execution ===
@@ -510,6 +564,10 @@ class PolicyComposer(Generic[T]):
         if result.success:
             self._notify_hooks_success(result, context=context)
         else:
+            # Complete the terminal before anything observes it.
+            if self._unretried_failure_domain is not None:
+                _arm_unretried_failure(result, self._unretried_failure_domain)
+
             self._notify_hooks_failure(result, context=context)
 
             # Step 4: Sink handling — synchronous, blocking
@@ -517,6 +575,9 @@ class PolicyComposer(Generic[T]):
                 result,
                 captures_open_circuit_rejections=(
                     self._captures_open_circuit_rejections
+                ),
+                captures_unretried_failures=(
+                    self._unretried_failure_domain is not None
                 ),
             ):
                 self._process_sinks(result, context, args, kwargs)
@@ -778,6 +839,8 @@ class AsyncPolicyComposer(Generic[T]):
         self._hooks: list[AsyncPolicyHook] = []
         self._sinks: list[AsyncFailureSink] = []
         self._captures_open_circuit_rejections = False
+        # 796 D5: armed <=> not None (sync-symmetric).
+        self._unretried_failure_domain: str | None = None
 
     # === Builder API ===
 
@@ -811,6 +874,17 @@ class AsyncPolicyComposer(Generic[T]):
         and the event loop keeps serving while the rejected call is captured.
         """
         self._captures_open_circuit_rejections = True
+        return self
+
+    def capture_unretried_failures(self, domain: str) -> AsyncPolicyComposer[T]:
+        """Store a failed or timed-out call when no retry stage decides to.
+
+        Sync-symmetric: the composer writes the ``should_dlq`` verdict onto a
+        FAILURE or TIMEOUT terminal that carries none, filed under ``domain``,
+        and delivers the TIMEOUT terminal to the sinks. The store travels the
+        normalized sink channel, so a sync store runs off the event loop.
+        """
+        self._unretried_failure_domain = domain
         return self
 
     # === Execution ===
@@ -896,15 +970,22 @@ class AsyncPolicyComposer(Generic[T]):
             if self._hooks:
                 await self._notify_hooks_success(result, context=context)
         else:
+            # Complete the terminal before anything observes it.
+            if self._unretried_failure_domain is not None:
+                _arm_unretried_failure(result, self._unretried_failure_domain)
+
             if self._hooks:
                 await self._notify_hooks_failure(result, context=context)
 
             # Sink processing — the FAILURE terminal, plus an armed
-            # open-circuit rejection.
+            # open-circuit rejection and an armed unretried TIMEOUT.
             if self._sinks and _terminal_reaches_sinks(
                 result,
                 captures_open_circuit_rejections=(
                     self._captures_open_circuit_rejections
+                ),
+                captures_unretried_failures=(
+                    self._unretried_failure_domain is not None
                 ),
             ):
                 await self._process_sinks(result, context, args, kwargs)

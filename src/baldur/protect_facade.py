@@ -119,6 +119,27 @@ _composer_cache: dict[tuple[str, float | None, ComposerProfile], PolicyComposer]
 _DLQ_SINK = DLQSink()
 
 
+def _attach_dlq_capture(
+    composer: PolicyComposer[Any] | AsyncPolicyComposer[Any],
+    name: str,
+    *,
+    retry_stage_composed: bool,
+) -> None:
+    """Attach what ``dlq=True`` means to a composer being built.
+
+    The shared DLQ sink and open-circuit capture always; unretried-failure
+    capture under ``name`` when no retry stage was composed, since nothing
+    else would write the store verdict for the single attempt's failure or
+    timeout. Called only for a ``dlq`` profile, so a sink-less composer is
+    never armed.
+    """
+    composer.add_sink(_DLQ_SINK)
+    composer.capture_open_circuit_rejections()
+    if not retry_stage_composed:
+        # 796 D3: the retry stage's exhaustion verdict has no writer here.
+        composer.capture_unretried_failures(name)
+
+
 def _get_or_build_cb_policy(name: str) -> CircuitBreakerPolicy:
     """Return the cached ``CircuitBreakerPolicy`` for ``name``, building once.
 
@@ -237,8 +258,7 @@ def _get_or_build_dlq_protect_composer(
         if timeout_policy is not None:
             composer.add(timeout_policy)
         composer.add(retry_policy)
-        composer.add_sink(_DLQ_SINK)
-        composer.capture_open_circuit_rejections()
+        _attach_dlq_capture(composer, name, retry_stage_composed=True)
         _composer_cache[key] = composer
         logger.debug(
             "protect.composer_built",
@@ -734,6 +754,10 @@ def _build_sync_composer(
     IdempotencyHook)`` pair from :func:`_build_idempotency_stage`) is appended
     as a guard+hook bracket and forces the slow path — an idempotency-enabled
     call must never return a cached idempotency-less composer.
+
+    ``dlq`` without a retry stage arms the composer for unretried failures
+    under ``name``: the single attempt's failure or timeout is stored, where a
+    retry stage would otherwise have written the store verdict on exhaustion.
     """
     # Default-kwargs fast-path: 5 conditions match the canonical
     # ``protect("name", fn)`` profile → return the per-(name, timeout)
@@ -789,8 +813,11 @@ def _build_sync_composer(
     elif retry_cfg is not None:
         composer.add(RetryPolicy(config=retry_cfg))
     if dlq:
-        composer.add_sink(_DLQ_SINK)
-        composer.capture_open_circuit_rejections()
+        _attach_dlq_capture(
+            composer,
+            name,
+            retry_stage_composed=retry_cfg is not None or retry_policy is not None,
+        )
     logger.debug(
         "protect.composer_built",
         name=name,
@@ -867,6 +894,9 @@ def _build_async_composer(
     pair from :func:`_build_async_idempotency_stage`) is awaited **natively** by
     ``AsyncPolicyComposer`` — the async guard drives the awaitable
     ``AsyncIdempotencyGate`` with zero thread hop.
+
+    ``dlq`` without a retry stage arms the composer for unretried failures
+    under ``name``, exactly as the sync builder does.
     """
     composer: AsyncPolicyComposer[T] = AsyncPolicyComposer()
     if idempotency_stage is not None:
@@ -904,8 +934,11 @@ def _build_async_composer(
 
         composer.add(AsyncRetryPolicy.from_policy_config(retry_cfg))
     if dlq:
-        composer.add_sink(_DLQ_SINK)
-        composer.capture_open_circuit_rejections()
+        _attach_dlq_capture(
+            composer,
+            name,
+            retry_stage_composed=retry_cfg is not None or retry_policy is not None,
+        )
     logger.debug(
         "protect.composer_built",
         name=name,
@@ -1166,7 +1199,10 @@ def protect(  # verified-by: test_concurrent_duplicates_run_side_effect_exactly_
             Ignored when ``idempotency_key`` is ``None``.
         context: Optional ``PolicyContext`` carrying business identifiers
             (order_id, user_id, trace_id) for Guard/Hook/Sink propagation.
-            Required when ``idempotency_key`` is supplied.
+            Required when ``idempotency_key`` is supplied. It is read when a
+            failure is stored — for a call cut off by ``timeout=``, possibly
+            while ``fn`` is still running — so hand over copies, not objects
+            ``fn`` may still change.
 
     Returns:
         Whatever ``fn`` (or ``fallback``) returned on the succeeding branch.
@@ -1642,6 +1678,11 @@ def protected(
             ``False`` → skip extraction; pass ``context=None`` to ``protect()``.
             Use the ``False`` sentinel at privacy-sensitive callsites (e.g.,
             ``@protected("auth.verify_password", context_from=False)``).
+            A custom extract's context is read when a failure is stored — for
+            a synchronous call cut off by ``timeout=``, possibly while the
+            function is still running — so return copies, not objects the
+            function may still change. The default auto-extract already
+            snapshots its values.
     """
 
     def decorator(func: Callable[..., T]) -> Callable[..., T]:

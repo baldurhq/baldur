@@ -8,21 +8,21 @@
 
 ## What each surface captures
 
-The protected-call layer (`@dlq_protect`, `@protected(dlq=True)`) is framework-neutral and carries two capture triggers: **retry exhaustion** (the call ran and kept failing) and **open-circuit rejection** (the breaker refused to run it at all). Everything beyond that is Django-only, because Django is the one surface with a request-boundary middleware.
+The protected-call layer (`@dlq_protect`, `@protected(dlq=True)`) is framework-neutral and carries two capture triggers: **final failure** (the call ran and failed for good — after retry exhaustion, or on its single attempt when `retry=` is off, a timeout at the bound included) and **open-circuit rejection** (the breaker refused to run it at all). Everything beyond that is Django-only, because Django is the one surface with a request-boundary middleware.
 
 | Surface | What reaches the queue | How you turn it on |
 |---|---|---|
-| **Django** | Both layers: retry exhaustion + open-circuit rejection from the protected call, **plus** failures that happen before the view runs and a preemptive store while the middleware circuit is OPEN | Phase 1 (`@dlq_protect` / `@protected(dlq=True)`) **and** Phase 2 (`BALDUR_DLQ_ELIGIBLE_PATHS`) |
-| **Flask** | The protected-call layer: retry exhaustion + open-circuit rejection | Phase 1 only. Wrap the function that calls the failing dependency |
+| **Django** | Both layers: the final failure (retry exhaustion, or the single attempt when retry is off), a timeout at the bound on the no-retry profile, and the open-circuit rejection from the protected call, **plus** failures that happen before the view runs and a preemptive store while the middleware circuit is OPEN | Phase 1 (`@dlq_protect` / `@protected(dlq=True)`) **and** Phase 2 (`BALDUR_DLQ_ELIGIBLE_PATHS`) |
+| **Flask** | The protected-call layer: the final failure (retry exhaustion, or the single attempt when retry is off), a timeout at the bound on the no-retry profile, and the open-circuit rejection | Phase 1 only. Wrap the function that calls the failing dependency |
 | **FastAPI** | Same as Flask. The capture runs off the event loop, so a rejected request being parked does not stall the others | Phase 1 only |
 | **plain Python** (CLI, worker script) | Same as Flask. The call still raises `CircuitBreakerOpenError` to your code after the entry is written — capture does not change the function's contract | Phase 1 only |
 | **Celery** | The protected-call layer inside the task body, **plus** a terminal capture when a task exhausts its Celery retries | Phase 1 inside the task body, and/or `setup_baldur_signals()` for the terminal capture |
 
-Open-circuit capture is on by default wherever `dlq=True` is; `BALDUR_DLQ_OPEN_CIRCUIT_CAPTURE_ENABLED=false` turns it off and leaves only the retry-exhaustion trigger.
+Open-circuit capture is on by default wherever `dlq=True` is; `BALDUR_DLQ_OPEN_CIRCUIT_CAPTURE_ENABLED=false` turns it off and leaves only the final-failure trigger.
 
 The **How you turn it on** column covers capture only. Finishing the parked work is Phase 4, and it does not follow from capture: automatic replay is dispatched by a Celery task, so a surface without the Celery extra and a worker parks the work correctly and then leaves it for an operator. Read Phase 4 before treating recovery as hands-off.
 
-**What no surface captures today**: a call rejected by a full bulkhead, and a whole-sequence timeout. Both end the call without reaching the DLQ; on Django the resulting 5xx is picked up by Phase 2, elsewhere the work is lost.
+**What no surface captures today**: a call rejected by a full bulkhead, and a whole-sequence timeout on a call composed with `retry=`. Both end the call without reaching the DLQ; on Django the resulting 5xx is picked up by Phase 2, elsewhere the work is lost.
 
 **Two caveats worth knowing before you tune the middleware**:
 
@@ -37,7 +37,7 @@ Django ships **two independent DLQ-storage layers**:
 
 | Layer | Where it fires | What it catches |
 |---|---|---|
-| **View-level** (`@dlq_protect`, `@protected(dlq=True)`) | Inside the wrapped function body | Failures inside business logic — what the function raises after retry exhaustion, and what its circuit rejects while OPEN |
+| **View-level** (`@dlq_protect`, `@protected(dlq=True)`) | Inside the wrapped function body | Failures inside business logic — what the function raises for good (after retry exhaustion, or on its single attempt without `retry=`), and what its circuit rejects while OPEN |
 | **Middleware-level** (`BaldurMiddleware` + `BALDUR_DLQ_ELIGIBLE_PATHS`) | At the Django request boundary | Failures BEFORE the view runs (ORM connection setup, middleware-layer exceptions) AND preemptive store when middleware-CB is OPEN |
 
 The two layers are independent — view-CB is for business-logic flow control, middleware-CB is for cross-cutting infrastructure protection. **Both are needed on Django** to cover the pre-dispatch window. Cat 7B.2 reverse-verify (2026-05-12) measured the gap: 1-layer setup absorbs 78–97 % of storm failures with high between-run variance; 2-layer setup deterministically absorbs 100 % (run-to-run ZCARD identical) and sustains 19× higher RPS by short-circuiting view-retry via middleware-CB.
@@ -62,7 +62,7 @@ def _charge_impl(order_id, amount):
     ...
 ```
 
-`@dlq_protect` (or `@protected(dlq=True, retry=True)`) wraps the wrapped function body. When the body raises after retry exhaustion, the policy chain's `DLQSink` (`baldur.services.retry_handler.sinks`) hands the failure to `baldur.dlq.helpers.store_to_dlq`, which lands in `baldur:dlq:pending` in Redis. Once the function's circuit OPENs, later calls are rejected without running — those are parked too, under failure type `CIRCUIT_BREAKER_OPEN`. **What this catches**: anything raised AFTER the view's `def` line has been entered, plus anything the circuit refused to let in.
+`@dlq_protect` (or `@protected(dlq=True, retry=True)`) wraps the wrapped function body. When the body raises after retry exhaustion — or, without `retry=`, when the single attempt fails — the policy chain's `DLQSink` (`baldur.services.retry_handler.sinks`) hands the failure to `baldur.dlq.helpers.store_to_dlq`, which lands in `baldur:dlq:pending` in Redis. Once the function's circuit OPENs, later calls are rejected without running — those are parked too, under failure type `CIRCUIT_BREAKER_OPEN`. **What this catches**: anything raised AFTER the view's `def` line has been entered, plus anything the circuit refused to let in.
 
 **What this does NOT catch**: anything that fails BEFORE Django dispatches to the view function — including:
 - Connection-pool setup failures when the DB has just gone down

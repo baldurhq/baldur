@@ -99,7 +99,7 @@ for:
 | Circuit breaker | **Yes** | `circuit_breaker=False` to turn it off |
 | Retry with backoff | No | `retry=True` |
 | Fallback | No | pass `fallback=<callable>` |
-| Dead-letter queue | No | `dlq=True`, together with `retry=` |
+| Dead-letter queue | No | `dlq=True` |
 | Timeout (wall-clock bound) | No | pass `timeout=<seconds>` |
 | Idempotency (dedup) | No | pass `idempotency_key=...` |
 
@@ -141,14 +141,19 @@ how many attempts?) without catching an exception, reach one level down for
   and all, so a retried charge can charge twice. Pass `idempotency_key=` (or make the function
   idempotent yourself) when the work is not naturally safe to repeat. Baldur will not silently
   assume it is. See [Idempotency](../oss/idempotency.md).
-- **`dlq=True` captures the failure on either tier, but pair it with `retry=`.** On the ordinary
-  failure path it is the retry stage that arms the capture, so `dlq=True` by itself preserves
-  nothing when a call simply fails. (A call that an open breaker rejected is captured either way.)
-  The `@dlq_protect` preset pins both on, which is the setting you want when losing the work is not
-  an option. What does land is recorded with the context needed to run it again, the backlog is
-  browsable in the web console, and entries can be retried once the dependency recovers, with no PRO
-  required. PRO adds the operate-at-scale surface: one-click batch replay, adaptive pacing, and
-  archive/purge retention. See [what reaches the queue and how a replay re-runs it](dlq-replay.md).
+- **`dlq=True` captures the final failure on either tier, with or without `retry=`.** A call that
+  raised, that exceeded its `timeout=`, or that an open breaker rejected is recorded with the
+  context needed to run it again. With `retry=` the capture happens once the attempts are
+  exhausted, so pair the two only when the client does not already retry; an SDK's built-in
+  retries stay where they are. The `@dlq_protect` preset pins both on, which is the setting you
+  want when losing the work is not an option. The backlog is browsable in the web console, and
+  entries can be retried once the dependency recovers, with no PRO required. PRO adds the
+  operate-at-scale surface: one-click batch replay, adaptive pacing, and archive/purge retention.
+  Two limits: with `retry=` and `timeout=` together, a call the bound cuts off mid-retry is not
+  captured; and a second capture layer that fires for the same failure (the Celery signal hook on
+  the attempt Celery gives up on, the Django middleware on the resulting 5xx) records its own
+  entry as well, so use one layer per failure. See
+  [what reaches the queue and how a replay re-runs it](dlq-replay.md).
 - **The fallback runs *outside* the timeout clock, so keep it cheap and local.** The timeout bounds
   the inner call; when it fires, the fallback is what runs *next*, so it cannot be bounded by the
   same clock. Serve something fast — a cached value, a static default — not a second network call.

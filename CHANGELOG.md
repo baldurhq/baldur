@@ -10,6 +10,10 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Fixed
+
+- A `dlq=True` call that fails or times out without `retry=` is now parked in the dead-letter queue.
+
 ## [1.16.0] - 2026-09-28
 
 ### Added

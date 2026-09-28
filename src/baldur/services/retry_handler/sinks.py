@@ -4,8 +4,10 @@ Retry Policy Sinks — DLQ (Dead Letter Queue) terminal-failure handling.
 Sink implementation that stores a terminal failure to the DLQ. Two terminals
 reach it, each with its own store shape:
 
-- retry exhaustion — the call ran and kept failing; RetryPolicy decides whether
-  to store via the ``should_dlq`` flag (Dumb Sink pattern).
+- final failure — the call ran and failed for good; the ``should_dlq`` flag
+  decides whether to store (Dumb Sink pattern). A retry stage writes it when
+  its attempts run out; on a chain without one, a composer armed for unretried
+  failures writes it on the single attempt's failure or timeout.
 - open-circuit rejection — the call never ran because its breaker was OPEN.
   The composer delivers it only when armed for open-circuit capture, and this
   sink gates it on ``DLQSettings.open_circuit_capture_enabled``.
@@ -33,10 +35,11 @@ class DLQSink:
     """
     Sink that stores a terminal failure to the DLQ (Dead Letter Queue).
 
-    On the retry-exhaustion terminal it checks only the
+    On a final-failure terminal it checks only the
     PolicyResult.metadata["should_dlq"] flag: stores if True, skips if False
     (Dumb Sink pattern). RetryPolicy marks the store decision via
-    config.enable_dlq.
+    config.enable_dlq; on a chain with no retry stage, a composer armed via
+    ``capture_unretried_failures`` marks it instead.
 
     On the open-circuit rejection terminal there is no such flag — the call
     never ran — so the store is gated on
@@ -62,8 +65,9 @@ class DLQSink:
         Store a terminal failure to the DLQ.
 
         Args:
-            error: Terminal exception — a retry-exhausted failure, or the
-                ``CircuitBreakerOpenError`` of a rejected call
+            error: Terminal exception — a final failure (retry-exhausted, or
+                the single attempt's error or timeout when no retry stage
+                ran), or the ``CircuitBreakerOpenError`` of a rejected call
             context: PolicyContext (order_id, user_id, etc.)
             policy_result: Whole-pipeline result
 
