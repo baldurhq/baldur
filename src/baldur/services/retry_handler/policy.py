@@ -431,9 +431,9 @@ class RetryPolicy(ResiliencePolicy[T]):
         if reason == "rate_limit_deferred" and last_error is None:
             # The coordination key, not the domain: they diverge whenever
             # ``rate_limit_key`` overrides, and the deferral was computed
-            # against the former. ``extra_context()`` carries this key into
-            # audit and DLQ payloads, so the wrong one names a cooldown record
-            # that does not exist.
+            # against the former. The error names this key (its ``key``
+            # attribute and its message), so the wrong one points at a
+            # cooldown record that does not exist.
             last_error = RateLimitDeferredError(
                 key=rate_limit_key,
                 not_before=not_before,

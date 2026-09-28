@@ -56,9 +56,9 @@ class AdminAuthRequiredError(ConfigurationError):
     bind without an API key. Startup must fail loud rather than silently
     exposing an unauthenticated admin endpoint.
 
-    Inherits from ``ConfigurationError`` (and thus ``BaldurError``) per
-    CLAUDE.md Pattern Compliance. ``extra_context()`` exposes the offending
-    bind so structured log/alert pipelines can pivot on it.
+    Inherits from ``ConfigurationError`` (and thus ``BaldurError``).
+    ``extra_context()`` returns the offending bind for a caller that wants
+    to attach it to its own log or alert.
     """
 
     def __init__(self, message: str = "", *, bind: str | None = None) -> None:

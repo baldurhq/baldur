@@ -79,13 +79,15 @@ build when it is broken.
 
 **Conventions (code review, not mechanically checked):**
 
-- **Exception hierarchy** — domain errors inherit `BaldurError` and implement
-  `extra_context()`.
+- **Exception hierarchy** — domain errors inherit `BaldurError`.
 - **Protocol vs ABC** — `Protocol` for external contracts, `ABC` for internal
   adapter base classes.
 - **Other singletons** — stateful services expose a `get_*()` / `reset_*()`
   pair (the `reset_*` exists for test isolation).
-- **Enums** — `(str, Enum)` inheritance so values serialize to JSON directly.
+- **Enums** — new string enums use `StrEnum`, so a member renders as its value
+  in JSON, f-strings, and `str()` alike (a `(str, Enum)` member renders as
+  `Cls.MEMBER` in f-strings). Existing `(str, Enum)` classes are not migrated
+  in passing — their `str()` output would change.
 - **No hardcoded operational values** — timeouts, thresholds, retry counts, and
   TTLs resolve through `settings/` (`BALDUR_*`) or a named module-level
   constant, never an inline literal at the use site.
