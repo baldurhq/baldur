@@ -1,8 +1,18 @@
-"""End-to-end mock-based integration test for ``protect(dlq=True, retry=...)`` (#466).
+"""End-to-end mock-based integration test for ``protect(dlq=True)`` persistence (#466).
 
-Wires the full failure-path: ``protect()`` → ``PolicyComposer`` → ``RetryPolicy``
+Wires the full failure-path: ``protect()`` → ``PolicyComposer`` → (``RetryPolicy``)
 → ``DLQSink`` → ``store_to_dlq`` → outbox → worker → ``DLQService`` →
 ``InMemoryFailedOperationRepository``.
+
+Test Categories:
+    A. Retry stage present (``retry=``):
+        - retry exhaustion persists one entry under the retry domain
+        - the retry history travels into the entry's metadata
+        - a successful call persists nothing
+    B. No retry stage (``dlq=True`` without ``retry=``):
+        - a failed call persists one entry under the protect name
+        - a call the wall-clock bound cut off persists one entry
+        - an async failed call persists one entry through the same outbox
 
 Async dispatch (impl doc 486)
 -----------------------------

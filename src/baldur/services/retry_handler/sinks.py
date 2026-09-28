@@ -31,6 +31,17 @@ from baldur.models.dlq import OPEN_CIRCUIT_FAILURE_TYPE, POLICY_CHAIN_CAPTURE_SO
 logger = structlog.get_logger()
 
 
+def _user_id_column_value(raw: Any) -> int | None:
+    """The integer ``user_id`` column value for a context identifier, or None."""
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        # A non-integer id used to raise here and cost the whole entry.
+        return None
+
+
 class DLQSink:
     """
     Sink that stores a terminal failure to the DLQ (Dead Letter Queue).
@@ -213,6 +224,12 @@ class DLQSink:
         field wins when set; legacy direct callers that populate
         ``extra["user_id"]`` still work as a fallback. The named field is the
         contract documented at ``interfaces/resilience_policy.py``.
+
+        The DLQ ``user_id`` column is an integer on every backend, while the
+        context carries a string. An identifier with no integer form (a UUID,
+        ``"usr_7f3a"``) leaves the column empty instead of failing the store —
+        the entry is what must survive, and the call-site auto-extract keeps
+        the raw identifier in ``request_data``.
         """
         extra = context.extra if context and context.extra else {}
         if context is not None and context.user_id is not None:
@@ -221,7 +238,7 @@ class DLQSink:
             user_id_raw = extra.get("user_id")
         return {
             "entity_id": context.order_id if context else None,
-            "user_id": int(user_id_raw) if user_id_raw is not None else None,
+            "user_id": _user_id_column_value(user_id_raw),
             "snapshot_data": extra.get("snapshot_data", {}),
             "request_data": extra.get("request_data", {}),
             "response_data": extra.get("response_data", {}),

@@ -335,6 +335,73 @@ class TestExtractContextFieldsUserIdPrecedenceContract:
         assert fields["request_data"] == {"order_id": "o-1", "amount": 100}
 
 
+class TestNonIntegerUserIdBehavior:
+    """A user identifier with no integer form leaves the integer ``user_id``
+    column empty and never costs the entry — on both store branches."""
+
+    @pytest.mark.parametrize(
+        ("named_user_id", "extra_user_id"),
+        [("usr_7f3a", None), (None, "9b2c7e1a-uuid"), ("3.5", None)],
+        ids=["named_prefixed_id", "extra_uuid_like", "named_decimal_string"],
+    )
+    def test_non_integer_user_id_leaves_the_column_empty(
+        self, named_user_id, extra_user_id
+    ):
+        extra = {} if extra_user_id is None else {"user_id": extra_user_id}
+        ctx = PolicyContext(user_id=named_user_id, extra=extra)
+
+        fields = DLQSink._extract_context_fields(ctx)
+
+        assert fields["user_id"] is None
+
+    def test_final_failure_with_a_non_integer_user_id_is_stored(self):
+        # Given a final failure whose context carries a prefixed user id
+        ctx = PolicyContext(
+            user_id="usr_7f3a",
+            extra={"request_data": {"user_id": "usr_7f3a"}},
+        )
+        result = PolicyResult(
+            outcome=PolicyOutcome.FAILURE,
+            total_attempts=1,
+            metadata={"should_dlq": True, "domain": "billing"},
+        )
+
+        # When the sink handles it
+        with patch(
+            "baldur.services.retry_handler.sinks.store_to_dlq",
+            autospec=True,
+            return_value=DLQEntryResult.created("dlq-u1"),
+        ) as mock_store:
+            ret = DLQSink().handle_failure(RuntimeError("down"), ctx, result)
+
+        # Then the entry is stored, the raw id kept in its request data
+        assert ret == "dlq-u1"
+        kwargs = mock_store.call_args.kwargs
+        assert kwargs["user_id"] is None
+        assert kwargs["request_data"] == {"user_id": "usr_7f3a"}
+
+    def test_open_circuit_rejection_with_a_non_integer_user_id_is_stored(self):
+        ctx = PolicyContext(user_id="usr_7f3a")
+
+        with (
+            patch(
+                "baldur.settings.dlq.get_dlq_settings",
+                return_value=_capture_settings(),
+            ),
+            patch(
+                "baldur.services.retry_handler.sinks.store_to_dlq",
+                autospec=True,
+                return_value=DLQEntryResult.created("dlq-u2"),
+            ) as mock_store,
+        ):
+            ret = DLQSink().handle_failure(
+                CircuitBreakerOpenError("payment_api"), ctx, _rejection_result()
+            )
+
+        assert ret == "dlq-u2"
+        assert mock_store.call_args.kwargs["user_id"] is None
+
+
 # =============================================================================
 # DLQSink — open-circuit rejection terminal
 # =============================================================================

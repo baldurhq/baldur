@@ -156,6 +156,24 @@ class TestProtectedUnretriedDlqCaptureBehavior:
         assert kwargs["metadata"]["max_attempts"] == 1
         assert kwargs["metadata"]["retry_history"] == []
 
+    def test_sync_raise_with_a_non_integer_user_id_is_still_parked(self, store):
+        """The DLQ ``user_id`` column is an integer; a ``usr_...`` id leaves it
+        empty and the entry keeps the id in its request data (the sink shares
+        this extraction with the async path)."""
+
+        @protected("svc.charge", dlq=True, circuit_breaker=False, timeout=None)
+        def charge(order_id: str, user_id: str) -> str:
+            raise RuntimeError("upstream 500")
+
+        with pytest.raises(RuntimeError):
+            charge("o-1", "usr_7f3a")
+
+        store.assert_called_once()
+        kwargs = store.call_args.kwargs
+        assert kwargs["domain"] == "svc.charge"
+        assert kwargs["user_id"] is None
+        assert kwargs["request_data"] == {"order_id": "o-1", "user_id": "usr_7f3a"}
+
     # --- (b) the wall-clock bound cuts the call off -------------------------
 
     def test_sync_call_cut_off_by_the_bound_is_parked(self, store):
@@ -230,8 +248,10 @@ class TestProtectedUnretriedDlqCaptureBehavior:
     # --- (d) a retry stage decides for itself -------------------------------
 
     def test_sync_retry_verdict_false_parks_nothing(self, store):
-        """A pre-built retry stage that declines keeps its verdict — the facade
-        does not arm a composer that has a retry stage."""
+        """A pre-built retry stage that declines keeps its verdict end to end,
+        so the call is not parked. The facade's own no-arming condition is
+        pinned by the retry-present timeout tests below, where no stage
+        verdict exists to decide the outcome first."""
 
         @protected(
             "svc.declines",
