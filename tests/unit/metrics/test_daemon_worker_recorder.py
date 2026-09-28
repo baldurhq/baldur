@@ -6,16 +6,19 @@ Test targets:
     - _DaemonWorkerCollector.collect()
     - record_daemon_worker_restart (lifetime counter)
     - DaemonWorkerMetricRecorder facade slot in BaldurMetrics
+    - the fork filter both readers apply to ``fork_source_only`` handles
 
 UNIT_TEST_GUIDELINES.md compliance:
 - Contract: hardcoded metric names, gauge labels
 - Behavior: register/unregister flow, observer injection side-effect,
-  scrape gauge values reflect handle state
+  scrape gauge values reflect handle state, fork-filter decision table
 """
 
 from __future__ import annotations
 
+import os
 import threading
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -398,3 +401,112 @@ class TestDaemonWorkerRecorderFacadeContract:
         metrics = BaldurMetrics()
         assert hasattr(metrics, "daemon_workers")
         assert isinstance(metrics.daemon_workers, DaemonWorkerMetricRecorder)
+
+
+# =============================================================================
+# Behavior — fork filter for parent-only workers
+# =============================================================================
+
+# (fork_source_only, handle built in this process, reported here)
+_FORK_FILTER_TABLE = [
+    (True, True, True),
+    (True, False, False),
+    (False, True, True),
+    (False, False, True),
+]
+_FORK_FILTER_IDS = [
+    "parent_only_in_its_own_process",
+    "parent_only_seen_from_a_fork_child",
+    "shared_in_its_own_process",
+    "shared_seen_from_a_fork_child",
+]
+
+
+def _handle_as_seen(*, fork_source_only: bool, built_here: bool) -> DaemonWorkerHandle:
+    """A handle as a process sees it — built here, or inherited from a parent."""
+    handle = DaemonWorkerHandle(
+        thread=_dummy_thread(),
+        tick_interval_seconds=1.0,
+        fork_source_only=fork_source_only,
+    )
+    if not built_here:
+        handle.owner_pid = os.getpid() + 1
+    return handle
+
+
+class TestDaemonWorkerRegistryForkFilterBehavior:
+    """Both registry readers skip a handle only when it is flagged parent-only
+    AND was built by another process.
+
+    A fork child inherits the registry entry but never the thread; for a worker
+    that runs only in the parent, reporting it would raise a false DEAD alarm
+    and a respawn would start the parent's loop in the child. Every other
+    handle — including one the child re-owns, or one whose component the child
+    uses but whose thread died — must keep being reported.
+    """
+
+    @pytest.mark.parametrize(
+        ("fork_source_only", "built_here", "reported"),
+        _FORK_FILTER_TABLE,
+        ids=_FORK_FILTER_IDS,
+    )
+    def test_registry_snapshot_applies_the_fork_filter(
+        self, fork_source_only, built_here, reported
+    ):
+        from baldur.metrics.recorders.daemon_worker import (
+            get_registered_daemon_workers,
+            register_daemon_worker,
+        )
+
+        register_daemon_worker(
+            "fork-filter",
+            _handle_as_seen(fork_source_only=fork_source_only, built_here=built_here),
+        )
+
+        assert ("fork-filter" in get_registered_daemon_workers()) is reported
+
+    @pytest.mark.parametrize(
+        ("fork_source_only", "built_here", "reported"),
+        _FORK_FILTER_TABLE,
+        ids=_FORK_FILTER_IDS,
+    )
+    def test_scrape_applies_the_fork_filter(
+        self, fork_source_only, built_here, reported
+    ):
+        """The admin ``/metrics`` scrape agrees with the probe's snapshot."""
+        from baldur.metrics.recorders.daemon_worker import (
+            PROMETHEUS_AVAILABLE,
+            _DaemonWorkerCollector,
+            register_daemon_worker,
+        )
+
+        if not PROMETHEUS_AVAILABLE:
+            pytest.skip("prometheus_client not installed")
+
+        register_daemon_worker(
+            "fork-filter",
+            _handle_as_seen(fork_source_only=fork_source_only, built_here=built_here),
+        )
+
+        scraped = {
+            sample.labels.get("name")
+            for family in _DaemonWorkerCollector().collect()
+            for sample in family.samples
+        }
+        assert ("fork-filter" in scraped) is reported
+
+    def test_a_double_answering_every_attribute_is_never_read_as_parent_only(self):
+        """Only a literal ``True`` flag hides a handle: a ``MagicMock`` answers
+        ``fork_source_only`` with a truthy mock, and its pid names another
+        process, so the identity check is the only thing that keeps it listed.
+        """
+        from baldur.metrics.recorders.daemon_worker import (
+            get_registered_daemon_workers,
+            register_daemon_worker,
+        )
+
+        double = MagicMock(spec=DaemonWorkerHandle)
+        double.owner_pid = os.getpid() + 1
+        register_daemon_worker("mock-handle", double)
+
+        assert get_registered_daemon_workers()["mock-handle"] is double

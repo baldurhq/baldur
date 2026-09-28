@@ -10,10 +10,12 @@ Test Categories:
     B. Behavior — heartbeat / observe_iteration / record_crash side effects
     C. Behavior — __post_init__ derivation + validation
     D. Contract — reset_after_fork drops inherited observations, keeps wiring
+    E. Contract — fork_source_only / owner_pid (parent-only workers)
 """
 
 from __future__ import annotations
 
+import os
 import threading
 
 import pytest
@@ -271,3 +273,57 @@ class TestDaemonWorkerHandleForkResetContract:
 
         for name in self.CLEARED_FIELDS:
             assert getattr(handle, name) == getattr(fresh, name), name
+
+
+# =============================================================================
+# E. Contract — fork_source_only / owner_pid (parent-only workers)
+# =============================================================================
+
+
+class TestDaemonWorkerHandleForkFieldsContract:
+    """The two fields the registry readers use to hide a parent-only worker.
+
+    ``fork_source_only`` is the component's own declaration and defaults off,
+    so every existing handle keeps being reported everywhere. ``owner_pid`` is
+    stamped at construction and is not the caller's to set.
+    """
+
+    def test_fork_source_only_defaults_to_false(self):
+        handle = DaemonWorkerHandle(thread=_dummy_thread(), tick_interval_seconds=1.0)
+
+        assert handle.fork_source_only is False
+
+    def test_fork_source_only_is_an_init_argument(self):
+        handle = DaemonWorkerHandle(
+            thread=_dummy_thread(), tick_interval_seconds=1.0, fork_source_only=True
+        )
+
+        assert handle.fork_source_only is True
+
+    def test_owner_pid_is_the_constructing_process(self):
+        handle = DaemonWorkerHandle(thread=_dummy_thread(), tick_interval_seconds=1.0)
+
+        assert handle.owner_pid == os.getpid()
+
+    def test_owner_pid_is_not_an_init_argument(self):
+        """A caller cannot claim another process's handle as its own."""
+        with pytest.raises(TypeError):
+            DaemonWorkerHandle(
+                thread=_dummy_thread(), tick_interval_seconds=1.0, owner_pid=1
+            )
+
+    def test_owner_pid_is_left_out_of_repr_and_equality(self):
+        """Two handles describing the same worker compare equal whichever
+        process holds them, and the pid does not clutter log lines.
+        """
+        thread = _dummy_thread()
+        first = DaemonWorkerHandle(
+            thread=thread, tick_interval_seconds=1.0, last_heartbeat_at=100.0
+        )
+        second = DaemonWorkerHandle(
+            thread=thread, tick_interval_seconds=1.0, last_heartbeat_at=100.0
+        )
+        second.owner_pid = first.owner_pid + 1
+
+        assert first == second
+        assert "owner_pid" not in repr(first)

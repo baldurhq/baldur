@@ -1,5 +1,5 @@
 """
-LeaderScheduler 단위 테스트.
+LeaderScheduler unit tests.
 
 packages/baldur-python/tests/unit/coordination/test_scheduler.py
 """
@@ -51,7 +51,7 @@ def mock_leader_elector():
 
 @pytest.fixture
 def scheduler(mock_leader_elector):
-    """LeaderScheduler 인스턴스."""
+    """LeaderScheduler instance."""
     with (
         patch(
             "baldur.coordination.scheduler.get_leader_elector",
@@ -73,15 +73,15 @@ def scheduler(mock_leader_elector):
 
 
 # =============================================================================
-# ScheduledJob 테스트
+# ScheduledJob tests
 # =============================================================================
 
 
 class TestScheduledJob:
-    """ScheduledJob 데이터클래스 테스트."""
+    """ScheduledJob dataclass tests."""
 
     def test_should_create_with_required_fields(self):
-        """필수 필드로 생성되어야 한다."""
+        """Creates with the required fields."""
 
         def job_func():
             pass
@@ -101,7 +101,7 @@ class TestScheduledJob:
         assert job.last_run is None
 
     def test_should_track_run_statistics(self):
-        """실행 통계를 추적해야 한다."""
+        """Tracks run statistics."""
         job = ScheduledJob(
             name="test-job",
             func=lambda: None,
@@ -114,7 +114,7 @@ class TestScheduledJob:
         assert job.error_count == 2
 
     def test_should_support_disabled_state(self):
-        """비활성화 상태를 지원해야 한다."""
+        """Supports the disabled state."""
         job = ScheduledJob(
             name="test-job",
             func=lambda: None,
@@ -126,15 +126,15 @@ class TestScheduledJob:
 
 
 # =============================================================================
-# 초기화 테스트
+# Initialization tests
 # =============================================================================
 
 
 class TestLeaderSchedulerInitialization:
-    """초기화 테스트."""
+    """Initialization tests."""
 
     def test_should_initialize_with_resource_name(self, mock_leader_elector):
-        """리소스 이름으로 초기화되어야 한다."""
+        """Initializes with the resource name."""
         with (
             patch(
                 "baldur.coordination.scheduler.get_leader_elector",
@@ -149,7 +149,7 @@ class TestLeaderSchedulerInitialization:
         assert sched._resource_name == "my-scheduler"
 
     def test_should_register_leader_callbacks(self, mock_leader_elector):
-        """리더 콜백이 등록되어야 한다."""
+        """Registers the leader callbacks."""
         with (
             patch(
                 "baldur.coordination.scheduler.get_leader_elector",
@@ -165,20 +165,20 @@ class TestLeaderSchedulerInitialization:
         assert mock_leader_elector.on_lose_leader.called
 
     def test_should_have_empty_jobs_initially(self, scheduler):
-        """초기에는 작업이 없어야 한다."""
+        """Starts with no jobs."""
         assert len(scheduler.jobs) == 0
 
 
 # =============================================================================
-# 작업 등록 테스트
+# Job registration tests
 # =============================================================================
 
 
 class TestLeaderSchedulerJobRegistration:
-    """작업 등록 테스트."""
+    """Job registration tests."""
 
     def test_should_add_job(self, scheduler):
-        """작업을 추가해야 한다."""
+        """Adds a job."""
         executed = []
 
         def my_job():
@@ -196,7 +196,7 @@ class TestLeaderSchedulerJobRegistration:
         assert jobs["my-job"].interval_seconds == 60.0
 
     def test_should_register_job_via_decorator(self, scheduler):
-        """데코레이터로 작업을 등록해야 한다."""
+        """Registers a job via the decorator."""
 
         @scheduler.job(interval_seconds=30.0)
         def cleanup_task():
@@ -208,7 +208,7 @@ class TestLeaderSchedulerJobRegistration:
         assert jobs["cleanup_task"].interval_seconds == 30.0
 
     def test_should_register_job_via_decorator_with_custom_name(self, scheduler):
-        """데코레이터로 커스텀 이름의 작업을 등록해야 한다."""
+        """Registers a job with a custom name via the decorator."""
 
         @scheduler.job(name="custom-cleanup", interval_seconds=30.0)
         def cleanup_task():
@@ -219,7 +219,7 @@ class TestLeaderSchedulerJobRegistration:
         assert "custom-cleanup" in jobs
 
     def test_should_overwrite_job_with_same_name(self, scheduler):
-        """동일한 이름의 작업은 덮어쓰기 되어야 한다."""
+        """A job with the same name overwrites the previous one."""
         scheduler.add_job(
             name="my-job",
             func=lambda: None,
@@ -237,7 +237,7 @@ class TestLeaderSchedulerJobRegistration:
         assert jobs["my-job"].interval_seconds == 30.0
 
     def test_should_remove_job(self, scheduler):
-        """작업을 제거해야 한다."""
+        """Removes a job."""
         scheduler.add_job(
             name="my-job",
             func=lambda: None,
@@ -251,7 +251,7 @@ class TestLeaderSchedulerJobRegistration:
         assert len(scheduler.jobs) == 0
 
     def test_should_enable_job(self, scheduler):
-        """작업을 활성화해야 한다."""
+        """Enables a job."""
         scheduler.add_job(
             name="my-job",
             func=lambda: None,
@@ -266,7 +266,7 @@ class TestLeaderSchedulerJobRegistration:
         assert scheduler.jobs["my-job"].enabled
 
     def test_should_disable_job(self, scheduler):
-        """작업을 비활성화해야 한다."""
+        """Disables a job."""
         scheduler.add_job(
             name="my-job",
             func=lambda: None,
@@ -281,34 +281,34 @@ class TestLeaderSchedulerJobRegistration:
 
 
 # =============================================================================
-# 시작/중지 테스트
+# Start/stop tests
 # =============================================================================
 
 
 class TestLeaderSchedulerStartStop:
-    """시작/중지 테스트."""
+    """Start/stop tests."""
 
     def test_should_start_elector_on_start(self, scheduler, mock_leader_elector):
-        """start() 호출 시 elector가 시작되어야 한다."""
+        """start() starts the elector."""
         scheduler.start()
 
         assert mock_leader_elector.start.called
 
     def test_should_be_running_after_start(self, scheduler):
-        """start() 후에는 실행 중이어야 한다."""
+        """Running after start()."""
         scheduler.start()
 
         assert scheduler._running
 
     def test_should_stop_elector_on_stop(self, scheduler, mock_leader_elector):
-        """stop() 호출 시 elector가 중지되어야 한다."""
+        """stop() stops the elector."""
         scheduler.start()
         scheduler.stop()
 
         assert mock_leader_elector.stop.called
 
     def test_should_not_be_running_after_stop(self, scheduler):
-        """stop() 후에는 실행 중이 아니어야 한다."""
+        """Not running after stop()."""
         scheduler.start()
         scheduler.stop()
 
@@ -316,15 +316,15 @@ class TestLeaderSchedulerStartStop:
 
 
 # =============================================================================
-# 작업 실행 테스트
+# Job execution tests
 # =============================================================================
 
 
 class TestLeaderSchedulerJobExecution:
-    """작업 실행 테스트."""
+    """Job execution tests."""
 
     def test_should_execute_job_when_leader(self, mock_leader_elector):
-        """리더일 때 작업을 실행해야 한다."""
+        """Runs jobs while the leader."""
         executed = []
 
         def my_job():
@@ -349,12 +349,12 @@ class TestLeaderSchedulerJobExecution:
 
         sched.start()
 
-        # 리더가 됨
+        # Become the leader
         mock_leader_elector.is_leader.return_value = True
         for callback in mock_leader_elector._on_become_callbacks:
             callback()
 
-        time.sleep(0.3)  # 실행 대기
+        time.sleep(0.3)  # Let the job run
 
         sched.stop()
 
@@ -363,7 +363,7 @@ class TestLeaderSchedulerJobExecution:
     def test_should_not_execute_job_when_not_leader(
         self, scheduler, mock_leader_elector
     ):
-        """리더가 아닐 때는 작업을 실행하지 않아야 한다."""
+        """Does not run jobs while not the leader."""
         executed = []
 
         def my_job():
@@ -377,7 +377,7 @@ class TestLeaderSchedulerJobExecution:
 
         scheduler.start()
 
-        # 리더가 아님
+        # Not the leader
         mock_leader_elector.is_leader.return_value = False
 
         time.sleep(0.2)
@@ -387,7 +387,7 @@ class TestLeaderSchedulerJobExecution:
         assert len(executed) == 0
 
     def test_should_not_execute_disabled_job(self, mock_leader_elector):
-        """비활성화된 작업은 실행하지 않아야 한다."""
+        """Does not run a disabled job."""
         executed = []
 
         def my_job():
@@ -424,7 +424,7 @@ class TestLeaderSchedulerJobExecution:
         assert len(executed) == 0
 
     def test_should_track_run_count(self, mock_leader_elector):
-        """실행 횟수를 추적해야 한다."""
+        """Tracks the run count."""
         with (
             patch(
                 "baldur.coordination.scheduler.get_leader_elector",
@@ -456,10 +456,10 @@ class TestLeaderSchedulerJobExecution:
         assert jobs["test-job"].run_count >= 1
 
     def test_should_track_error_count(self, mock_leader_elector):
-        """에러 횟수를 추적해야 한다."""
+        """Tracks the error count."""
 
         def failing_job():
-            raise Exception("작업 오류")
+            raise Exception("job error")
 
         with (
             patch(
@@ -492,7 +492,7 @@ class TestLeaderSchedulerJobExecution:
         assert jobs["failing-job"].error_count >= 1
 
     def test_should_update_last_run_time(self, mock_leader_elector):
-        """마지막 실행 시간을 업데이트해야 한다."""
+        """Updates the last run time."""
         with (
             patch(
                 "baldur.coordination.scheduler.get_leader_elector",
@@ -524,7 +524,7 @@ class TestLeaderSchedulerJobExecution:
         assert jobs["test-job"].last_run is not None
 
     def test_should_stop_executing_on_lose_leader(self, mock_leader_elector):
-        """리더십을 잃으면 작업 실행을 중지해야 한다."""
+        """Stops running jobs after losing leadership."""
         executed = []
 
         def my_job():
@@ -549,7 +549,7 @@ class TestLeaderSchedulerJobExecution:
 
         sched.start()
 
-        # 리더가 됨
+        # Become the leader
         mock_leader_elector.is_leader.return_value = True
         for callback in mock_leader_elector._on_become_callbacks:
             callback()
@@ -557,7 +557,7 @@ class TestLeaderSchedulerJobExecution:
         time.sleep(0.25)
         count_before_lose = len(executed)
 
-        # 리더십 상실
+        # Lose leadership
         mock_leader_elector.is_leader.return_value = False
         for callback in mock_leader_elector._on_lose_callbacks:
             callback()
@@ -567,20 +567,20 @@ class TestLeaderSchedulerJobExecution:
 
         sched.stop()
 
-        # 리더십 상실 후에는 실행되지 않아야 함
+        # Nothing runs after leadership is lost
         assert count_after_lose == count_before_lose
 
 
 # =============================================================================
-# 작업 통계 테스트
+# Job statistics tests
 # =============================================================================
 
 
 class TestLeaderSchedulerStats:
-    """작업 통계 테스트."""
+    """Job statistics tests."""
 
     def test_should_return_all_job_stats(self, scheduler):
-        """모든 작업 통계를 반환해야 한다."""
+        """Returns the stats of every job."""
         scheduler.add_job("job1", lambda: None, 60.0)
         scheduler.add_job("job2", lambda: None, 30.0)
         scheduler.add_job("job3", lambda: None, 120.0)
@@ -593,7 +593,7 @@ class TestLeaderSchedulerStats:
         assert "job3" in stats
 
     def test_should_return_job_stats_details(self, scheduler):
-        """작업 통계 세부사항을 반환해야 한다."""
+        """Returns the job stats details."""
         scheduler.add_job("job1", lambda: None, 60.0, enabled=True)
         scheduler.add_job("job2", lambda: None, 30.0, enabled=False)
 
@@ -602,3 +602,31 @@ class TestLeaderSchedulerStats:
         assert stats["job1"]["enabled"] is True
         assert stats["job1"]["interval_seconds"] == 60.0
         assert stats["job2"]["enabled"] is False
+
+
+# =============================================================================
+# Daemon-worker handle
+# =============================================================================
+
+
+class TestLeaderSchedulerDaemonHandleContract:
+    """The leader loop's handle is declared parent-only."""
+
+    def test_leader_loop_handle_is_fork_source_only(
+        self, scheduler, mock_leader_elector
+    ):
+        """The loop runs only in the process that won leadership — a pre-fork
+        server's master — so a forked worker must neither report it nor call
+        the respawn callback that would start a second leader loop there.
+        """
+        from baldur.metrics.recorders.daemon_worker import (
+            get_registered_daemon_workers,
+        )
+
+        scheduler.start()
+        for callback in mock_leader_elector._on_become_callbacks:
+            callback()
+
+        handle = get_registered_daemon_workers()["Scheduler-scheduler-test"]
+        assert handle.fork_source_only is True
+        assert handle.restart_callback == scheduler._spawn_scheduler_thread

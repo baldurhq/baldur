@@ -22,12 +22,30 @@ A further helper answers a different question — whether some *other* process i
 still alive (``pid_alive``) — and decides whether a PID-stamped WAL file may be
 absorbed or reclaimed. ``fork_repaired`` marks the entry points at which a
 component re-owns its fork-inherited state.
+
+The last group covers what a fork child inherits from the threads it does not
+have: ``fork_safe_lock()`` / ``fork_safe_rlock()`` / ``register_fork_safe_lock()``
+register locks for the child step that re-initializes them, and the before-fork
+step holds each stream handler's lock so no parent thread is inside a log write
+when the child is created. The steps are module functions, so they are driven
+directly here without forking; the real-fork compositions live in the
+integration suite. ``_at_fork_reinit`` exists only where ``fork()`` does, so the
+registration and repair cases are POSIX-only.
 """
 
 from __future__ import annotations
 
+import io
+import logging
+import logging.handlers
 import os
+import queue
+import subprocess
 import sys
+import textwrap
+import threading
+import weakref
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -35,6 +53,8 @@ import pytest
 from baldur.core import process_utils
 from baldur.core.process_utils import (
     fork_repaired,
+    fork_safe_lock,
+    fork_safe_rlock,
     is_celery_worker_main,
     is_celery_worker_process,
     is_celery_worker_serving,
@@ -45,9 +65,21 @@ from baldur.core.process_utils import (
     mark_celery_worker_main,
     mark_celery_worker_serving,
     pid_alive,
+    register_fork_safe_lock,
 )
 
 _SERVING_ENV_VAR = process_utils._CELERY_WORKER_SERVING_ENV_VAR
+
+_LOCK_TYPE = type(threading.Lock())
+_RLOCK_TYPE = type(threading.RLock())
+
+# CPython builds the at-fork re-initializer only where fork() exists, so on
+# Windows nothing is registered and there is nothing to repair.
+_HAS_AT_FORK_REINIT = hasattr(threading.Lock(), "_at_fork_reinit")
+posix_fork_repair = pytest.mark.skipif(
+    not _HAS_AT_FORK_REINIT,
+    reason="locks have no _at_fork_reinit where fork() does not exist",
+)
 
 
 @pytest.fixture
@@ -606,3 +638,985 @@ class TestForkRepairedDecoratorContract:
 
         assert Subject.owner_entry.__name__ == "owner_entry"
         assert module_entry.__name__ == "module_entry"
+
+
+# =============================================================================
+# Fork-safe locks — shared doubles
+# =============================================================================
+
+
+def _is_registered(lock: object) -> bool:
+    """Is ``lock`` in the registry the child repair walks?"""
+    return any(entry is lock for entry in list(process_utils._fork_safe_locks))
+
+
+def _free_from_another_thread(lock) -> bool:
+    """Return True if a thread holding nothing can take ``lock`` right now."""
+    outcome: list[bool] = []
+
+    def probe() -> None:
+        acquired = lock.acquire(blocking=False)
+        if acquired:
+            lock.release()
+        outcome.append(acquired)
+
+    prober = threading.Thread(target=probe)
+    prober.start()
+    prober.join(timeout=5)
+    return outcome == [True]
+
+
+def _frames() -> list:
+    """The calling thread's stack of before-fork frames (empty if none)."""
+    return list(getattr(process_utils._fork_log_holds, "stack", None) or [])
+
+
+class _HeldByAnotherThread:
+    """Hold ``lock`` on a helper thread for the duration of a ``with`` block.
+
+    The helper stands in for a parent thread that does not survive ``fork()``.
+    Its own release may find the lock already re-initialized under it — the
+    state a fork child is in — which raises ``RuntimeError`` and is expected.
+    """
+
+    def __init__(self, lock) -> None:
+        self._lock = lock
+        self._held = threading.Event()
+        self._release = threading.Event()
+        self._thread = threading.Thread(target=self._hold, daemon=True)
+
+    def _hold(self) -> None:
+        self._lock.acquire()
+        self._held.set()
+        self._release.wait(timeout=10)
+        try:
+            self._lock.release()
+        except RuntimeError:
+            pass
+
+    def __enter__(self) -> _HeldByAnotherThread:
+        self._thread.start()
+        assert self._held.wait(timeout=5), "helper thread never took the lock"
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._release.set()
+        self._thread.join(timeout=5)
+
+
+class _LockLike:
+    """Answers ``_at_fork_reinit`` like a lock but is not a C lock.
+
+    Weak-referenceable, so only the registration's type check — not the
+    attribute probe, not the weak-set insert — can keep it out.
+    """
+
+    def __init__(self) -> None:
+        self.reinitialized = False
+
+    def _at_fork_reinit(self) -> None:
+        self.reinitialized = True
+
+
+class _RaisingReinit:
+    """A registry entry whose re-initializer raises."""
+
+    def __init__(self) -> None:
+        self.touched = False
+
+    def _at_fork_reinit(self) -> None:
+        self.touched = True
+        raise RuntimeError("re-initializer failed")
+
+
+class _RaisingOwnershipQuery:
+    """A registry entry whose ``_is_owned`` raises before any repair."""
+
+    def __init__(self) -> None:
+        self.touched = False
+
+    def _is_owned(self) -> bool:
+        self.touched = True
+        raise RuntimeError("ownership query failed")
+
+    def _at_fork_reinit(self) -> None:
+        raise AssertionError("the repair must not continue past a failed query")
+
+
+class _UnreadableRegistry:
+    """A registry that raises when the repair tries to snapshot it."""
+
+    def __init__(self) -> None:
+        self.touched = False
+
+    def __iter__(self):
+        self.touched = True
+        raise RuntimeError("registry unreadable")
+
+
+class _WaitSignallingLock:
+    """Delegates to a lock and signals once a caller is actually waiting on it.
+
+    The signal is raised only for a blocking acquire that found the lock
+    taken, so a caller that tried once without waiting never raises it.
+    """
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self.waiting = threading.Event()
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if self._inner.acquire(blocking=False):
+            return True
+        if not blocking:
+            return False
+        self.waiting.set()
+        return self._inner.acquire(True, timeout)
+
+    def release(self) -> None:
+        self._inner.release()
+
+    # logging takes its module lock with ``with`` from 3.13 on.
+    def __enter__(self) -> _WaitSignallingLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.release()
+
+
+class _FakeMonotonicClock:
+    """The only clock the before-fork step reads, advanced by the lock doubles."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+class _TimedOutLock:
+    """A handler lock whose write never finishes: each wait runs out its timeout."""
+
+    def __init__(self, clock: _FakeMonotonicClock) -> None:
+        self._clock = clock
+        self.timeouts: list[float] = []
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        self.timeouts.append(timeout)
+        self._clock.now += timeout
+        return False
+
+    def release(self) -> None:
+        raise AssertionError("a lock that was never acquired was released")
+
+
+class _ImmediatelyFreeLock:
+    """A handler lock no thread holds: acquired at once, in no clock time."""
+
+    def __init__(self) -> None:
+        self.timeouts: list[float] = []
+        self.releases = 0
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        self.timeouts.append(timeout)
+        return True
+
+    def release(self) -> None:
+        self.releases += 1
+
+
+class _CountingLock:
+    """Delegates to a lock and counts every acquire attempt, from any thread."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self.acquire_calls = 0
+
+    def acquire(self, *args, **kwargs) -> bool:
+        self.acquire_calls += 1
+        return self._inner.acquire(*args, **kwargs)
+
+    def release(self) -> None:
+        self._inner.release()
+
+    def __enter__(self) -> _CountingLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.release()
+
+
+class _OrderRecordingLock:
+    """Delegates to a lock and records the test thread's acquires and releases.
+
+    Other threads go through untouched, so a stray log call elsewhere in the
+    process cannot enter the record.
+    """
+
+    def __init__(self, inner, name: str, events: list, thread_id: int) -> None:
+        self._inner = inner
+        self._name = name
+        self._events = events
+        self._thread_id = thread_id
+
+    def acquire(self, *args, **kwargs) -> bool:
+        acquired = self._inner.acquire(*args, **kwargs)
+        if acquired and threading.get_ident() == self._thread_id:
+            self._events.append((self._name, "acquire"))
+        return acquired
+
+    def release(self) -> None:
+        if threading.get_ident() == self._thread_id:
+            self._events.append((self._name, "release"))
+        self._inner.release()
+
+    def __enter__(self) -> _OrderRecordingLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.release()
+
+    def __getattr__(self, name: str):
+        return getattr(self._inner, name)
+
+
+@pytest.fixture
+def isolated_handlers(monkeypatch):
+    """Point the before-fork walk at the handlers a test built, and only those.
+
+    ``logging._handlerList`` holds a weak reference to every handler the
+    process ever created, pytest's own included; a lock some other handler
+    holds would otherwise spend the shared deadline before the walk reached
+    the test's handler.
+    """
+
+    def install(*handlers: logging.Handler) -> None:
+        monkeypatch.setattr(
+            logging, "_handlerList", [weakref.ref(handler) for handler in handlers]
+        )
+
+    return install
+
+
+@pytest.fixture
+def clean_fork_log_stack():
+    """Drop any before-fork frame a failing test left on this thread."""
+    yield
+    stack = getattr(process_utils._fork_log_holds, "stack", None)
+    if stack:
+        stack.clear()
+
+
+# =============================================================================
+# Fork-safe locks — the factories and the registration
+# =============================================================================
+
+
+class TestForkSafeLockFactoryContract:
+    """The factories hand back the plain C lock, registered for the child repair.
+
+    No wrapper: acquiring the lock must cost what acquiring any lock costs, and
+    code that checks the lock's type keeps working.
+    """
+
+    @pytest.mark.parametrize(
+        ("factory", "expected_type"),
+        [(fork_safe_lock, _LOCK_TYPE), (fork_safe_rlock, _RLOCK_TYPE)],
+        ids=["lock", "rlock"],
+    )
+    def test_factory_returns_the_raw_c_lock(self, factory, expected_type):
+        """The exact stdlib type — not a subclass, not a proxy."""
+        assert type(factory()) is expected_type
+
+    @posix_fork_repair
+    @pytest.mark.parametrize(
+        "factory", [fork_safe_lock, fork_safe_rlock], ids=["lock", "rlock"]
+    )
+    def test_factory_registers_the_lock_for_the_child_repair(self, factory):
+        """What the factory returns is what the repair re-initializes."""
+        lock = factory()
+
+        assert _is_registered(lock)
+
+    @pytest.mark.skipif(
+        _HAS_AT_FORK_REINIT, reason="covers interpreters built without fork()"
+    )
+    @pytest.mark.parametrize(
+        "factory", [fork_safe_lock, fork_safe_rlock], ids=["lock", "rlock"]
+    )
+    def test_factory_leaves_the_lock_unregistered_where_fork_does_not_exist(
+        self, factory
+    ):
+        """Windows: no ``fork()``, no re-initializer, nothing to repair after."""
+        lock = factory()
+
+        assert not _is_registered(lock)
+
+
+class TestRegisterForkSafeLockContract:
+    """``register_fork_safe_lock()`` admits C locks by type and ignores the rest.
+
+    It exists for locks a library builds on Baldur's behalf (a redis-py pool's),
+    so its input is whatever a ``getattr`` returned — possibly ``None`` after a
+    rename, possibly a test double — and it must never raise.
+    """
+
+    @posix_fork_repair
+    @pytest.mark.parametrize(
+        "make_lock", [threading.Lock, threading.RLock], ids=["lock", "rlock"]
+    )
+    def test_register_accepts_a_c_lock_built_elsewhere(self, make_lock):
+        """A lock this code did not construct joins the repair."""
+        lock = make_lock()
+
+        register_fork_safe_lock(lock)
+
+        assert _is_registered(lock)
+
+    @posix_fork_repair
+    def test_registering_the_same_lock_twice_keeps_one_entry(self):
+        """Idempotent: two components registering one pool's lock repair it once."""
+        lock = threading.Lock()
+
+        register_fork_safe_lock(lock)
+        register_fork_safe_lock(lock)
+
+        entries = [e for e in list(process_utils._fork_safe_locks) if e is lock]
+        assert len(entries) == 1
+
+    @pytest.mark.parametrize(
+        "candidate",
+        [None, _LockLike(), threading.Semaphore(), threading.Event()],
+        ids=["none", "lock_like_double", "semaphore", "event"],
+    )
+    def test_register_ignores_anything_that_is_not_a_c_lock(self, candidate):
+        """Admission is by type, not by answering ``_at_fork_reinit``.
+
+        The lock-like double answers the attribute and is weak-referenceable,
+        so the type check is the only thing that keeps it out.
+        """
+        register_fork_safe_lock(candidate)
+
+        assert not _is_registered(candidate)
+
+
+# =============================================================================
+# Fork-safe locks — the child repair
+# =============================================================================
+
+
+@posix_fork_repair
+class TestForkLockRepairBehavior:
+    """``_reinit_fork_safe_locks()`` frees what dead threads held.
+
+    Driven against a patched registry: re-initializing every lock the test
+    process registered would free locks live threads of this process hold.
+    """
+
+    @pytest.mark.parametrize(
+        "factory", [fork_safe_lock, fork_safe_rlock], ids=["lock", "rlock"]
+    )
+    def test_lock_held_by_another_thread_is_free_after_the_repair(
+        self, monkeypatch, factory
+    ):
+        """The fork case: the holder does not exist in the child."""
+        # Given
+        lock = factory()
+        monkeypatch.setattr(process_utils, "_fork_safe_locks", [lock])
+
+        with _HeldByAnotherThread(lock):
+            assert not _free_from_another_thread(lock)
+
+            # When
+            process_utils._reinit_fork_safe_locks()
+
+            # Then
+            assert _free_from_another_thread(lock)
+
+    def test_rlock_owned_by_the_calling_thread_is_left_owned(self, monkeypatch):
+        """The forking thread survives into the child and releases it itself."""
+        # Given
+        lock = fork_safe_rlock()
+        monkeypatch.setattr(process_utils, "_fork_safe_locks", [lock])
+        lock.acquire()
+
+        try:
+            # When
+            process_utils._reinit_fork_safe_locks()
+
+            # Then
+            assert not _free_from_another_thread(lock)
+        finally:
+            lock.release()  # raises if the repair had re-initialized it
+
+        assert _free_from_another_thread(lock)
+
+    def test_plain_lock_held_by_the_calling_thread_is_freed(self, monkeypatch):
+        """The factory docstring's one constraint on callers.
+
+        A plain lock records no owner, so the repair cannot tell the forking
+        thread's hold from a dead thread's and frees it; the forking thread's
+        later ``release()`` then raises.
+        """
+        lock = fork_safe_lock()
+        monkeypatch.setattr(process_utils, "_fork_safe_locks", [lock])
+        lock.acquire()
+
+        process_utils._reinit_fork_safe_locks()
+
+        assert _free_from_another_thread(lock)
+        with pytest.raises(RuntimeError):
+            lock.release()
+
+    def test_a_failing_entry_does_not_stop_the_repair_of_the_rest(self, monkeypatch):
+        """Each lock is repaired on its own: CPython reports a raising at-fork
+        callback and moves on, which would leave every later lock held.
+        """
+        # Given — two entries that fail in different places, then a held lock
+        failing_reinit = _RaisingReinit()
+        failing_query = _RaisingOwnershipQuery()
+        lock = fork_safe_lock()
+        monkeypatch.setattr(
+            process_utils, "_fork_safe_locks", [failing_reinit, failing_query, lock]
+        )
+
+        with _HeldByAnotherThread(lock):
+            # When
+            process_utils._reinit_fork_safe_locks()
+
+            # Then
+            assert failing_reinit.touched
+            assert failing_query.touched
+            assert _free_from_another_thread(lock)
+
+    def test_repair_returns_quietly_when_the_registry_cannot_be_read(self, monkeypatch):
+        """Fail-open: the child keeps its locks as inherited — today's state."""
+        registry = _UnreadableRegistry()
+        monkeypatch.setattr(process_utils, "_fork_safe_locks", registry)
+
+        process_utils._reinit_fork_safe_locks()
+
+        assert registry.touched
+
+
+# =============================================================================
+# Stream-handler hold across the fork
+# =============================================================================
+
+
+@pytest.mark.usefixtures("clean_fork_log_stack")
+class TestForkLogHoldBehavior:
+    """The before-fork step waits out stream writes; the after-steps undo it.
+
+    A buffered stream's internal lock is not re-initialized in a fork child, so
+    a parent thread inside ``StreamHandler.emit`` at the fork instant leaves the
+    child's first log line blocked forever. Holding each stream handler's lock
+    across the fork keeps every parent thread out of such a write. The steps
+    are called directly from the test thread, which plays the forking thread.
+    """
+
+    def test_before_step_waits_for_a_stream_handler_write_in_progress(
+        self, isolated_handlers
+    ):
+        """A write that finishes within the deadline is waited for, then held."""
+        # Given — another thread is inside a write and finishes it only once
+        # the before-step is actually waiting for it
+        handler = logging.StreamHandler(io.StringIO())
+        inner = handler.lock
+        handler.lock = waiting_lock = _WaitSignallingLock(inner)
+        isolated_handlers(handler)
+        writing = threading.Event()
+
+        def writer() -> None:
+            inner.acquire()
+            writing.set()
+            waiting_lock.waiting.wait(timeout=5)
+            inner.release()
+
+        writer_thread = threading.Thread(target=writer, daemon=True)
+        writer_thread.start()
+        assert writing.wait(timeout=5)
+
+        # When
+        process_utils._hold_stream_handler_locks()
+        try:
+            held = list(_frames()[-1].handler_locks)
+        finally:
+            process_utils._release_stream_handler_locks()
+        writer_thread.join(timeout=5)
+
+        # Then
+        assert held == [waiting_lock]
+        assert _free_from_another_thread(inner)
+
+    def test_before_step_gives_up_on_a_write_that_outlasts_the_deadline(
+        self, monkeypatch, isolated_handlers
+    ):
+        """A blocked stream (a full pipe) costs the fork the deadline, then is
+        left as it would be without the step — the fork is never held hostage.
+        """
+        monkeypatch.setattr(process_utils, "_FORK_LOG_HANDLER_WAIT_SECONDS", 0.05)
+        handler = logging.StreamHandler(io.StringIO())
+        isolated_handlers(handler)
+
+        with _HeldByAnotherThread(handler.lock):
+            process_utils._hold_stream_handler_locks()
+            try:
+                held = list(_frames()[-1].handler_locks)
+            finally:
+                process_utils._release_stream_handler_locks()
+
+        assert held == []
+
+    def test_a_timed_out_handler_spends_the_shared_budget_so_later_ones_are_skipped(
+        self, monkeypatch, isolated_handlers
+    ):
+        """One deadline for the whole walk, not one per handler."""
+        # Given — the first handler's write never finishes, the second is free
+        clock = _FakeMonotonicClock()
+        monkeypatch.setattr(process_utils, "time", clock)
+        blocked = logging.StreamHandler(io.StringIO())
+        free = logging.StreamHandler(io.StringIO())
+        blocked.lock = blocked_lock = _TimedOutLock(clock)
+        free.lock = free_lock = _ImmediatelyFreeLock()
+        isolated_handlers(blocked, free)
+
+        # When
+        process_utils._hold_stream_handler_locks()
+        try:
+            held = list(_frames()[-1].handler_locks)
+        finally:
+            process_utils._release_stream_handler_locks()
+
+        # Then
+        budget = process_utils._FORK_LOG_HANDLER_WAIT_SECONDS
+        assert blocked_lock.timeouts == [budget]
+        assert free_lock.timeouts == []
+        assert held == []
+
+    def test_handlers_reached_before_the_budget_runs_out_are_held(
+        self, monkeypatch, isolated_handlers
+    ):
+        """Each wait gets what is left of the one budget; a free lock costs none."""
+        # Given
+        clock = _FakeMonotonicClock()
+        monkeypatch.setattr(process_utils, "time", clock)
+        free = logging.StreamHandler(io.StringIO())
+        blocked = logging.StreamHandler(io.StringIO())
+        free.lock = free_lock = _ImmediatelyFreeLock()
+        blocked.lock = blocked_lock = _TimedOutLock(clock)
+        isolated_handlers(free, blocked)
+
+        # When
+        process_utils._hold_stream_handler_locks()
+        try:
+            held = list(_frames()[-1].handler_locks)
+        finally:
+            process_utils._release_stream_handler_locks()
+
+        # Then
+        budget = process_utils._FORK_LOG_HANDLER_WAIT_SECONDS
+        assert held == [free_lock]
+        assert free_lock.timeouts == [budget]
+        assert blocked_lock.timeouts == [budget]
+        assert free_lock.releases == 1
+
+    @pytest.mark.parametrize(
+        "make_handler",
+        [
+            lambda path: logging.StreamHandler(io.StringIO()),
+            lambda path: logging.FileHandler(path, delay=True),
+        ],
+        ids=["stream_handler", "file_handler_subclass"],
+    )
+    def test_before_step_holds_every_stream_handler_subclass(
+        self, tmp_path, isolated_handlers, make_handler
+    ):
+        """``FileHandler`` and the rotating handlers write through a stream too."""
+        handler = make_handler(tmp_path / "fork.log")
+        isolated_handlers(handler)
+
+        process_utils._hold_stream_handler_locks()
+        try:
+            held = list(_frames()[-1].handler_locks)
+        finally:
+            process_utils._release_stream_handler_locks()
+
+        assert held == [handler.lock]
+
+    @pytest.mark.parametrize(
+        "make_forwarder",
+        [
+            lambda target: logging.handlers.MemoryHandler(capacity=1, target=target),
+            lambda target: logging.handlers.QueueHandler(queue.SimpleQueue()),
+        ],
+        ids=["memory_handler", "queue_handler"],
+    )
+    def test_before_step_never_takes_a_forwarding_handler_lock(
+        self, isolated_handlers, make_forwarder
+    ):
+        """Holding a handler that forwards to another deadlocks against a thread
+        inside the forwarding (the stdlib's own reason for dropping the
+        hold-every-handler approach) — only the stream leaves are held.
+        """
+        # Given
+        stream = logging.StreamHandler(io.StringIO())
+        forwarder = make_forwarder(stream)
+        forwarder.lock = counting_lock = _CountingLock(forwarder.lock)
+        isolated_handlers(forwarder, stream)
+
+        # When
+        process_utils._hold_stream_handler_locks()
+        try:
+            held = list(_frames()[-1].handler_locks)
+        finally:
+            process_utils._release_stream_handler_locks()
+
+        # Then
+        assert counting_lock.acquire_calls == 0
+        assert held == [stream.lock]
+
+    def test_module_lock_is_taken_before_and_released_after_the_handler_locks(
+        self, monkeypatch, isolated_handlers
+    ):
+        """``logging.config`` takes the module lock and then each handler's, so
+        the hold must take them in that order or deadlock against it.
+        """
+        # Given — handler built before the module lock is instrumented, so its
+        # own registration does not enter the record
+        events: list[tuple[str, str]] = []
+        test_thread = threading.get_ident()
+        handler = logging.StreamHandler(io.StringIO())
+        handler.lock = _OrderRecordingLock(handler.lock, "handler", events, test_thread)
+        isolated_handlers(handler)
+        monkeypatch.setattr(
+            logging,
+            "_lock",
+            _OrderRecordingLock(logging._lock, "module", events, test_thread),
+        )
+
+        # When
+        process_utils._hold_stream_handler_locks()
+        process_utils._release_stream_handler_locks()
+
+        # Then
+        assert events == [
+            ("module", "acquire"),
+            ("handler", "acquire"),
+            ("handler", "release"),
+            ("module", "release"),
+        ]
+
+    def test_two_threads_running_the_fork_steps_concurrently_leave_no_lock_held(
+        self, isolated_handlers
+    ):
+        """Nothing serializes forks from two threads of one process: a second
+        thread's before-step can start while the first thread's fork is in
+        progress, and each after-step must undo only its own thread's hold.
+
+        The interleaving is forced rather than hoped for — a real fork releases
+        the GIL between the two steps, a unit loop does not — and the module
+        lock is a private stand-in, so a failure cannot leave logging's own
+        lock held by a finished thread.
+        """
+        # Given
+        handler = logging.StreamHandler(io.StringIO())
+        isolated_handlers(handler)
+        real_module_lock = logging._lock
+        module_lock = _WaitSignallingLock(threading.RLock())
+        first_holds = threading.Event()
+        errors: list[BaseException] = []
+
+        def first_forker() -> None:
+            try:
+                process_utils._hold_stream_handler_locks()
+                first_holds.set()
+                # The second thread's before-step now waits behind this hold.
+                module_lock.waiting.wait(timeout=5)
+                process_utils._release_stream_handler_locks()
+            except BaseException as e:  # pragma: no cover - reported below
+                errors.append(e)
+
+        def second_forker() -> None:
+            try:
+                first_holds.wait(timeout=5)
+                process_utils._hold_stream_handler_locks()
+                process_utils._release_stream_handler_locks()
+            except BaseException as e:  # pragma: no cover - reported below
+                errors.append(e)
+
+        forkers = [
+            threading.Thread(target=first_forker, daemon=True),
+            threading.Thread(target=second_forker, daemon=True),
+        ]
+
+        logging._lock = module_lock
+        try:
+            # When
+            for thread in forkers:
+                thread.start()
+            for thread in forkers:
+                thread.join(timeout=5)
+
+            # Then
+            assert module_lock.waiting.is_set(), "the forks never overlapped"
+            assert not any(thread.is_alive() for thread in forkers)
+            assert errors == []
+            assert _free_from_another_thread(module_lock)
+            assert _free_from_another_thread(handler.lock)
+        finally:
+            # Restored here rather than by monkeypatch: pytest's own logging
+            # teardown takes the module lock before fixtures are undone, and on
+            # a regression a finished thread still owns the stand-in — and the
+            # handler's lock, which logging.shutdown() at exit would wait on.
+            logging._lock = real_module_lock
+            handler.lock = None
+
+    def test_nested_fork_steps_in_one_thread_unwind_to_no_lock_held(
+        self, isolated_handlers
+    ):
+        """A fork started by a signal handler inside the before-step pushes its
+        own frame instead of overwriting the outer fork's record.
+        """
+        handler = logging.StreamHandler(io.StringIO())
+        isolated_handlers(handler)
+
+        process_utils._hold_stream_handler_locks()
+        process_utils._hold_stream_handler_locks()
+        process_utils._release_stream_handler_locks()
+        process_utils._release_stream_handler_locks()
+
+        assert _frames() == []
+        assert _free_from_another_thread(handler.lock)
+        assert _free_from_another_thread(logging._lock)
+
+    def test_missing_handler_list_holds_the_module_lock_only(self, monkeypatch):
+        """A future ``logging`` without ``_handlerList`` degrades to today's
+        behaviour: no handler is held, and the module-lock hold still pairs.
+        """
+        monkeypatch.delattr(logging, "_handlerList")
+
+        process_utils._hold_stream_handler_locks()
+        try:
+            frame = _frames()[-1]
+            held, module_lock = list(frame.handler_locks), frame.module_lock
+        finally:
+            process_utils._release_stream_handler_locks()
+
+        assert held == []
+        assert module_lock is logging._lock
+        assert _free_from_another_thread(logging._lock)
+
+    def test_parent_step_without_a_before_step_releases_nothing(self):
+        """A thread with no frame of its own must not pop — or raise."""
+        errors: list[BaseException] = []
+
+        def parent_step_on_a_fresh_thread() -> None:
+            try:
+                process_utils._release_stream_handler_locks()
+            except BaseException as e:  # pragma: no cover - reported below
+                errors.append(e)
+
+        thread = threading.Thread(target=parent_step_on_a_fresh_thread)
+        thread.start()
+        thread.join(timeout=5)
+
+        assert errors == []
+
+    @posix_fork_repair
+    def test_child_step_frees_the_held_locks_and_keeps_the_module_hold(
+        self, monkeypatch, isolated_handlers
+    ):
+        """In the child, logging's own hook has already re-initialized the module
+        lock, so releasing it here would raise; the handler locks and every
+        registered lock are re-initialized instead.
+        """
+        # Given — a registered lock a dead parent thread holds, and a handler
+        # the before-step took on the forking (test) thread
+        registered = fork_safe_lock()
+        monkeypatch.setattr(process_utils, "_fork_safe_locks", [registered])
+        handler = logging.StreamHandler(io.StringIO())
+        isolated_handlers(handler)
+
+        with _HeldByAnotherThread(registered):
+            process_utils._hold_stream_handler_locks()
+            try:
+                # When
+                process_utils._repair_after_fork_in_child()
+                module_still_held = logging._lock._is_owned()
+                frames_after = _frames()
+                registered_free = _free_from_another_thread(registered)
+            finally:
+                # Here the test thread, not logging's child hook, ends the hold.
+                logging._lock.release()
+
+        # Then
+        assert module_still_held is True
+        assert frames_after == []
+        assert registered_free
+        assert _free_from_another_thread(handler.lock)
+
+    def test_logging_internals_the_hold_reads_exist_on_this_interpreter(self):
+        """Tripwire for the two private ``logging`` attributes the step reads.
+
+        The module lock must be re-entrant: logging's own before-fork hook takes
+        it again on the same thread after this step has taken it.
+        """
+        assert isinstance(logging._lock, _RLOCK_TYPE)
+        assert isinstance(logging._handlerList, list)
+
+
+class TestForkHookInstallContract:
+    """``_install_fork_hook()`` registers the three steps in one call."""
+
+    def test_install_registers_the_three_fork_steps(self, monkeypatch):
+        """``register_at_fork`` takes keyword arguments only; one call, three steps."""
+        calls: list[dict] = []
+        monkeypatch.setattr(
+            process_utils,
+            "os",
+            SimpleNamespace(register_at_fork=lambda **steps: calls.append(steps)),
+        )
+
+        process_utils._install_fork_hook()
+
+        assert calls == [
+            {
+                "before": process_utils._hold_stream_handler_locks,
+                "after_in_parent": process_utils._release_stream_handler_locks,
+                "after_in_child": process_utils._repair_after_fork_in_child,
+            }
+        ]
+
+    def test_install_without_register_at_fork_is_a_noop(self, monkeypatch):
+        """Windows has no ``os.register_at_fork``: nothing to register, no error."""
+        monkeypatch.setattr(process_utils, "os", SimpleNamespace())
+
+        process_utils._install_fork_hook()
+
+
+# =============================================================================
+# No lock on the steady-state protected-call path
+# =============================================================================
+
+# Runs in a fresh interpreter: ``baldur.init()`` and several hundred protected
+# calls would leave threads and singletons behind in the test process. The spy
+# replaces ``process_utils``' own view of ``threading``, which the factories
+# read at call time, so it sees every factory construction however a module
+# bound the factory name. Only constructions on the calling thread count: the
+# protected call runs there, while init's background threads build their own
+# state on their own schedule.
+_STEADY_STATE_SCRIPT = textwrap.dedent(
+    """
+    import threading
+
+    import baldur.core.process_utils as process_utils
+
+    calling_thread = threading.get_ident()
+    constructions = {"count": 0}
+
+
+    class _CountingThreading:
+        def __getattr__(self, name):
+            return getattr(threading, name)
+
+        def Lock(self):
+            if threading.get_ident() == calling_thread:
+                constructions["count"] += 1
+            return threading.Lock()
+
+        def RLock(self):
+            if threading.get_ident() == calling_thread:
+                constructions["count"] += 1
+            return threading.RLock()
+
+
+    process_utils.threading = _CountingThreading()
+
+    import baldur
+
+    baldur.init()
+    attempts = {"count": 0}
+
+
+    @baldur.protected("steady_state_success")
+    def succeed():
+        return 1
+
+
+    @baldur.protected("steady_state_retry", retry=True)
+    def fail_every_seventh_attempt():
+        attempts["count"] += 1
+        if attempts["count"] % 7 == 0:
+            raise ConnectionError("transient")
+        return 1
+
+
+    @baldur.protected("steady_state_trip")
+    def always_fail():
+        raise RuntimeError("dependency down")
+
+
+    def run(rounds):
+        for _ in range(rounds):
+            succeed()
+            for call in (fail_every_seventh_attempt, always_fail):
+                try:
+                    call()
+                except Exception:
+                    pass
+
+
+    run(50)
+    warmed_up = constructions["count"]
+    run(134)
+    print(f"WARMUP_CONSTRUCTIONS={warmed_up}")
+    print(f"STEADY_CONSTRUCTIONS={constructions['count'] - warmed_up}")
+    """
+)
+
+
+def _reported(stdout: str, key: str) -> int:
+    for line in stdout.splitlines():
+        if line.startswith(f"{key}="):
+            return int(line.split("=", 1)[1])
+    raise AssertionError(f"{key} missing from the script output:\n{stdout}")
+
+
+class TestSteadyStateLockConstructionContract:
+    """Registration is paid at construction only: after warm-up, protected calls
+    construct no lock — success, retry and breaker-trip paths alike.
+    """
+
+    def test_steady_state_protected_calls_construct_no_fork_safe_lock(self, tmp_path):
+        """402 calls after 150 warm-up calls: 0 factory constructions."""
+        # Given — a clean environment: the session's BALDUR_* overrides would
+        # otherwise decide the child's posture
+        env = {
+            **{k: v for k, v in os.environ.items() if not k.startswith("BALDUR_")},
+            "BALDUR_ADMIN_ENABLED": "false",
+            "BALDUR_SCHEDULER_AUTOSTART": "0",
+            "BALDUR_RETRY_MAX_ATTEMPTS": "2",
+            "BALDUR_RETRY_BASE_DELAY": "0.1",
+            "BALDUR_LOG_LEVEL": "WARNING",
+            "PYTHONIOENCODING": "utf-8",
+        }
+
+        # When
+        result = subprocess.run(
+            [sys.executable, "-c", _STEADY_STATE_SCRIPT],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+            env=env,
+            cwd=tmp_path,
+        )
+
+        # Then — the warm-up count proves the spy saw the factories at all
+        assert result.returncode == 0, result.stderr[-2000:]
+        assert _reported(result.stdout, "WARMUP_CONSTRUCTIONS") > 0
+        assert _reported(result.stdout, "STEADY_CONSTRUCTIONS") == 0
