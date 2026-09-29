@@ -1,6 +1,6 @@
 # Storage backends
 
-> Baldur keeps its own state in one of three places — in-memory, Redis, or a
+> Baldur keeps its own state in three kinds of store — in-memory, Redis, and a
 > SQL database. This page explains which to use, when, and how to switch, and
 > clears up one common confusion first.
 
@@ -12,7 +12,9 @@ before anything else:
 - **The dependency you protect.** Your app's Postgres, a payment API, a search
   cluster — the thing Baldur wraps with a circuit breaker, retry, or bulkhead.
   When the concept guides mention "a slow database," this is what they mean.
-  Baldur never stores its own state here.
+  Baldur stores its own state here only if this is also the database you hand it:
+  through `BALDUR_SQL_DSN`, or on Django through your `DATABASES` setting, which
+  Baldur uses by default (see the SQL section below).
 - **Baldur's own state store.** Where Baldur keeps *its* bookkeeping: circuit
   breaker counters, idempotency keys, rate-limit windows, the dead-letter queue,
   cached status snapshots. This is what the rest of this page is about — and what
@@ -22,17 +24,20 @@ before anything else:
 
 ### In-memory (the default)
 
-Out of the box Baldur stores everything in process memory. There is nothing to
-install or configure beyond the package itself; this is the whole
+Out of the box Baldur keeps its state in process memory. The one exception is the kill
+switch, which it records in a small file on local disk. There is nothing to install or
+configure beyond the package itself; this is the whole
 [quickstart](../../getting-started/index.md) path.
 
 Its one hard limit is that the store is **per process**. Run more than one worker
 (`gunicorn --workers N`, `uvicorn --workers N`, several Celery workers) and each
 gets its own copy: circuit breaker state, idempotency keys, and rate-limit
 counters diverge silently across workers. That breaks **correctness**, not just
-scale. The store is also volatile: a process restart clears everything, so
-breaker state, idempotency keys, and dead letters start from zero. Treat it as a
-single-process / development backend.
+scale. The store is also volatile: a process restart clears it, so breaker state,
+idempotency keys, and dead letters start from zero. Treat it as a development
+backend. With `BALDUR_ENVIRONMENT=production` set, `baldur.init()` raises
+`ConfigurationError` until `BALDUR_REDIS_URL` is set, even for a single process;
+`BALDUR_TEST_MODE=true` accepts a memory-only process deliberately.
 
 ### Redis (shared across workers)
 
@@ -72,50 +77,62 @@ export BALDUR_REDIS_SENTINEL_PASSWORD=<sentinel-node-password>   # if your senti
 ```
 
 Use `rediss://` for TLS to a standalone Redis; the Sentinel scheme does not
-currently support TLS. Sentinel is the recommended topology at growth (PRO)
-scale; standalone Redis is fine for a single host.
+currently support TLS. Sentinel support is part of the open-source core and is
+the recommended topology for a growth-stage fleet; standalone Redis is fine for
+a single host.
 
 While Redis is briefly unreachable, workers stop sharing state — how each feature
 behaves during the outage (skip the tier, degrade, or fail closed) differs per
 feature and is covered in the data-consistency runbook linked below.
 
-### SQL / your relational database (advanced, optional)
+### SQL / your relational database (advanced)
 
-Baldur can also keep its **incident history** — security incidents,
-postmortems, recovery-session archives, and operational statistics — in a
-relational database through the SQL adapter, and the event journal can land
-there too when Redis is not configured. It works with any DB-API 2.0 driver
-(Postgres, MySQL, SQLite), selected by the DSN scheme:
+Baldur can also keep its **incident history** in a relational database through the SQL
+adapter: security incidents and operational statistics, plus postmortems and
+recovery-session archives, which are recorded only with PRO active. The event journal
+lands there too when Redis is not configured. Postgres, MySQL, and SQLite are supported,
+selected by the DSN scheme:
 
 ```bash
 pip install baldur-framework[postgres]
 export BALDUR_SQL_DSN=postgresql://user:pass@host:5432/db
 ```
 
-Reach for this when you want that history **durable and queryable in the database
-you already operate** rather than in Redis.
+Baldur opens the connection from the DSN itself, through psycopg2 for Postgres (the
+`postgres` extra installs it), mysql-connector-python for MySQL, or Python's built-in
+sqlite3. It opens a new connection for every operation, with no pool, and logs a
+`sql.default_factory_no_pool` warning at startup saying that this suits development and
+tests; for production traffic, give the repositories a pooled connection instead (the
+[SQL adapter reference](../../reference/adapters/sql.md) lists the callables they accept).
 
-**The dead-letter queue can live here too.** A parked call is business data —
-an order that did not go through — so it is the one live store worth keeping in
-a database you already back up. Select it explicitly, or let Baldur pick:
+Reach for this when you want that history **durable and queryable in the database
+you already operate** rather than in Redis. In production the history needs such a
+home: with `BALDUR_ENVIRONMENT=production`, `baldur.init()` refuses to start until
+`BALDUR_SQL_DSN` is set. A Django app can skip the DSN, because with it unset Baldur keeps
+security incidents and postmortems in your `DATABASES`.
+
+**The dead-letter queue can live here too.** A parked call is business data, an order that
+did not go through, so it is the one live store worth keeping in a database you already
+back up. Select it explicitly, or let Baldur pick:
 
 ```bash
 export BALDUR_DLQ_BACKEND=sql     # explicit
 ```
 
 Left unset, Baldur picks the first backend the environment offers: Redis when
-`BALDUR_REDIS_URL` is set, otherwise SQL when a DSN is configured, otherwise
-memory. So a Redis deployment is unchanged, and a database-only deployment now
-lands on durable storage instead of losing its dead letters at the next
-restart. If the backend you selected cannot be constructed — the driver is not
-installed, say — Baldur says so at startup rather than quietly falling back:
-in production it refuses to boot, elsewhere it logs a warning and steps down
-the same chain.
+`BALDUR_REDIS_URL` is set, otherwise SQL when a DSN is configured, otherwise memory. So a
+deployment with Redis keeps its dead letters in Redis, and one with only a database keeps
+them there instead of losing them at the next restart. If the chosen backend cannot be
+constructed (the driver is not installed, say), Baldur says so at startup rather than
+quietly falling back: in production it refuses to boot, elsewhere it warns and falls back
+to Redis if that is set, otherwise to memory. The check proves the driver loads, not that
+the database answers: a capture that cannot reach the database is written to a local
+fallback file instead, with a warning.
 
 Be precise about what this makes durable: the **store**. By default capture is
-asynchronous — the entry is buffered in-process and written a moment later — so
-a process killed inside that window can still lose the most recent entries. Pass
-`mode="sync"` on the capture call when you need the write committed before the
+asynchronous (the entry is buffered in-process and written a moment later), so a process
+killed inside that window can still lose the most recent entries. Set
+`BALDUR_DLQ_OUTBOX_ENABLED=false` when you need each capture written before the protected
 call returns.
 
 The other **live** stores — circuit breaker state, idempotency keys, and
@@ -129,9 +146,10 @@ default multi-worker path is Redis, not SQL.
 
 | You are… | Backend | Set |
 |----------|---------|-----|
-| Trying Baldur, or running a single process | In-memory | *nothing — it is the default* |
+| Trying Baldur, or running a single process outside production | In-memory | *nothing — it is the default* |
 | Running more than one worker or host | Redis | `BALDUR_REDIS_URL=redis://…` |
 | Running Redis with high availability | Redis Sentinel | `BALDUR_REDIS_URL=redis+sentinel://…` |
+| Running with `BALDUR_ENVIRONMENT=production` | Redis, plus SQL unless you run Django | `BALDUR_REDIS_URL=…` + `BALDUR_SQL_DSN=…` |
 | Wanting durable, queryable incident history in your RDBMS | SQL | `BALDUR_SQL_DSN=postgresql://…` |
 | Wanting parked calls in the database you already back up | SQL | `BALDUR_SQL_DSN=…` + `BALDUR_DLQ_BACKEND=sql` |
 

@@ -1,6 +1,6 @@
 # DLQ + Replay
 
-> Catches every operation that fails because a dependency was down, with the context needed to run it again, so nothing is silently lost — and once the dependency recovers, the backlog replays.
+> Catches the operations that fail because a dependency was down, at the call sites that opt in, with the context needed to run them again, so nothing is silently lost — and once the dependency recovers, the backlog replays.
 
 ## What is it?
 
@@ -24,15 +24,17 @@ at all.
 
 DLQ + Replay turns that permanent loss into a recoverable backlog:
 
-- **No silent loss.** Every failed operation at a call site that opts in (`dlq=True`) is captured
-  together with the forensic context (what was being done, the request data, the failure reason, the
-  per-attempt retry history) needed to understand and re-run it. That includes the calls an
-  already-open circuit breaker rejected before they ran, and the entries still buffered in memory
-  when a worker process exits.
+- **No silent loss.** At a call site that opts in (`dlq=True`), a call that fails for good is
+  captured together with the forensic context (what was being done, the request data, the failure
+  reason, the per-attempt retry history) needed to understand and re-run it. That includes the calls
+  an already-open circuit breaker rejected before they ran, and the entries still buffered in memory
+  when a worker process exits. The few failures that skip the queue are named under *How it works
+  in Baldur*.
 - **Recover on your schedule.** When the dependency comes back, replay the backlog instead of
   rebuilding lost work from log files.
-- **Catch-up is automatic.** Baldur replays queued work the moment a tripped circuit breaker for
-  that dependency recovers, so the backlog drains itself without an operator watching the clock.
+- **Catch-up can be automatic.** Once its prerequisites are in place (see *Closing the loop*),
+  Baldur replays queued work when a tripped circuit breaker for that dependency recovers, so the
+  backlog drains itself without an operator watching the clock.
 - **Even repeat failures aren't a dead end.** A failure that keeps failing isn't replayed forever or
   silently dropped. Once it exhausts its replay budget it is parked for review instead of looping.
   After you fix the underlying cause you can deliberately re-drive it, so even a "poison-pill" failure
@@ -43,18 +45,19 @@ DLQ + Replay turns that permanent loss into a recoverable backlog:
 ## How it works in Baldur
 
 When an operation Baldur protects with `dlq=True` fails for good, it is captured as an **entry** in
-the dead letter queue, recording the context needed to replay it later. Two failures skip the queue
-even there: one a `fallback=` answered (the caller got a value, so the call counts as handled), and
-one that Baldur's own `timeout=` cut off while retry was still running. A call that never ran
-because its circuit breaker was already open is captured as well: the breaker rejects it in
-microseconds, but the work that call carried is parked under the breaker's own name with the failure
-type `CIRCUIT_BREAKER_OPEN`, so an outage's fast-rejected calls are recoverable alongside the ones
-that timed out. (This capture is on by default and can be switched off.) Capturing a failure is
-designed to stay off the request's critical path, so recording a failure doesn't add latency to the
-call that already failed. If the queue's storage backend is itself unreachable at capture time, the
-entry falls back to a local on-disk record (and, as a last resort, to the process's error stream)
-instead of being silently lost. Each entry then moves through a lifecycle you can watch in the Web
-Console DLQ panel or query over the REST API:
+the dead letter queue, recording the context needed to replay it later. A few failures skip the
+queue even there: one a `fallback=` answered (the caller got a value, so the call counts as
+handled), one that Baldur's own `timeout=` cut off while retry was still running, and the final
+failure of a call whose `retry=` is a `TenacityBridgePolicy`. A call that never ran because its
+circuit breaker was already open is captured as well: the breaker rejects it in microseconds, but
+the work that call carried is parked under the breaker's own name with the failure type
+`CIRCUIT_BREAKER_OPEN`, so an outage's fast-rejected calls are recoverable alongside the ones that
+failed. (This capture is on by default and can be switched off.) Capturing a failure is designed to
+stay off the request's critical path: by default the write to the store happens in the background,
+so the call that already failed pays only for handing the entry over. If the queue's storage
+backend is itself unreachable at capture time, the entry falls back to a local on-disk record (and,
+as a last resort, to the process's error stream) instead of being silently lost. Each entry then
+moves through a lifecycle you can watch in the Web Console DLQ panel or query over the REST API:
 
 ```mermaid
 stateDiagram-v2
@@ -75,40 +78,43 @@ You have three ways to replay the queued work:
   when you want to confirm a fix before draining everything. The same single-entry surface also lets
   you resolve an entry by hand. Force-redriving an entry that is parked for review is a REST-only
   admin action; the console does not expose it.
-- **Batch replay by failure type.** Replay everything of a given failure type at once from code,
-  using the replay API (`batch_replay_by_failure_type`): for example, every database-timeout failure
-  after the database recovers. A batch started from the replay service can also run in an
-  **adaptive** mode (`replay_batch(..., use_adaptive=True)`, off by default): instead of a
-  fixed batch size, Baldur watches the success rate of each batch and adjusts the next one, shrinking
-  the batch when too many replays are still failing and growing it again after several clean batches,
-  staying between a floor and a ceiling you set. With PRO active, batch replay is also a one-click
-  Web Console action and a REST endpoint. Either way the batch runs its entries directly, one after
-  another; PRO additionally ships a standalone replay queue with rate limiting and backpressure that
-  your own code can pace replay work through.
+- **Batch replay by failure type.** Replay the queued entries of one failure type from code, using
+  the replay API (`batch_replay_by_failure_type`, up to 100 entries per call by default): for
+  example, the database-timeout failures after the database recovers. A batch started from the
+  replay service can also run in an **adaptive** mode (`replay_batch(..., use_adaptive=True)`, off by
+  default): instead of a fixed batch size, Baldur watches the success rate of each batch and adjusts
+  the next one, shrinking the batch when too many replays are still failing and growing it again
+  after several clean batches, staying between a floor and a ceiling you set. With PRO active, batch
+  replay is also a one-click Web Console action and a REST endpoint; that one selects pending entries
+  (optionally of one domain) rather than a failure type, 50 per call by default. Either way the batch
+  runs its entries directly, one after another; PRO additionally ships a standalone replay queue
+  with rate limiting and backpressure that your own code can pace replay work through.
 - **Automatic on recovery.** When a dependency's circuit breaker closes again after an outage, Baldur
-  sweeps that dependency's queued failures and replays them, so recovery and catch-up happen
-  together. The sweep works in passes of a bounded size and keeps going, pass after pass, until the
-  backlog is drained or a bound stops it. How far one recovery goes, and how it tells you when it
-  stopped early, is covered under *Closing the loop* below.
+  sweeps the queued failures tied to it (the calls its open breaker rejected, and the failure types
+  you mapped to it) and replays them, so recovery and catch-up happen together. The sweep works in
+  passes of a bounded size and keeps going, pass after pass, until the backlog is drained or a bound
+  stops it. How far one recovery goes, and how it tells you when it stopped early, is covered under
+  *Closing the loop* below.
 
 When a failure can't be replayed successfully (the dependency is still down, or the work itself is
-broken), Baldur retries it up to a configurable budget. An entry that exhausts that budget is neither
-retried forever nor discarded: it converges to a terminal **needs-review** state, where it stays
-queryable so an operator can investigate. The automatic on-recovery sweep is stricter than the
-operator-driven and code paths: an entry that fails during the sweep is parked for review right away,
-without spending the rest of its budget. Once the root cause is fixed, an operator can deliberately
-**force-redrive** the parked entry, an admin-level action (recorded in the audit trail when PRO is
-active) that grants it a fresh replay budget and sends it back through replay. If the underlying
-problem still isn't fixed, the entry spends that fresh budget the same way as the first one and
-re-converges to needs-review, so a force-redrive can never turn a poison-pill into an endless loop.
+broken), the entry goes back to waiting, and every replay attempt spends part of a configurable
+replay budget. An entry that exhausts that budget is neither retried forever nor discarded: it
+converges to a terminal **needs-review** state, where it stays queryable so an operator can
+investigate. The automatic on-recovery sweep is stricter than the operator-driven and code paths: an
+entry that fails during the sweep is parked for review right away, without spending the rest of its
+budget. Once the root cause is fixed, an operator can deliberately **force-redrive** the parked
+entry, an admin-level action (recorded in the audit trail when PRO is active) that grants it a fresh
+replay budget and sends it back through replay. If the underlying problem still isn't fixed, the
+entry spends that fresh budget the same way as the first one and re-converges to needs-review, so a
+force-redrive can never turn a poison-pill into an endless loop.
 
 | What you observe | When it happens |
 |------------------|-----------------|
-| A failed operation appears in the queue with its failure reason and request data | a protected operation fails |
-| A call appears in the queue as a `CIRCUIT_BREAKER_OPEN` failure without ever having run | the dependency's circuit breaker is open and rejects the call at a `dlq=True` call site |
+| A failed operation appears in the queue with its failure reason and request data | a `dlq=True` call fails for good and no `fallback=` answered it |
+| A call appears in the queue as a `CIRCUIT_BREAKER_OPEN` failure without ever having run | the dependency's circuit breaker is open and rejects the call at a `dlq=True` call site with no `fallback=` |
 | You retry or resolve a single entry | an operator action from the Web Console DLQ panel or the REST API |
 | You force-redrive an entry parked for review | an admin action over the REST API |
-| A whole failure type replays in one call | `batch_replay_by_failure_type` from code, or the console/REST batch replay (**PRO**) |
+| A batch of queued entries replays in one call | `batch_replay_by_failure_type` from code (one failure type, 100 entries by default), or the console/REST batch replay (**PRO**; pending entries, optionally of one domain, 50 by default) |
 | Queued work drains on its own | a dependency's circuit breaker recovers and an automatic replay sweep runs |
 | A drain stops with work still queued, and says why | the recovery's continuation bound was reached, a circuit for that domain re-opened, a pass made no progress, or a pass errored (a `DLQ_REPLAY_BLOCKED` event whose `block_reason` names which) |
 | A batch replay grows or shrinks batch by batch | adaptive batch sizing was opted in (`use_adaptive=True`) and the recent replay success rate changes |
@@ -120,14 +126,14 @@ re-converges to needs-review, so a force-redrive can never turn a poison-pill in
 When the queue reaches its size limit, the **overflow strategy** decides what gives:
 
 - `drop_oldest` evicts the oldest entries to make room for new failures (the default; the eviction
-  happens synchronously, at capture time).
+  happens synchronously, as each entry is stored).
 - `reject` refuses new entries so nothing already queued is displaced.
 - `compress_oldest` (**PRO**) summarizes the oldest entries into a compact record before evicting
   them, so an aggregate trace of what failed survives even after the raw entries are gone. These
   summaries are grouped by domain, failure type, and error code, stay queryable over the REST API,
   and age through their own lifecycle (`ACTIVE`, then `STALE`, then `ARCHIVED`) so old aggregates
-  clean themselves up over time instead of accumulating forever. Without PRO, configuring `compress_oldest` logs a
-  one-time warning and falls back to `drop_oldest`.
+  clean themselves up over time instead of accumulating forever. Without PRO, `compress_oldest`
+  falls back to `drop_oldest`, with a one-time warning the first time the queue overflows.
 
 The queue lives in one of three stores, chosen once at startup: in-memory, Redis, or SQL.
 `BALDUR_DLQ_BACKEND` names the store explicitly; left unset, Baldur takes Redis when a Redis URL is
@@ -140,20 +146,20 @@ and an event when its drop rate crosses a threshold, so you learn the outbox is 
 discovering it after the fact.
 
 An in-memory buffer would normally die with its process. Baldur therefore tears the outbox down on
-every exit path (a signalled stop, a gunicorn or Celery worker recycle, and a plain interpreter exit —
-a script that returns or calls `sys.exit()`, via an `atexit` hook the outbox registers when it starts)
-under one time budget,
-`BALDUR_DLQ_OUTBOX_JOIN_TIMEOUT_SECONDS` (5 seconds by default): buffered entries are flushed to the
-store, the writer is joined, and whatever is still unwritten at that point is spilled to the local
-on-disk fallback. Keep that budget **below the process watchdog that will kill the worker anyway**
-(gunicorn `--timeout`, Kubernetes `terminationGracePeriodSeconds`): a teardown the watchdog cuts short
-loses its tail with no report, whereas a teardown that runs out of its own budget reports exactly what
-it lost. If the deadline passes with entries still unwritten, they are gone with the process, and a
-CRITICAL `dlq_outbox.shutdown_dump_incomplete` log line states how many. The guarantee is no
-*unreported* loss. Under gunicorn this teardown runs from Baldur's gunicorn hooks, so a deployment
-that has not wired them does not get it: the
+every exit path (a signalled stop, a gunicorn or Celery worker recycle, and a plain interpreter exit
+when a script returns or calls `sys.exit()`, through an `atexit` hook the outbox registers when it
+starts) under one time budget, `BALDUR_DLQ_OUTBOX_JOIN_TIMEOUT_SECONDS` (5 seconds by default):
+buffered entries are flushed to the store, the writer is joined, and whatever is still unwritten at
+that point is spilled to the local on-disk fallback. Keep that budget **below the process watchdog
+that will kill the worker anyway** (gunicorn `--timeout`, Kubernetes
+`terminationGracePeriodSeconds`): a teardown the watchdog cuts short loses its tail with no report,
+whereas a teardown that runs out of its own budget reports exactly what it lost. If the deadline
+passes with entries still unwritten, they are gone with the process, and a CRITICAL
+`dlq_outbox.shutdown_dump_incomplete` log line states how many. The guarantee is no *unreported*
+loss. Under gunicorn, a worker that stops or is recycled runs this teardown from Baldur's gunicorn
+hooks when they are wired, and from the `atexit` hook when they are not; the
 [gunicorn graceful-shutdown runbook](https://github.com/baldurhq/baldur/blob/main/docs/runbooks/gunicorn-graceful-shutdown.md)
-shows the two ways to wire them.
+shows the two ways to wire the hooks and how the budget fits gunicorn's own timeouts.
 
 With PRO active, two things change for deployments that cannot tolerate losing even
 queued-but-not-yet-written work across a process crash: the outbox gains a disk-durable mode, and
@@ -307,7 +313,10 @@ needs open-circuit capture on (`open_circuit_capture_disabled` when it is off). 
 2. **Map recovered services to their failure types.** When a circuit breaker closes, Baldur needs to
    know *which* captured entries the recovered dependency is responsible for. Configure that mapping
    with `BALDUR_REPLAY_AUTOMATION_SERVICE_FAILURE_TYPE_MAP` (see
-   [Environment Variables](../../reference/env-vars.md)). Unless the open-circuit lane below has
+   [Environment Variables](../../reference/env-vars.md)). A mapped type is matched in every domain,
+   not only the recovered service's, and a `dlq=True` failure is typed `MAX_RETRIES_` plus its
+   exception's class name (`MAX_RETRIES_TIMEOUTERROR`, as an entry's detail view shows it), so map
+   only types that the recovered dependency alone raises. Unless the open-circuit lane below has
    something to sweep, an empty mapping is surfaced as a blocked-with-signal event on recovery,
    not a silent no-op; the arming surface reports `map_unconfigured` either way.
 
@@ -371,11 +380,11 @@ the backlog stays parked, so treat a stop announcement as the cue to replay the 
 (the single-entry **Retry** action, batch replay from code, or the console/REST batch replay with
 PRO active).
 
-**Recommended alert:** the bundled rules file ships `DLQAutoReplayDisarmed`
-(`baldur_dlq_auto_replay_armed == 0` for 10 minutes) — the `for:` clause is what keeps a short
-broker blip from paging. Because a dispatched replay only runs when a worker is actually consuming
-`dlq_processing`, alert on the depth of that queue (broker-side) as well. A queue that grows without
-draining means the dispatch is succeeding but no worker is consuming it.
+**Recommended alert:** the example alert rules in the Baldur repository ship
+`DLQAutoReplayDisarmed` (`baldur_dlq_auto_replay_armed == 0` for 10 minutes); the `for:` clause is
+what keeps a short broker blip from paging. Because a dispatched replay only runs when a worker is
+actually consuming `dlq_processing`, alert on the depth of that queue (broker-side) as well. A queue
+that grows without draining means the dispatch is succeeding but no worker is consuming it.
 
 ## What belongs in automatic replay — and what doesn't
 

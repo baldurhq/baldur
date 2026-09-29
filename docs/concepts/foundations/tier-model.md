@@ -11,10 +11,10 @@ Baldur ships in **two tiers**:
   graceful shutdown, and more. No license, no sign-up, no cost.
 - **PRO.** A paid package you add on top of the OSS core once you run Baldur in production with a
   team. It adds the heavier operational machinery: an audit trail, coordinated emergency controls,
-  alerting, and at-scale operation of the failure backlog.
+  alert routing, and at-scale operation of the failure backlog.
 
 That is the whole model: two tiers, OSS and PRO. Both are the *same* library with the *same*
-`@baldur.protected` API; PRO unlocks additional capability rather than replacing anything.
+`@baldur.protected` API; PRO unlocks additional capability behind that API rather than replacing it.
 
 ## Why it matters
 
@@ -32,7 +32,8 @@ That keeps the choice honest:
   feel — a dead-letter backlog too big to work one entry at a time, an incident you only hear about
   after it's over — not a plan you committed to up front. The need pulls you in; nothing pushes you.
 - **Upgrading is not a migration.** PRO is the same framework. You add a package and a license key;
-  your existing `@baldur.protected` code keeps working and the PRO capabilities light up behind it.
+  your existing `@baldur.protected` code keeps working and the PRO capabilities become available
+  behind it.
 
 ## How it works in Baldur
 
@@ -53,15 +54,17 @@ survive a dependency failing, with zero infrastructure to start:
 
 - [Circuit Breaker](../oss/circuit-breaker.md), [Retry](../oss/retry.md), and
   [Idempotency](../oss/idempotency.md) — handle a failing or flaky dependency without making it
-  worse or charging a customer twice.
+  worse, and turn away a duplicate request before it charges a customer twice.
 - [Bulkhead](bulkhead.md) isolation — give each dependency a fixed slice of concurrency (semaphore
   and async variants, via the `@bulkhead` decorator), so one slow dependency cannot exhaust every
   worker.
 - [Health Check](../oss/health-check.md) and [Graceful Shutdown](../oss/graceful-shutdown.md) — tell
   a load balancer the truth and drain in-flight work cleanly when the process restarts.
-- [DLQ + Replay](dlq-replay.md) — a call that fails for good at a `dlq=True` call site is captured
-  with the context needed to run it again, and the backlog replays once the dependency recovers, so
-  no work is silently lost.
+- [DLQ + Replay](dlq-replay.md) — at a `dlq=True` call site, a call that raises and fails for good
+  is captured with the context needed to run it again, unless a `fallback=` answered it or Baldur's
+  own `timeout=` cut it off mid-retry. With a replay handler registered for that work, the backlog
+  can be replayed once the dependency recovers, automatically when its on-recovery prerequisites
+  (a Celery worker among them) are in place.
 - [Metrics](../oss/metrics.md), [System Control](../oss/system-control.md), and
   [Precomputed Cache](../oss/precomputed-cache.md) — see what's happening and switch protection on
   or off at runtime.
@@ -76,9 +79,9 @@ team depends on. It leads with the operational problem each capability removes:
 
 | Production need | PRO capability |
 |-----------------|----------------|
-| Operate the failure backlog at scale, not one entry at a time | [DLQ at scale](dlq-replay.md) — batch replay from the console, adaptive pacing, durable outbox, archive/purge |
+| Operate the failure backlog at scale, not one entry at a time | [DLQ at scale](dlq-replay.md) — batch replay from the console, archive/purge, an opt-in disk-durable outbox |
 | Prove what changed, and what triggered it | [Audit trail](../pro/audit.md) |
-| Hear about an incident without watching a dashboard | [Unified notification](../pro/unified-notification.md) |
+| Route incident alerts to the right channel instead of watching a dashboard | [Unified notification](../pro/unified-notification.md) |
 | Shed load and shrink the blast radius under stress | [Emergency mode](../pro/emergency-mode.md) · [Bulkhead thread-pool isolation](bulkhead.md) · [Throttle](../pro/throttle.md) |
 | Roll config changes out safely and gate risky automation | [Canary recovery](../pro/canary-recovery.md) · [Governance](../pro/governance.md) |
 | Notice when Baldur itself gets stuck | [Meta-Watchdog](../pro/meta-watchdog.md) — detects the stall and escalates to a human |
@@ -96,14 +99,15 @@ def charge(order_id: str) -> dict:
     return payment_gateway.charge(order_id)
 ```
 
-and the capture is already real: a final failure is set aside with the context needed to run it
-again, you can browse the backlog in the web console, and entries retry one at a time. What changes
-with PRO is the scale at which you *operate* that backlog. Add the PRO package and a license key and
-the **exact same code** gains one-click batch replay, success-rate-driven pacing, a disk-durable
-outbox, and archive/purge retention — the difference between working a backlog one entry at a time
-and operating one ten thousand entries deep. On either tier, a replayed call executes the work
-again, so give `dlq=True` only to operations
-[safe to run a second time — a charge that must not double needs a dedup guard first](dlq-replay.md).
+and the capture is already real: a charge that still raises once retry gives up is set aside with
+the context needed to run it again, you can browse the backlog in the web console, and entries
+retry there one at a time through a replay handler you register. What changes with PRO is how you
+*operate* that backlog. Add the PRO package and a license key and the **exact same code** gains
+one-click batch replay and archive/purge retention in the console, plus a disk-durable outbox you
+can switch on: the difference between working a large backlog one entry at a time in the console
+and clearing it in one action. On either tier, a retried or replayed call executes the work again,
+so give `retry=` and `dlq=True` only to operations
+[safe to run a second time (a charge that must not double needs a dedup guard first)](dlq-replay.md).
 
 ## Configuration
 
@@ -124,5 +128,5 @@ left in place.
 
 - [What is self-healing?](self-healing.md) — the problem both tiers exist to solve
 - [Composing with @baldur.protected](composition.md) — the one API that is identical across tiers
-- [Getting Started](../../getting-started/index.md) — install the OSS core and protect an endpoint in five minutes
+- [Getting Started](../../getting-started/index.md) — install the OSS core and protect an endpoint
 - [Environment Variables](../../reference/env-vars.md) — the full operator-tunable list, with PRO entries marked

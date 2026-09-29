@@ -14,22 +14,22 @@ This page is the answer, split into three kinds of cost that behave very differe
 - **Resident cost.** What a worker process holds while doing nothing: memory, threads, idle CPU.
   Paid once per worker, whether you serve one request an hour or a thousand a second.
 - **Per-request cost.** What protecting a call adds to that call.
-- **Per-entry storage cost.** What Baldur writes into Redis for each captured failure and each
-  tracked request.
+- **Per-entry storage cost.** What Baldur writes into Redis for each captured failure and, when
+  rate-limit tracking is shared through Redis, each tracked request.
 
 ## The numbers
 
-Every figure is a delta against the same application running without Baldur, measured on the
-protocol described further down. Read the "What it means" column before quoting the number.
+Each row's "What it means" column says what was measured and against what, and the protocol is
+described further down. Read that column before quoting the number.
 
 | Cost | Figure | Measured | What it means |
 |---|---|---|---|
-| Per protected call, in-memory | **~39 µs** | 2026-08-26 | What the decorator itself adds to one call, on the default chain — circuit breaker only, in-memory state, no network anywhere in the path. Measured in-process on the same developer workstation. What transfers is the order of magnitude, tens of microseconds; the exact figure is ours, not yours. |
-| Per protected call, full chain over Redis | **+1.4 to +1.8 ms of CPU** | 2026-08-28 | What the decorator layer adds when the protected call also carries the idempotency decorator, so the path makes three Redis round trips instead of none. Server-side CPU per request, below saturation, one synchronous worker. Two independent runs licensed it; they landed 28% apart, which is why it is published as a range and not a point. The milliseconds are what transfers — the percentage they work out to is yours, not ours: here they were +16% to +21% of an 8.7 ms baseline call. |
-| Per-request overhead, below saturation | **+1.1%** | 2026-07-14 | Server-side throughput cost of the full protected path, measured with headroom left on the host. Above saturation this stops being the right question; see the section on the saturation knee. |
-| Dead-letter entry, stored | **~953 B** | 2026-05-14 | Redis bytes per captured failure, end to end through the real capture path. Compressed, so a very different payload shape moves it; backlog memory tracks `entries x 953 B`, with the per-entry figure itself drifting by up to about 180 B between runs. |
-| Rate-limit tracker, per tracked request | **~124 B** | 2026-07-14 | Redis bytes per request inside the tracker's retention window. Rises slowly with tracker size, so it is measured at production-scale set sizes rather than small ones. |
-| Resident cost per worker | *pending* | — | Measured so far only on an image that also had the PRO package installed, which is not what an open-source-only install runs. The clean-image measurement is in progress; this row lands when it does, rather than shipping a derived estimate. |
+| Per protected call, in-memory | **~39 µs** | 2026-08-26 | What a `protect()` call itself adds, on the default chain: circuit breaker only, in-memory state, no network anywhere in the path. Measured in-process on the same developer workstation. What transfers is the order of magnitude, tens of microseconds; the exact figure is ours, not yours. |
+| Per protected call, full chain over Redis | **+1.4 to +1.8 ms of CPU** | 2026-08-28 | What the whole framework adds to one request, against the same application with Baldur removed, when the protected call carries both the dead-letter and the idempotency decorators, so the path makes three Redis round trips instead of none. The decorator layer is essentially all of it. Server-side CPU per request, below saturation, one synchronous worker. Two independent runs licensed it; they landed 28% apart, which is why it is published as a range and not a point. The milliseconds are what transfers — the percentage they work out to is yours, not ours: here they were +16% to +21% of an 8.7 to 8.9 ms baseline call. |
+| Response time (p99), below saturation | **+1.1%** | 2026-07-14 | The protected endpoint's p99 response time against the same endpoint with its decorators removed, both served by the same Baldur-wired application, at a load that left headroom on the host. It is one reading at the lightest load step; at heavier steps the same comparison was lost in noise. Above saturation this stops being the right question; see the section on the saturation knee. |
+| Dead-letter entry, stored | **~953 B** | 2026-05-14 | Redis bytes per captured failure, end to end through the real capture path, measured before the store began writing a fourth index entry per failure (late May 2026), so today's figure is somewhat higher. Compressed, so a very different payload shape moves it. Backlog memory grows linearly with the entry count, with the per-entry slope scattering by up to about 180 B from one measurement window to the next. |
+| Rate-limit tracker, per tracked request | **~124 B** | 2026-07-14 | Redis bytes per request inside the tracker's retention window, paid only when the circuit breaker's rate-limit tracking is shared through Redis; that is off by default, and the tracker then lives in process memory. Rises slowly with tracker size, so it is measured at production-scale set sizes rather than small ones. |
+| Resident cost per worker | *pending* | — | Measured so far only on an image that also had the PRO package installed, which is not what an open-source-only install runs. The clean-image measurement has not been run yet; this row lands when it has, rather than shipping a derived estimate. |
 
 The last row is empty on purpose. We have a number for it, and it is not the number an
 open-source user would pay, so it is not published as though it were.
@@ -48,10 +48,11 @@ dressed up as a property of the framework, and you would have no way to tell the
 So the table above carries only quantities that survive a change of hardware: deltas, ratios,
 and per-entry byte costs. Where a throughput-shaped question has a real answer, the transferable
 form is a model rather than a measurement. Replay drain rate is the clearest example: the rate is
-dominated by Redis round trips, roughly a dozen per entry, so `1 / (fixed cost + 12 x your RTT)`
-predicts your deployment far better than any number from our host would. A figure measured on an
-in-process store, with no network at all, is faster by more than an order of magnitude and
-describes nothing you would run.
+dominated by Redis round trips, a fixed number per entry (about a dozen when last measured, in
+July 2026, before the drain's entry selection was rewritten), so
+`1 / (fixed cost + round trips per entry x your RTT)` predicts your deployment far better than
+any number from our host would. A figure measured on an in-process store, with no network at
+all, is faster by more than an order of magnitude and describes nothing you would run.
 
 If you want an absolute for your own capacity planning, measure it on your own hardware. The
 command at the bottom of this page is a start; a load test against your own service is the rest.
@@ -78,13 +79,13 @@ licensed replacement for it.
 
 We would rather publish nothing here than a number we have evidence against.
 
-The re-measurement has since run twice more, and it split in two. **The cost half now has an
-answer** — the new row in the table above: per request, the protected path burns 1.4 to 1.8 ms
-more CPU than the same path without it, and both runs agree that the decorator layer is
-essentially all of it. **The throughput half still does not.** Both runs measured a peak-throughput
-drop of about 16%, and both times that reading sat at half its own noise floor on a host that
-was not quiet — so by this page's own rule it is an observation, not a figure. A number goes
-back into this section when it clears that floor, and not before.
+That re-measurement has since been repeated once, and the two runs split the question in two.
+**The cost half now has an answer**, the new row in the table above: per request, the protected
+path burns 1.4 to 1.8 ms more CPU than the same path without it, and both runs agree that the
+decorator layer is essentially all of it. **The throughput half still does not.** The two runs
+measured a peak-throughput drop of 16 to 17%, and both times that reading sat at half its own
+noise floor on a host that was not quiet, so by this page's own rule it is an observation, not a
+figure. A number goes back into this section when it clears that floor, and not before.
 
 Three of those qualifiers will still apply whatever the number turns out to be, and they are
 worth reading now because they are what makes a saturation-knee figure hard to use:
@@ -100,11 +101,12 @@ worth reading now because they are what makes a saturation-knee figure hard to u
    on the bare reference side too, which flatters the bare arm. The real shift is at least as
    large as whatever is measured.
 
-What still stands is the row in the table above: **below saturation the cost is around a
-percent.** That measurement has headroom on the host, does not depend on the withdrawn one, and
-answers a different question. Quoting a below-saturation figure and a saturation-knee figure
-without saying which is which is how a real number turns into a misleading one — which is also
-why the missing one is not quietly replaced with the one that remains.
+What still stands is the row in the table above: **below saturation, the p99 response time moves
+by around a percent.** That measurement has headroom on the host, does not depend on the
+withdrawn one, and answers a different question. Quoting a below-saturation figure and a
+saturation-knee figure without saying which is which is how a real number turns into a
+misleading one — which is also why the missing one is not quietly replaced with the one that
+remains.
 
 ## How these numbers were measured
 
@@ -115,22 +117,24 @@ The setup, so you can judge the numbers rather than take them:
   why the published set excludes absolutes.
 - **Application.** A Django service under a synchronous worker, with the protected payment path
   as the workload.
-- **Control arm.** The same application, same image, same configuration, with Baldur's
-  middleware and startup hooks removed. Early runs of this comparison were wrong because the
-  "framework-free" arm was still starting Baldur's background threads through a worker hook; the
-  control now asserts positively that no framework thread exists before a number is accepted.
-- **Repetition.** Three or more runs per arm, with the spread reported alongside the mean. A
-  difference smaller than the observed spread is reported as "below the noise floor" rather than
-  as a number.
+- **Control arm.** For the CPU-cost row and the withdrawn saturation-knee figure: the same
+  application, same image, same configuration, with Baldur's middleware and startup hooks
+  removed. Early runs of this comparison were wrong because the "framework-free" arm was still
+  starting Baldur's background threads through a worker hook; the control now asserts positively
+  that no framework thread exists before a number is accepted.
+- **Repetition.** Those load-test comparisons ran three or four repetitions per arm, with the
+  spread reported alongside the median. A difference smaller than the observed spread is
+  reported as "below the noise floor" rather than as a number.
 - **In-process measurements.** The per-call figure comes from inside a single process rather than
   from a load test: ten thousand timed calls after a warm-up, on a machine checked to be
   otherwise idle before the run, cross-checked against a second timing path that agreed with it
   to within about two percent on every run.
-- **Version.** The per-request and per-entry figures were measured on the 1.1 line in July 2026.
-  Both per-call figures were measured on the 1.8 line in August 2026 — the in-memory one on
-  2026-08-26, the full-chain one on 2026-08-28. The dead-letter entry cost
-  dates to May 2026 and describes the compressed encoding still in use. The saturation-knee
-  figure was withdrawn in August 2026 and has no current value.
+- **Version.** The response-time and rate-limit tracker figures were measured on the 1.1 line in
+  July 2026. Both per-call figures were measured on the 1.8 line in August 2026 — the in-memory
+  one on 2026-08-26, the full-chain one on 2026-08-28. The dead-letter entry cost dates to May
+  2026: it describes the compressed encoding still in use, but not the extra index entry the
+  store has written for every failure since the end of that month. The saturation-knee figure
+  was withdrawn in August 2026 and has no current value.
 
 We re-measure when something plausibly moves a figure, and the dates above are the record of
 when that last happened. Re-measurement has moved published numbers before: the saturation-knee
@@ -143,18 +147,20 @@ what the framework does by default, so the number described a configuration you 
 That figure never reached a released version of this page.
 
 **It has now been re-measured on the default wiring**, and the answer depends on which decorators
-you stack. A call carrying both the dead-letter and idempotency decorators makes **three round
-trips**: one read of the shared 429 cooldown before the attempt, one write to claim the
-idempotency key, and one to mark it complete. The circuit breaker makes **none** on a successful
-call — it used to write its state on every success, and that write was removed in August 2026.
-It reads Redis only when its circuit is missing from the local layer, which on a warm process is
-the first call and not the ones after it.
-A call carrying only the dead-letter decorator makes one. These are counts of what the code does,
-checked against a profile of the running service rather than derived from a settings file.
+you stack. Once the process is warm, a successful call carrying both the dead-letter and
+idempotency decorators makes **three round trips**: one read of the shared 429 cooldown before
+the attempt, one write to claim the idempotency key, and one to mark it complete. The circuit
+breaker makes **none** while its dependency is healthy. It used to write its state on every
+success; since August 2026 it writes only when a success has a failure count to reset. It reads
+nothing on the call path either, unless cluster state propagation
+(`BALDUR_CB_CLUSTER_STATE_PROPAGATION_ENABLED`) is on, and then only once per circuit, on that
+circuit's first call in the process. A successful call carrying only the dead-letter decorator
+makes one. These are counts of what the code does, checked against a profile of the running
+service rather than derived from a settings file.
 
-The saturation-knee figure is the second withdrawal, and unlike the first it had been published
-for weeks. We changed the framework in a way that removed most of what that measurement was
-measuring, and the re-measurement confirmed the change but was too noisy to license a
+The saturation-knee figure is the second withdrawal, and unlike the first it had been published,
+for about a week. We changed the framework in a way that removed most of what that measurement
+was measuring, and the re-measurement confirmed the change but was too noisy to license a
 replacement. Both halves are in the section above. The rule we are following is that a figure
 we have evidence against comes down when we learn that, not when we have something better to
 put in its place.
@@ -168,27 +174,27 @@ cluster, the framework ships a probe that measures the process it runs in:
 python -m baldur.scripts.measure_footprint
 ```
 
-It samples the process four times — bare interpreter, after the import, the moment
-`baldur.init()` returns, and again once the process has settled — and prints the memory, thread,
+It reports the process at four points (bare interpreter, after the import, the moment
+`baldur.init()` returns, and again once the process has settled) and prints the memory, thread,
 and CPU delta between each pair, along with an echo of the configuration and host it ran on. It
-generates no load and changes nothing about your setup except binding the admin server to an
-ephemeral port.
+generates no load and changes nothing about your setup except defaulting the admin server to an
+ephemeral port; an admin port you have set explicitly still wins.
 
 Three things to know before you read its output:
 
 - **Use the settled reading, not the one at startup.** `init()` returns while background threads
-  are still starting, so the memory figure at that instant is a transient peak, measurably
-  higher than what the process actually holds a few seconds later. The probe prints both and
-  labels the peak; only the settled line is worth quoting.
+  are still starting, so the memory figure at that instant is not what the process holds once
+  it settles; it can read above or below the settled one. The probe prints both and marks the
+  startup reading as transient; only the settled line is worth quoting.
 - **It measures a plain process, not a web worker.** A Django or FastAPI worker also imports its
   URL configuration and everything the application itself pulls in, none of which a bare probe
   pays. Compare the probe against itself across configuration changes. Do not compare it against
   a table measured on a different stack.
 - **Output after the boundary line is shutdown noise.** The probe ends with a
   `--- measurement complete ---` line. Anything the framework or an exporter logs after that is
-  teardown work, not measured cost. If a trace exporter is configured with no collector
-  listening, that teardown can take several seconds and print errors; set
-  `BALDUR_OBSERVABILITY_PROFILE=local` if it gets in the way.
+  teardown work, not measured cost. With the `opentelemetry` extra installed, Baldur exports
+  to a collector by default, and with none listening that teardown can take several seconds and
+  print errors; set `BALDUR_OBSERVABILITY_PROFILE=local` if it gets in the way.
 
 Reproducing the overhead percentages needs more than a probe: a load generator, plus a run of
 your own application with Baldur removed as the control. That is a real project, and shipping a
