@@ -501,8 +501,11 @@ class PoolCircuitBreaker:
                     "is_near_exhaustion": False,
                 }
             except ImportError as e:
-                # django-db-connection-pool not installed
-                logger.warning(
+                # django-db-connection-pool not installed — normal on a host
+                # with a standard database engine (the breaker guards only a
+                # dj_db_conn_pool engine, which cannot load without the
+                # package). The refresh loop reaches this every tick: DEBUG.
+                logger.debug(
                     "pool_circuit_breaker.available",
                     error=e,
                 )

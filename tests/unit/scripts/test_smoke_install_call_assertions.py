@@ -211,7 +211,7 @@ class TestSmokeInstallCellsCallAssertionsContract:
 
         Lower bound stops a contributor from accidentally removing all
         assertions from a cell. Upper bound caps unbounded growth. The range
-        spans the 9 OSS cells (baseline carries the bulk — the OSS->PRO
+        spans the 10 OSS cells (baseline carries the bulk — the OSS->PRO
         boundary None-slot + relocated-feature-absence assertions).
         """
         total = sum(len(cfg["call_assertions"]) for cfg in smoke_install.CELLS.values())

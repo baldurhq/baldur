@@ -85,16 +85,17 @@ _DEADLINE_PATTERN = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(?:ms)?\s*$", re.IGNORECA
 # ---------------------------------------------------------------------------
 # Prometheus metrics
 # ---------------------------------------------------------------------------
-try:
-    from baldur.metrics.registry import (
-        get_or_create_counter,
-        get_or_create_gauge,
-        get_or_create_histogram,
-    )
-
-    _HAS_PROMETHEUS = True
-except ImportError:
-    _HAS_PROMETHEUS = False
+# The registry imports without prometheus_client (it has its own fallback), so
+# its availability flag — not the import — says whether the helpers can build
+# a metric; they raise ImportError when it is absent.
+from baldur.metrics.registry import (
+    PROMETHEUS_AVAILABLE as _HAS_PROMETHEUS,
+)
+from baldur.metrics.registry import (
+    get_or_create_counter,
+    get_or_create_gauge,
+    get_or_create_histogram,
+)
 
 if _HAS_PROMETHEUS:
     _fast_fail_counter = get_or_create_counter(

@@ -12,6 +12,10 @@ environment variables. The in-memory fallback covers the whole first run.
 pip install baldur-framework[django]
 ```
 
+`[django]` installs Django only. Mounting Baldur's REST API
+(`baldur.api.django.urls`) also needs `baldur-framework[django-api]`; this
+quickstart does not use it.
+
 ## 2. Add Baldur to your settings
 
 Add `baldur.adapters.django` to `INSTALLED_APPS`. Its app config calls

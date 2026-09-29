@@ -75,6 +75,7 @@ The Python package is `baldur` (you `import baldur`); the PyPI distribution is
 ```bash
 pip install baldur-framework                 # framework-agnostic core
 pip install baldur-framework[django]         # Django integration
+pip install baldur-framework[django-api]     # Baldur's Django REST API (baldur.api.django.urls)
 pip install baldur-framework[fastapi]        # FastAPI integration
 pip install baldur-framework[flask]          # Flask integration
 pip install baldur-framework[celery]         # Celery task protection

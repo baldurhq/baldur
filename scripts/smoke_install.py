@@ -4,18 +4,19 @@ Clean-venv smoke installer for Baldur (OSS) packaging (Wave 6B-1).
 
 Builds the OSS ``baldur`` wheel via ``python -m build`` (or reuses a
 pre-built one via ``--wheel-path``), then for each cell (baseline / django /
-fastapi / flask / postgres / redis / celery / prometheus / openapi) creates
-an isolated tmp venv, installs the wheel with that cell's extras, and asserts:
+django-api / fastapi / flask / postgres / redis / celery / prometheus /
+openapi) creates an isolated tmp venv, installs the wheel with that cell's
+extras, and asserts:
 
   * entry-point imports succeed
   * each cell's `must_import` set imports cleanly (extras-dep regression gate)
   * each cell's `must_not_import` set raises ModuleNotFoundError
-    (sibling-framework leak gate)
+    (extras leak gate)
   * each cell's `call_assertions` execute the expected runtime shape
 
 Writes a machine-readable JSON report to dist/smoke_install_report.json.
 
-Pass criteria: exit 0 + 9 cells "pass" in dist/smoke_install_report.json.
+Pass criteria: exit 0 + 10 cells "pass" in dist/smoke_install_report.json.
 No ImportError / ModuleNotFoundError.
 
 Usage:
@@ -47,7 +48,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 #   extras           : extras spec for `pip install pkg[extras]` ("" = no extras)
 #   entry_points     : modules/names imported as a smoke-check (must succeed)
 #   must_import      : positive-test set — extras-dep regression gate (D14)
-#   must_not_import  : negative-test set — sibling-framework leak gate (D8)
+#   must_not_import  : negative-test set — extras leak gate (D8): sibling
+#                      frameworks, and packages an extra must not pull in
 #   call_assertions  : 516 D5 — call-path assertions executed in a single
 #                      subprocess per cell. Each is a (call_expr, expected) pair
 #                      where expected is one of:
@@ -239,6 +241,10 @@ CELLS: dict[str, dict[str, Any]] = {
             ),
         ],
     },
+    # [django] installs Django only: the adapter and every middleware it
+    # injects must import and boot without Django REST framework (that is
+    # [django-api]) and without the host-integration packages Baldur uses only
+    # when the host brings them.
     "django": {
         "extras": "django",
         "entry_points": [
@@ -247,9 +253,23 @@ CELLS: dict[str, dict[str, Any]] = {
             "from baldur import get_circuit_breaker_service",
             "import django",
             "from baldur.adapters.django import apps",
+            "from baldur.api.django.middleware import BaldurMiddleware, HealthBridgeMiddleware, DrainAwareMiddleware, RequestTrackingMiddleware",
         ],
         "must_import": ["django"],
-        "must_not_import": ["fastapi", "starlette", "flask"],
+        "must_not_import": [
+            "fastapi",
+            "starlette",
+            "flask",
+            "rest_framework",
+            "rest_framework_simplejwt",
+            "dj_db_conn_pool",
+            "django_redis",
+            "redis",
+        ],
+        # The WSGI boot assertion MUST stay last: it leaves the process with
+        # Django configured, baldur.init() run and the adapter's background
+        # threads started, so an assertion placed after it would check a
+        # booted process instead of the installed-only state the others check.
         "call_assertions": [
             # Same governance assertion under Django extras path.
             (
@@ -265,6 +285,84 @@ CELLS: dict[str, dict[str, Any]] = {
                 "ConfigApplyService.reset_instance(); "
                 "result = ConfigApplyService().apply_pending_changes(); "
                 "assert result.get('status') in ('blocked', 'success')",
+                "ok",
+            ),
+            # The adapter boots through WSGI with the configure_baldur() groups
+            # and the ready()-injected metrics middleware, without DRF. WSGI
+            # runs no system checks, so no swallowed failed import can leave a
+            # middleware submodule cached behind a discarded package: every
+            # package prefix of every baldur.* middleware module must be loaded.
+            # MUST stay last (see the cell comment).
+            (
+                "import sys\n"
+                "from django.conf import settings\n"
+                "from baldur.adapters.django import configure_baldur\n"
+                "ns = {\n"
+                "    'INSTALLED_APPS': ['django.contrib.contenttypes',\n"
+                "                       'django.contrib.auth',\n"
+                "                       'baldur.adapters.django'],\n"
+                "    'MIDDLEWARE': [\n"
+                "        'django.contrib.sessions.middleware.SessionMiddleware',\n"
+                "        'django.contrib.auth.middleware.AuthenticationMiddleware',\n"
+                "    ],\n"
+                "    'DATABASES': {'default': {'ENGINE': 'django.db.backends.sqlite3',\n"
+                "                              'NAME': ':memory:'}},\n"
+                "    'ROOT_URLCONF': '__main__',\n"
+                "    'ALLOWED_HOSTS': ['*'],\n"
+                "}\n"
+                "configure_baldur(namespace=ns)\n"
+                "settings.configure(**{k: v for k, v in ns.items() if k.isupper()})\n"
+                "urlpatterns = []\n"
+                "from django.core.wsgi import get_wsgi_application\n"
+                "get_wsgi_application()\n"
+                "mw = list(settings.MIDDLEWARE)\n"
+                "assert any(m.endswith('.HttpMetricsMiddleware') for m in mw), mw\n"
+                "for m in mw:\n"
+                "    if not m.startswith('baldur.'):\n"
+                "        continue\n"
+                "    parts = m.rsplit('.', 1)[0].split('.')\n"
+                "    for i in range(1, len(parts) + 1):\n"
+                "        prefix = '.'.join(parts[:i])\n"
+                "        assert prefix in sys.modules, (m, prefix)\n"
+                "assert 'rest_framework' not in sys.modules",
+                "ok",
+            ),
+        ],
+    },
+    # [django-api] adds Django REST framework for Baldur's REST API
+    # (baldur.api.django.urls) and nothing else. The URL modules read DRF
+    # settings at import, so Django is configured before the import.
+    "django-api": {
+        "extras": "django,django-api",
+        "entry_points": [
+            "import baldur",
+            "import django",
+            "import rest_framework",
+        ],
+        "must_import": ["django", "rest_framework"],
+        "must_not_import": [
+            "rest_framework_simplejwt",
+            "dj_db_conn_pool",
+            "django_redis",
+            "redis",
+            "fastapi",
+            "starlette",
+            "flask",
+        ],
+        "call_assertions": [
+            (
+                "from django.conf import settings\n"
+                "settings.configure(\n"
+                "    INSTALLED_APPS=['django.contrib.contenttypes',\n"
+                "                    'django.contrib.auth',\n"
+                "                    'rest_framework',\n"
+                "                    'baldur.adapters.django'],\n"
+                "    DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3',\n"
+                "                           'NAME': ':memory:'}},\n"
+                ")\n"
+                "import django\n"
+                "django.setup()\n"
+                "import baldur.api.django.urls",
                 "ok",
             ),
         ],
@@ -404,10 +502,11 @@ CELLS: dict[str, dict[str, Any]] = {
             "from baldur.api.handlers.features import features_summary",
             "from baldur.settings.openapi import get_openapi_settings",
         ],
-        # drf-spectacular is a Django REST Framework extension: Django + DRF are
-        # hard dependencies of the [openapi] extra (verified via its metadata),
-        # not sibling-framework leaks. They belong in must_import, not
-        # must_not_import — the sibling gate covers only the OTHER web stacks.
+        # drf-spectacular is a Django REST Framework extension: [openapi] lists
+        # DRF itself (Baldur's floor) and Django arrives through DRF, so both
+        # are hard dependencies of the extra, not leaks. They belong in
+        # must_import, not must_not_import — the leak gate here covers only the
+        # OTHER web stacks.
         "must_import": ["drf_spectacular", "django", "rest_framework"],
         "must_not_import": ["fastapi", "starlette", "flask", "celery"],
         "call_assertions": [
@@ -624,7 +723,7 @@ def run_cell(  # noqa: C901
                 ),
             )
 
-    # Negative-test set (D8) — sibling-framework leak gate. Each must NOT import.
+    # Negative-test set (D8) — extras leak gate. Each must NOT import.
     for module in cfg["must_not_import"]:
         rc, stdout, stderr, timeout_msg = _run_subprocess(
             [str(python_exe), "-c", f"import {module}"],
@@ -645,7 +744,7 @@ def run_cell(  # noqa: C901
                 duration_s=time.monotonic() - started,
                 stderr_tail=(
                     f"must_not_import={module} unexpectedly succeeded "
-                    f"(sibling-framework leak in baldur-framework[{extras or 'baseline'}])"
+                    f"(extras leak in baldur-framework[{extras or 'baseline'}])"
                 ),
             )
 

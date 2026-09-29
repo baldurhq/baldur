@@ -73,6 +73,7 @@ Python 패키지 이름은 `baldur`이고(`import baldur`), PyPI 배포 이름�
 ```bash
 pip install baldur-framework                 # 프레임워크 독립 코어
 pip install baldur-framework[django]         # Django 연동
+pip install baldur-framework[django-api]     # Baldur의 Django REST API (baldur.api.django.urls)
 pip install baldur-framework[fastapi]        # FastAPI 연동
 pip install baldur-framework[flask]          # Flask 연동
 pip install baldur-framework[celery]         # Celery 태스크 보호

@@ -2,8 +2,10 @@
 
 The five hot-path barrels (``baldur.core`` / ``baldur.utils`` /
 ``baldur.settings`` / ``baldur.interfaces`` / ``baldur.metrics``) were converted
-from eager re-export barrels to the PEP 562 lazy ``__getattr__`` pattern. This
-suite is the static integrity guard for that conversion — the
+from eager re-export barrels to the PEP 562 lazy ``__getattr__`` pattern, and
+``baldur.api.django`` uses the same pattern so its middleware imports without
+Django REST framework. This suite is the static integrity guard for that
+conversion — the
 ``__all__``-declaration gate and the first-party-import-target gate both skip
 ``__getattr__`` modules by design, so nothing else catches a typo'd
 ``_LAZY_IMPORTS`` entry or a drift between the dict, the ``__all__`` surface, and
@@ -44,6 +46,7 @@ BARRELS = [
     "baldur.settings",
     "baldur.interfaces",
     "baldur.metrics",
+    "baldur.api.django",
 ]
 
 # Non-public names carried in ``_LAZY_IMPORTS`` beyond ``__all__``: real
@@ -58,6 +61,7 @@ EXPECTED_STRAGGLERS = {
     ),
     "baldur.interfaces": frozenset(),
     "baldur.metrics": frozenset(),
+    "baldur.api.django": frozenset(),
 }
 
 

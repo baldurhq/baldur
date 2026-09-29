@@ -10,11 +10,19 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Changed
+
+- `[django]` installs only Django; add `[django-api]` to mount `baldur.api.django.urls`.
+- `[django]` no longer installs django-redis, django-db-connection-pool or simplejwt.
+- `[django]` no longer brings redis-py; add `[redis]` when you set `BALDUR_REDIS_URL`.
+
 ### Fixed
 
 - A `dlq=True` call that fails or times out without `retry=` is now parked in the dead-letter queue.
 - A dead-letter entry is no longer dropped when the call's `user_id` is not an integer.
 - A forked worker no longer inherits Baldur, Redis-pool or log-stream locks its parent held.
+- A Django app calling `configure_baldur()` no longer fails to start without prometheus-client.
+- FastAPI and Flask apply the `X-Deadline-Remaining` fast-fail without prometheus-client too.
 
 ## [1.16.0] - 2026-09-28
 

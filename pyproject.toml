@@ -58,12 +58,17 @@ dependencies = [
 baldur = "baldur.cli:app"
 
 [project.optional-dependencies]
+# `[django]` installs only what the Django adapter and its middleware run. The
+# DRF-based REST API (`baldur.api.django.urls`) is `[django-api]`. A host that
+# names django-redis, django-db-connection-pool or simplejwt in its own settings
+# installs them itself; Baldur's use of each degrades when it is absent.
 django = [
     "django>=4.2",
+]
+# Django is listed so the extra carries Baldur's floor rather than DRF's.
+django-api = [
+    "django>=4.2",
     "djangorestframework>=3.14",
-    "django-db-connection-pool>=1.2.0",
-    "django-redis>=5.4",
-    "djangorestframework-simplejwt>=5.3",
 ]
 fastapi = [
     "fastapi>=0.100",
@@ -107,7 +112,10 @@ opentelemetry = [
     "opentelemetry-instrumentation-logging>=0.41b0",
     "opentelemetry-instrumentation-requests>=0.41b0",
 ]
+# DRF is listed directly so `[openapi]` carries Baldur's DRF floor;
+# drf-spectacular alone accepts older DRF releases.
 openapi = [
+    "djangorestframework>=3.14",
     "drf-spectacular>=0.27",
 ]
 fast-json = [
@@ -172,7 +180,7 @@ docs = [
 # advertises only OSS extras; users who need K8s/Kafka/AWS/ML integrations
 # should install ``baldur-pro[<extra>]``.
 all = [
-    "baldur-framework[django,fastapi,flask,celery,arq,prometheus,opentelemetry,fast-json,caching,disk-buffer,crypto,rq,postgres,chaos,export,databases,tenacity,redis,openapi]",
+    "baldur-framework[django,django-api,fastapi,flask,celery,arq,prometheus,opentelemetry,fast-json,caching,disk-buffer,crypto,rq,postgres,chaos,export,databases,tenacity,redis,openapi]",
 ]
 # Browser-driven admin-console lane (tests/e2e/). Deliberately NOT in [dev]:
 # it needs a ~130 MB Chromium download on top of the wheel, which no other
@@ -184,6 +192,12 @@ test-e2e = [
 
 dev = [
     "baldur-framework[all]",
+    # Host-integration packages Baldur's Django path uses when the host has
+    # them. No extra installs them; the suite exercises both states and the
+    # optional-import gate classifies them optional through this list.
+    "django-db-connection-pool>=1.2.0",
+    "django-redis>=5.4",
+    "djangorestframework-simplejwt>=5.3",
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "pytest-django>=4.5",

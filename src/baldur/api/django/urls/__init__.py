@@ -1,6 +1,8 @@
 """Baldur API URL configuration.
 
-Include in your Django project's ``urls.py``::
+The REST API is built on Django REST framework: install
+``baldur-framework[django-api]``, then include it in your Django project's
+``urls.py``::
 
     from baldur.api.django import urls as baldur_urls
 
@@ -24,10 +26,21 @@ Gate type per conditional group:
   impl 527 D8) wrapping the ImportError fallback.
 - ``schema``: ``openapi.enabled`` settings gate (530 D11) wrapping the
   ImportError fallback for drf-spectacular.
-- ``stress``: ImportError (optional view package).
+- ``stress``: ``DEBUG`` / ``ENABLE_STRESS_TESTS`` Django settings gate.
 """
 
 from __future__ import annotations
+
+# Importing any URL group (``baldur.api.django.urls.<group>``) runs this file
+# first, so this check names the extra for every documented mount form before
+# a view module fails on the bare ``rest_framework`` import.
+try:
+    import rest_framework  # noqa: F401
+except ImportError as e:
+    raise ImportError(
+        "Baldur's Django REST API needs Django REST framework. "
+        "Install baldur-framework[django-api]."
+    ) from e
 
 from baldur.api.django.urls import (
     audit,

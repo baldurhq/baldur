@@ -36,6 +36,9 @@ the app, hit a protected endpoint) against the latest release satisfying the
 floor; that lane runs whenever the package or a quickstart app changes rather
 than on every commit.
 
+`[django]` installs Django only; mounting Baldur's REST API
+(`baldur.api.django.urls`) also needs `baldur-framework[django-api]`.
+
 ## Background tasks
 
 | Component | Extra | Minimum | Tested in CI |

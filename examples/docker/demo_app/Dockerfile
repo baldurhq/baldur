@@ -18,6 +18,6 @@ WORKDIR /repo
 # the repo is a runtime volume, not a build-context copy.
 RUN pip install "django>=4.2"
 
-CMD ["bash", "-lc", "pip install -e '.[django,prometheus,opentelemetry]' && cd examples/docker/demo_app && python manage.py migrate --noinput && exec python manage.py runserver 0.0.0.0:8000 --noreload"]
+CMD ["bash", "-lc", "pip install -e '.[django,django-api,prometheus,opentelemetry]' &&cd examples/docker/demo_app && python manage.py migrate --noinput && exec python manage.py runserver 0.0.0.0:8000 --noreload"]
 
 EXPOSE 8000

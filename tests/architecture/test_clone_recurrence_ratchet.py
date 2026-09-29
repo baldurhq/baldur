@@ -94,7 +94,11 @@ _ROOT_BUDGETS: dict[str, int] = {
     # Re-measured when the encoding gained field-boundary tokens (floor 56):
     # 105 families — the one 3-member ``__str__`` family that sat at exactly
     # the old floor fell below the new one; no family split.
-    "baldur": 575,
+    # +1: ``baldur.api.django`` became a PEP 562 lazy package, the sixth
+    # member of the lazy-barrel ``__getattr__`` family — a mandated pattern
+    # whose every member the lazy-barrel resolution suite pins one by one, so
+    # a change to its contract cannot miss a copy.
+    "baldur": 576,
 }
 
 # The budget half needs the OSS source on disk; the fixture half below is pure
