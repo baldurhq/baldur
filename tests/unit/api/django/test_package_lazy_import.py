@@ -10,6 +10,11 @@ the middleware submodule cached behind the discarded package. The boot cases
 here call ``get_wsgi_application()`` directly (no system checks) and check that
 every package prefix of every Baldur middleware module is really loaded.
 
+Without DRF, "DRF was not loaded" holds by construction, so it cannot catch an
+eager import of the REST API that swallows its ``ImportError``. One case
+therefore leaves DRF installed (``[django,django-api]``) and checks that
+importing the package and every middleware module still does not load it.
+
 Implementation notes:
     Each case runs in a subprocess: ``sys.modules`` is process-global and the
     unit session has DRF and every optional extra loaded. The child marks the
@@ -213,6 +218,54 @@ class TestDjangoPackageWithoutRestFrameworkBehavior:
         # Then
         assert baldur_middleware
         assert missing == []
+
+
+# The ``configure_baldur()`` group modules, the ``ready()``-injected metrics
+# middleware module and the package itself — imported with DRF installed and
+# settings configured, as a ``[django,django-api]`` host loads its middleware
+# (configured settings let an eager REST API import load DRF instead of failing).
+_IMPORT_MIDDLEWARE_WITH_REST_FRAMEWORK = """
+import importlib
+import json
+from django.conf import settings
+
+settings.configure()
+
+from baldur.adapters.django.auto_config import (
+    DEFAULT_EARLY_GROUP,
+    DEFAULT_POST_AUTH_GROUP,
+    DEFAULT_TAIL_GROUP,
+)
+
+groups = DEFAULT_EARLY_GROUP + DEFAULT_POST_AUTH_GROUP + DEFAULT_TAIL_GROUP
+modules = sorted(
+    {dotted.rsplit(".", 1)[0] for dotted in groups}
+    | {"baldur.api.django", "baldur.api.django.middleware.http_metrics"}
+)
+for name in modules:
+    importlib.import_module(name)
+report = {
+    "modules": modules,
+    "rest_framework_loaded": "rest_framework" in sys.modules,
+}
+with open(sys.argv[1], "w", encoding="utf-8") as f:
+    json.dump(report, f)
+"""
+
+
+class TestDjangoMiddlewareImportWithRestFrameworkBehavior:
+    """With DRF installed, importing the middleware still leaves the REST API unloaded."""
+
+    def test_middleware_import_with_rest_framework_installed_does_not_load_it(
+        self, tmp_path
+    ):
+        """The package and every injected middleware module import without loading DRF."""
+        # When
+        report = _run_child(_IMPORT_MIDDLEWARE_WITH_REST_FRAMEWORK, tmp_path, ())
+
+        # Then
+        assert "baldur.api.django.middleware.http_metrics" in report["modules"]
+        assert report["rest_framework_loaded"] is False
 
 
 _MOUNT_REST_API = """

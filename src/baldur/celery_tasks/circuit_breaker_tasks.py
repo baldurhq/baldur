@@ -616,7 +616,7 @@ def collect_cb_open_snapshot(
     )
 
     try:
-        from baldur.api.django.views.xtest.base import collect_system_snapshot
+        from baldur.services.system_snapshot import collect_system_snapshot
 
         try:
             from baldur_pro.services.postmortem.snapshot_builder import (

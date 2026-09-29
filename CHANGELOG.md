@@ -15,6 +15,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `[django]` installs only Django; add `[django-api]` to mount `baldur.api.django.urls`.
 - `[django]` no longer installs django-redis, django-db-connection-pool or simplejwt.
 - `[django]` no longer brings redis-py; add `[redis]` when you set `BALDUR_REDIS_URL`.
+- `from baldur.api.django import pool_circuit_breaker` now gives the module, not the breaker.
 
 ### Fixed
 

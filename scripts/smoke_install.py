@@ -292,6 +292,9 @@ CELLS: dict[str, dict[str, Any]] = {
             # runs no system checks, so no swallowed failed import can leave a
             # middleware submodule cached behind a discarded package: every
             # package prefix of every baldur.* middleware module must be loaded.
+            # DRF is not installed here (must_not_import), so the boot itself is
+            # the DRF-free check; the unit suite checks that the same imports
+            # leave DRF unloaded when it IS installed.
             # MUST stay last (see the cell comment).
             (
                 "import sys\n"
@@ -323,8 +326,7 @@ CELLS: dict[str, dict[str, Any]] = {
                 "    parts = m.rsplit('.', 1)[0].split('.')\n"
                 "    for i in range(1, len(parts) + 1):\n"
                 "        prefix = '.'.join(parts[:i])\n"
-                "        assert prefix in sys.modules, (m, prefix)\n"
-                "assert 'rest_framework' not in sys.modules",
+                "        assert prefix in sys.modules, (m, prefix)",
                 "ok",
             ),
         ],

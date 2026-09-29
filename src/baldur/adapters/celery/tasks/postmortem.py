@@ -747,13 +747,11 @@ def _process_cb_closed_postmortem(  # noqa: PLR0915
     web_server_metrics: dict | None = None,
 ) -> dict[str, Any]:
     """Create an individual Postmortem on CB recovery (runs in the Celery Worker)."""
-    from baldur.api.django.views.xtest.base import (
-        collect_system_snapshot,
-        get_healing_events,
-    )
+    from baldur.api.django.views.xtest.base import get_healing_events
     from baldur.services.circuit_breaker import (
         get_circuit_breaker_service,
     )
+    from baldur.services.system_snapshot import collect_system_snapshot
     from baldur.settings.postmortem import get_postmortem_settings
 
     try:
@@ -917,10 +915,10 @@ def _process_emergency_postmortem(
     web_server_metrics: dict | None = None,
 ) -> dict[str, Any]:
     """Create a Postmortem on Emergency recovery completion (runs in the Celery Worker)."""
-    from baldur.api.django.views.xtest.base import collect_system_snapshot
     from baldur.services.event_bus.bus import (
         _generate_emergency_postmortem_data,
     )
+    from baldur.services.system_snapshot import collect_system_snapshot
     from baldur.settings.postmortem import get_postmortem_settings
 
     settings = get_postmortem_settings()

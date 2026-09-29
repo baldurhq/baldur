@@ -62,12 +62,10 @@ def postmortem_generate(ctx: RequestContext) -> ResponseContext:
     body = ctx.json_body or {}
     incident_id = body.get("incident_id")
 
-    from baldur.api.django.views.xtest.base import (
-        collect_system_snapshot,
-        get_healing_events,
-    )
+    from baldur.api.django.views.xtest.base import get_healing_events
     from baldur.services.circuit_breaker import get_circuit_breaker_service
     from baldur.services.event_bus import get_event_bus
+    from baldur.services.system_snapshot import collect_system_snapshot
 
     try:
         from baldur_pro.services.postmortem.store import (

@@ -95,13 +95,11 @@ def _create_individual_postmortem(  # noqa: PLR0915
 ) -> None:
     """Create an individual Post-mortem (when grouping is disabled or as a fallback)."""
     try:
-        from baldur.api.django.views.xtest.base import (
-            collect_system_snapshot,
-            get_healing_events,
-        )
+        from baldur.api.django.views.xtest.base import get_healing_events
         from baldur.services.circuit_breaker import (
             get_circuit_breaker_service,
         )
+        from baldur.services.system_snapshot import collect_system_snapshot
 
         try:
             from baldur_pro.services.postmortem.store import (
@@ -571,7 +569,7 @@ def _create_emergency_postmortem_sync(
     duration = event.data.get("duration_seconds")
 
     try:
-        from baldur.api.django.views.xtest.base import collect_system_snapshot
+        from baldur.services.system_snapshot import collect_system_snapshot
 
         from . import get_event_bus
 
