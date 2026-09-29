@@ -23,7 +23,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 - A `dlq=True` call that fails or times out without `retry=` is now parked in the dead-letter queue.
 - A dead-letter entry is no longer dropped when the call's `user_id` is not an integer.
-- A forked worker no longer inherits Baldur, Redis-pool or log-stream locks its parent held.
+- A forked worker no longer inherits Baldur, Redis-pool, log-stream or import locks its parent held.
 - A Django app calling `configure_baldur()` no longer fails to start without prometheus-client.
 - FastAPI and Flask apply the `X-Deadline-Remaining` fast-fail without prometheus-client too.
 - A fallback answering an error no longer marks the idempotency key done (timeouts excepted).

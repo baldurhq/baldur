@@ -671,6 +671,15 @@ def _frames() -> list:
     return list(getattr(process_utils._fork_log_holds, "stack", None) or [])
 
 
+def _hold_on_a_new_frame() -> bool:
+    """Take the stream-handler hold as the before-fork step does, on a new frame.
+
+    The step's import wait is left out: its outcome depends on what other
+    threads of the test process happen to be importing.
+    """
+    return process_utils._hold_stream_handler_locks(process_utils._push_fork_log_hold())
+
+
 class _HeldByAnotherThread:
     """Hold ``lock`` on a helper thread for the duration of a ``with`` block.
 
@@ -1170,7 +1179,7 @@ class TestForkLogHoldBehavior:
         assert writing.wait(timeout=5)
 
         # When
-        process_utils._hold_stream_handler_locks()
+        _hold_on_a_new_frame()
         try:
             held = list(_frames()[-1].handler_locks)
         finally:
@@ -1192,7 +1201,7 @@ class TestForkLogHoldBehavior:
         isolated_handlers(handler)
 
         with _HeldByAnotherThread(handler.lock):
-            process_utils._hold_stream_handler_locks()
+            _hold_on_a_new_frame()
             try:
                 held = list(_frames()[-1].handler_locks)
             finally:
@@ -1200,10 +1209,12 @@ class TestForkLogHoldBehavior:
 
         assert held == []
 
-    def test_a_timed_out_handler_spends_the_shared_budget_so_later_ones_are_skipped(
+    def test_a_timed_out_handler_spends_the_budget_so_later_ones_are_tried_once(
         self, monkeypatch, isolated_handlers
     ):
-        """One deadline for the whole walk, not one per handler."""
+        """One deadline for the whole walk, not one per handler; once it is spent
+        each later handler is tried without waiting, and held if free.
+        """
         # Given — the first handler's write never finishes, the second is free
         clock = _FakeMonotonicClock()
         monkeypatch.setattr(process_utils, "time", clock)
@@ -1214,7 +1225,7 @@ class TestForkLogHoldBehavior:
         isolated_handlers(blocked, free)
 
         # When
-        process_utils._hold_stream_handler_locks()
+        _hold_on_a_new_frame()
         try:
             held = list(_frames()[-1].handler_locks)
         finally:
@@ -1223,8 +1234,8 @@ class TestForkLogHoldBehavior:
         # Then
         budget = process_utils._FORK_LOG_HANDLER_WAIT_SECONDS
         assert blocked_lock.timeouts == [budget]
-        assert free_lock.timeouts == []
-        assert held == []
+        assert free_lock.timeouts == [0.0]
+        assert held == [free_lock]
 
     def test_handlers_reached_before_the_budget_runs_out_are_held(
         self, monkeypatch, isolated_handlers
@@ -1240,7 +1251,7 @@ class TestForkLogHoldBehavior:
         isolated_handlers(free, blocked)
 
         # When
-        process_utils._hold_stream_handler_locks()
+        _hold_on_a_new_frame()
         try:
             held = list(_frames()[-1].handler_locks)
         finally:
@@ -1268,7 +1279,7 @@ class TestForkLogHoldBehavior:
         handler = make_handler(tmp_path / "fork.log")
         isolated_handlers(handler)
 
-        process_utils._hold_stream_handler_locks()
+        _hold_on_a_new_frame()
         try:
             held = list(_frames()[-1].handler_locks)
         finally:
@@ -1298,7 +1309,7 @@ class TestForkLogHoldBehavior:
         isolated_handlers(forwarder, stream)
 
         # When
-        process_utils._hold_stream_handler_locks()
+        _hold_on_a_new_frame()
         try:
             held = list(_frames()[-1].handler_locks)
         finally:
@@ -1328,7 +1339,7 @@ class TestForkLogHoldBehavior:
         )
 
         # When
-        process_utils._hold_stream_handler_locks()
+        _hold_on_a_new_frame()
         process_utils._release_stream_handler_locks()
 
         # Then
@@ -1361,7 +1372,7 @@ class TestForkLogHoldBehavior:
 
         def first_forker() -> None:
             try:
-                process_utils._hold_stream_handler_locks()
+                _hold_on_a_new_frame()
                 first_holds.set()
                 # The second thread's before-step now waits behind this hold.
                 module_lock.waiting.wait(timeout=5)
@@ -1372,7 +1383,7 @@ class TestForkLogHoldBehavior:
         def second_forker() -> None:
             try:
                 first_holds.wait(timeout=5)
-                process_utils._hold_stream_handler_locks()
+                _hold_on_a_new_frame()
                 process_utils._release_stream_handler_locks()
             except BaseException as e:  # pragma: no cover - reported below
                 errors.append(e)
@@ -1413,8 +1424,8 @@ class TestForkLogHoldBehavior:
         handler = logging.StreamHandler(io.StringIO())
         isolated_handlers(handler)
 
-        process_utils._hold_stream_handler_locks()
-        process_utils._hold_stream_handler_locks()
+        _hold_on_a_new_frame()
+        _hold_on_a_new_frame()
         process_utils._release_stream_handler_locks()
         process_utils._release_stream_handler_locks()
 
@@ -1439,7 +1450,7 @@ class TestForkLogHoldBehavior:
 
         # When
         with pytest.raises(_SignalHandlerRaised):
-            process_utils._hold_stream_handler_locks()
+            _hold_on_a_new_frame()
         recorded = list(_frames()[-1].handler_locks)
         process_utils._release_stream_handler_locks()
 
@@ -1464,7 +1475,7 @@ class TestForkLogHoldBehavior:
         try:
             # When
             with pytest.raises(_SignalHandlerRaised):
-                process_utils._hold_stream_handler_locks()
+                _hold_on_a_new_frame()
             process_utils._release_stream_handler_locks()
         finally:
             # Restored here rather than by monkeypatch: pytest's own logging
@@ -1490,7 +1501,7 @@ class TestForkLogHoldBehavior:
         logging._lock.acquire()
         try:
             # When
-            process_utils._hold_stream_handler_locks()
+            _hold_on_a_new_frame()
             frame = _frames()[-1]
             recorded = (list(frame.handler_locks), frame.module_lock)
             process_utils._release_stream_handler_locks()
@@ -1509,7 +1520,7 @@ class TestForkLogHoldBehavior:
         """
         monkeypatch.delattr(logging, "_handlerList")
 
-        process_utils._hold_stream_handler_locks()
+        _hold_on_a_new_frame()
         try:
             frame = _frames()[-1]
             held, module_lock = list(frame.handler_locks), frame.module_lock
@@ -1548,11 +1559,16 @@ class TestForkLogHoldBehavior:
         # the before-step took on the forking (test) thread
         registered = fork_safe_lock()
         monkeypatch.setattr(process_utils, "_fork_safe_locks", [registered])
+        # The step also records import locks other threads own; a private set
+        # keeps an import running elsewhere in the test process out of the real one.
+        monkeypatch.setattr(
+            process_utils, "_fork_inherited_import_locks", weakref.WeakSet()
+        )
         handler = logging.StreamHandler(io.StringIO())
         isolated_handlers(handler)
 
         with _HeldByAnotherThread(registered):
-            process_utils._hold_stream_handler_locks()
+            _hold_on_a_new_frame()
             try:
                 # When
                 process_utils._repair_after_fork_in_child()
@@ -1595,7 +1611,7 @@ class TestForkHookInstallContract:
 
         assert calls == [
             {
-                "before": process_utils._hold_stream_handler_locks,
+                "before": process_utils._before_fork,
                 "after_in_parent": process_utils._release_stream_handler_locks,
                 "after_in_child": process_utils._repair_after_fork_in_child,
             }

@@ -41,11 +41,22 @@ it. Every ``threading.Lock`` / ``threading.RLock`` Baldur constructs comes from
 ``os.register_at_fork`` child step that re-initializes it; the same hook waits
 out a log record another thread is writing through a ``logging.StreamHandler``,
 whose stream keeps a lock of its own that CPython does not repair.
+
+The same hook also waits, up to a second, for module imports other threads
+have in progress. Python guards each module under import with a per-module
+lock the importing thread owns until the module body has run; a fork taken
+inside that window hands the child a lock owned by a thread it does not have,
+and the child's first import of that module blocks forever. CPython repairs
+only its global import lock in the child, not these. An import still running
+when the second is up is inherited as it would be without the wait, and the
+parent logs ``process_utils.fork_import_wait_timeout`` naming the module.
 """
 
 from __future__ import annotations
 
+import _imp
 import functools
+import importlib
 import logging
 import os
 import sys
@@ -74,11 +85,29 @@ __all__ = [
 
 _F = TypeVar("_F", bound=Callable[..., Any])
 
+logger = logging.getLogger(__name__)
+
 # How long a fork waits, in total, for log records other threads are writing
 # through stream handlers. A write normally finishes in microseconds; the bound
 # only matters when a stream is blocked (a full output pipe), and after it the
-# fork proceeds exactly as it would without the wait.
+# fork proceeds exactly as it would without the wait. Spent once per fork, however
+# many times the before-step retries its hold.
 _FORK_LOG_HANDLER_WAIT_SECONDS = 1.0
+
+# How long a fork waits, in total, for module imports other threads have in
+# progress. Counts only time the before-step spends waiting while it holds
+# nothing, never time spent taking logging's locks. Boot-time imports finish in
+# tens of milliseconds; an import that outlives the bound (network in a module
+# body) is inherited as it would be without the wait. A named constant rather
+# than a setting: loading settings inside an at-fork callback is unsafe.
+_FORK_IMPORT_WAIT_SECONDS = 1.0
+
+# Sleep between reads of the import state while that wait runs. Sleeping
+# releases the GIL, which is what lets the importing thread finish.
+_FORK_IMPORT_POLL_SECONDS = 0.001
+
+# How a module whose import lock carries no readable name is logged.
+_UNNAMED_MODULE = "<unnamed>"
 
 # The C lock types the fork repair can re-initialize. Built from the
 # constructors themselves so a lock handed in from outside (a redis-py pool's)
@@ -93,6 +122,15 @@ _fork_safe_locks: weakref.WeakSet[Any] = weakref.WeakSet()
 
 # Per forking thread, one frame per fork in progress (see _ForkLogHold).
 _fork_log_holds = threading.local()
+
+# Module import locks this process inherited held: the thread that owned each
+# one at the fork that created this process does not exist here, so the lock is
+# never released and this process's own forks must not wait for it. Identity,
+# not thread ident — a thread this process starts can be handed a dead thread's
+# ident. Written only by the child step, before any other code runs; an entry
+# leaves when its lock object dies, which is also when the import system drops
+# the lock from its registry.
+_fork_inherited_import_locks: weakref.WeakSet[Any] = weakref.WeakSet()
 
 # Env-var marker for "this process serves work", mirroring the
 # ``GUNICORN_WORKER=1`` precedent. An env var rather than a module global
@@ -322,19 +360,42 @@ def _reinit_fork_safe_locks() -> None:
 
 
 class _ForkLogHold:
-    """The locks one fork's before-step took, for its matching after-step."""
+    """What one fork's before-step holds and saw, for its matching after-step."""
 
-    __slots__ = ("handler_locks", "module_locks")
+    __slots__ = (
+        "handler_deadline",
+        "handler_locks",
+        "handler_locks_taken",
+        "import_wait_seconds",
+        "imports_in_progress",
+        "module_locks",
+    )
 
     def __init__(self) -> None:
         # A list rather than a slot so that recording it is one append (see
         # _take_recorded); it holds logging's module lock or nothing.
         self.module_locks: list[Any] = []
         self.handler_locks: list[Any] = []
+        # Every handler lock any pass of this fork's step took. A retry
+        # releases what it holds but keeps this record, so a later pass holds
+        # those handlers again instead of skipping them.
+        self.handler_locks_taken: list[Any] = []
+        # The end of the stream-handler budget: set by the first pass, shared
+        # by every retry of the same fork.
+        self.handler_deadline: float | None = None
+        # Filled only when the step gave up on module imports other threads
+        # still had in progress: their names and how long it waited.
+        self.imports_in_progress: list[str] = []
+        self.import_wait_seconds = 0.0
 
     @property
     def module_lock(self) -> Any:
         return self.module_locks[0] if self.module_locks else None
+
+
+def _is_recorded(lock: Any, locks: list[Any]) -> bool:
+    """Is ``lock`` itself in ``locks``? Identity, never equality."""
+    return any(entry is lock for entry in locks)
 
 
 def _owned_by_this_thread(lock: Any) -> bool:
@@ -349,7 +410,8 @@ def _owned_by_this_thread(lock: Any) -> bool:
 def _take_recorded(lock: Any, held: list[Any], timeout: float) -> None:
     """Acquire ``lock`` and append it to ``held``, never leaving it taken unrecorded.
 
-    ``timeout`` is the lock's own: ``-1`` waits without a deadline.
+    ``timeout`` is the lock's own: ``-1`` waits without a deadline, ``0``
+    tries once without waiting.
 
     A signal handler can raise between a successful acquire and the append —
     gunicorn's master raises ``HaltServer`` from its SIGCHLD handler while it
@@ -365,7 +427,7 @@ def _take_recorded(lock: Any, held: list[Any], timeout: float) -> None:
         if lock.acquire(timeout=timeout):
             held.append(lock)
     except BaseException:
-        if not any(entry is lock for entry in held) and _owned_by_this_thread(lock):
+        if not _is_recorded(lock, held) and _owned_by_this_thread(lock):
             lock.release()
         raise
 
@@ -388,7 +450,153 @@ def _pop_fork_log_hold() -> _ForkLogHold | None:
     return hold
 
 
-def _hold_stream_handler_locks() -> None:
+def _module_locks_held_elsewhere() -> list[Any]:
+    """Return the module import locks other threads own right now.
+
+    Reads the registry CPython's import system keeps of its per-module locks
+    (``importlib._bootstrap._module_locks``, name to weak reference). A lock
+    counts when a thread other than the caller owns it and it was not
+    inherited held at this process's creation. A thread waiting for another
+    thread's import owns nothing; the owner does, and the owner's import is
+    what gets waited for. The importing thread takes the lock before the
+    finder search starts, so an import still looking for its module counts.
+
+    Every read is private and degrades toward "none": an absent attribute, a
+    dead reference or any exception answers that no import is in progress,
+    which is exactly how the fork behaves without the wait.
+    """
+    try:
+        bootstrap = getattr(importlib, "_bootstrap", None)
+        registry = getattr(bootstrap, "_module_locks", None)
+        if registry is None:
+            return []
+        # One C call: list() over a dict view allocates nothing per item, so no
+        # other thread runs inside it. A Python-level loop over the live view
+        # would raise when a concurrent import adds an entry, and the except
+        # below would read that as "no import in progress" exactly while
+        # imports run.
+        refs = list(registry.values())
+        me = threading.get_ident()
+        held: list[Any] = []
+        for ref in refs:
+            lock = ref()
+            if lock is None:
+                continue
+            owner = getattr(lock, "owner", None)
+            if owner is None or owner == me:
+                continue
+            # An int on 3.11, a list from 3.12 on; falsy when free on both.
+            if not getattr(lock, "count", None):
+                continue
+            if lock in _fork_inherited_import_locks:
+                continue
+            held.append(lock)
+        return held
+    except Exception:
+        return []
+
+
+def _imports_in_progress() -> bool:
+    """Return True if another thread is inside a module import right now."""
+    return bool(_module_locks_held_elsewhere())
+
+
+def _import_lock_held() -> bool:
+    """Return True if a thread holds the interpreter's global import lock.
+
+    A thread holds it while it creates a module's lock and around each finder
+    call — before it owns any module lock. ``_imp.lock_held()`` cannot say
+    which thread holds it; absent, the lock reads as free.
+    """
+    try:
+        lock_held = getattr(_imp, "lock_held", None)
+        return lock_held is not None and lock_held() is True
+    except Exception:
+        return False
+
+
+def _import_system_idle() -> bool:
+    """Return True if no other thread is importing and the import lock is free."""
+    return not _imports_in_progress() and not _import_lock_held()
+
+
+def _wait_for_import_system_idle(budget: float) -> float:
+    """Wait, holding nothing, until the import system is idle or ``budget`` is up.
+
+    Returns the seconds it waited. A Python signal handler can run inside the
+    sleep; an ``Exception`` it raises (a soft time limit, an alarm timeout)
+    ends the wait, which then reports all of ``budget`` as spent so the caller
+    goes on to its hold. The exception is not re-raised: CPython drops what an
+    at-fork callback raises, and raising here would skip the hold. A
+    ``BaseException`` propagates.
+    """
+    started = time.monotonic()
+    try:
+        while not _import_system_idle():
+            if time.monotonic() - started >= budget:
+                break
+            time.sleep(_FORK_IMPORT_POLL_SECONDS)
+    except Exception:
+        return max(budget, 0.0)
+    return time.monotonic() - started
+
+
+def _sleep_one_poll(budget: float) -> float:
+    """Sleep one poll interval holding nothing; return the seconds to count.
+
+    Counts at least the interval, so a loop of such sleeps always reaches its
+    budget. An ``Exception`` raised inside the sleep spends all of ``budget``,
+    as in the import wait.
+    """
+    started = time.monotonic()
+    try:
+        time.sleep(_FORK_IMPORT_POLL_SECONDS)
+    except Exception:
+        return max(budget, 0.0)
+    return max(time.monotonic() - started, _FORK_IMPORT_POLL_SECONDS)
+
+
+def _before_fork() -> None:
+    """Before ``fork()``: wait out other threads' imports, then hold the log locks.
+
+    ``fork()`` keeps only the forking thread. A fork taken while another thread
+    is inside a module import hands the child that module's import lock owned
+    by a thread it does not have, and the child's first import of the module
+    blocks forever. So the step waits, holding nothing, until no other thread
+    owns a module import lock and the global import lock is free; takes the
+    stream-handler hold; and checks again. An import that began while the hold
+    was being taken — or a module body blocked on logging's lock, which the
+    hold owns — fails that check, and the step releases the hold and repeats.
+    Waiting before the hold lets a module body that calls
+    ``logging.getLogger()`` finish; checking after it catches an import that
+    started in between.
+
+    Once ``_FORK_IMPORT_WAIT_SECONDS`` of waiting has passed, the fork proceeds
+    holding what the stream-handler hold took — an import still in progress is
+    inherited as it would be without the step — and the modules other threads
+    are still importing are recorded for the parent step to report. One frame
+    per fork whatever the number of passes, popped by the after-step. Never
+    raises an ``Exception``.
+    """
+    try:
+        hold = _push_fork_log_hold()
+    except Exception:
+        return
+    waited = 0.0
+    while True:
+        waited += _wait_for_import_system_idle(_FORK_IMPORT_WAIT_SECONDS - waited)
+        complete = _hold_stream_handler_locks(hold)
+        if complete and _import_system_idle():
+            return
+        if waited >= _FORK_IMPORT_WAIT_SECONDS:
+            _record_imports_in_progress(hold, waited)
+            return
+        _release_held_locks(hold)
+        if not complete:
+            waited += _sleep_one_poll(_FORK_IMPORT_WAIT_SECONDS - waited)
+
+
+def _hold_stream_handler_locks(hold: _ForkLogHold) -> bool:
     """Before ``fork()``: let in-progress stream-handler writes finish first.
 
     A buffered stream (``sys.stdout``, a log file) has an internal lock that
@@ -401,23 +609,25 @@ def _hold_stream_handler_locks() -> None:
     Logging's module lock is taken first, with no deadline — the order
     ``logging.config`` itself takes them in (module lock, then each handler),
     and the same wait logging's own before-fork step makes. Handler locks are
-    then taken against one shared deadline; a handler whose write does not
-    finish in time is skipped, which leaves it as it would be without this
-    step. Only stream handlers are held: they are the ones that write, and the
-    stdlib never chains one into another, while holding a handler that forwards
-    to another can deadlock against a thread inside the forwarding.
+    then taken against the frame's handler budget, which the first pass of a
+    fork sets and every retry shares; once it is spent each handler is tried
+    without waiting. A handler not obtained is skipped, which leaves it as it
+    would be without this step — unless an earlier pass of the same fork took
+    it: a thread may be inside its stream write right now, so the pass
+    reports itself incomplete and the caller retries rather than fork without
+    a handler a single pass would have held. Only stream handlers are held:
+    they are the ones that write, and the stdlib never chains one into
+    another, while holding a handler that forwards to another can deadlock
+    against a thread inside the forwarding.
 
-    Each fork pushes its own frame on a per-thread stack, so two threads
+    Acts on ``hold``, the frame the caller pushed for this fork, so two threads
     forking at once, or a fork started by a signal handler inside this step,
     never release each other's locks. A lock the forking thread already holds
-    is not taken again: no other thread can be inside that section. Never
+    is not taken again: no other thread can be inside that section. Returns
+    False only for a handler an earlier pass took and this one did not. Never
     raises an ``Exception``; a ``BaseException`` a signal handler raises
     mid-step propagates once the lock it interrupted is given back.
     """
-    try:
-        hold = _push_fork_log_hold()
-    except Exception:
-        return
     try:
         module_lock = getattr(logging, "_lock", None)
         if module_lock is not None and not _owned_by_this_thread(module_lock):
@@ -426,43 +636,126 @@ def _hold_stream_handler_locks() -> None:
         pass
     try:
         handler_refs = list(getattr(logging, "_handlerList", ()))
+        if hold.handler_deadline is None:
+            hold.handler_deadline = time.monotonic() + _FORK_LOG_HANDLER_WAIT_SECONDS
+        deadline = hold.handler_deadline
     except Exception:
-        return
-    deadline = time.monotonic() + _FORK_LOG_HANDLER_WAIT_SECONDS
+        return True
+    complete = True
     for handler_ref in handler_refs:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
         try:
-            handler = handler_ref()
-            if not isinstance(handler, logging.StreamHandler):
-                continue
-            lock = handler.lock
-            if lock is None or _owned_by_this_thread(lock):
-                continue
-            _take_recorded(lock, hold.handler_locks, remaining)
+            if not _hold_stream_handler(hold, handler_ref, deadline):
+                complete = False
         except Exception:
             continue
+    return complete
+
+
+def _hold_stream_handler(hold: _ForkLogHold, handler_ref: Any, deadline: float) -> bool:
+    """Take one stream handler's lock for ``hold``, waiting until ``deadline``.
+
+    Returns False only when an earlier pass of the same fork took this
+    handler and this pass could not; anything that is not a stream handler,
+    has no lock, or whose lock the forking thread already holds is passed over.
+    """
+    handler = handler_ref()
+    if not isinstance(handler, logging.StreamHandler):
+        return True
+    lock = handler.lock
+    if lock is None or _owned_by_this_thread(lock):
+        return True
+    remaining = max(deadline - time.monotonic(), 0.0)
+    _take_recorded(lock, hold.handler_locks, remaining)
+    taken_before = _is_recorded(lock, hold.handler_locks_taken)
+    if _is_recorded(lock, hold.handler_locks):
+        if not taken_before:
+            hold.handler_locks_taken.append(lock)
+        return True
+    return not taken_before
+
+
+def _release_held_locks(hold: _ForkLogHold) -> None:
+    """Release every lock ``hold`` holds, handlers first, and clear the record.
+
+    An entry leaves the record only after its release returns, so an exception
+    in between leaves a released lock on the record — whose second release an
+    RLock refuses — rather than a held lock off it. The record of handlers
+    taken is kept for the next pass.
+    """
+    while hold.handler_locks:
+        try:
+            hold.handler_locks[-1].release()
+        except Exception:
+            pass
+        hold.handler_locks.pop()
+    while hold.module_locks:
+        try:
+            hold.module_locks[-1].release()
+        except Exception:
+            pass
+        hold.module_locks.pop()
+
+
+def _record_imports_in_progress(hold: _ForkLogHold, waited: float) -> None:
+    """Note on ``hold`` the modules other threads are still importing.
+
+    Module imports only: a fork that gave up on the global import lock alone
+    hands the child nothing held, since CPython re-initializes that lock there.
+    """
+    try:
+        names: list[str] = []
+        for lock in _module_locks_held_elsewhere():
+            name = getattr(lock, "name", None)
+            names.append(name if isinstance(name, str) else _UNNAMED_MODULE)
+        hold.imports_in_progress = names
+        hold.import_wait_seconds = waited
+    except Exception:
+        return
 
 
 def _release_stream_handler_locks() -> None:
-    """After ``fork()`` in the parent — CPython also runs it when fork fails."""
+    """After ``fork()`` in the parent — CPython also runs it when fork fails.
+
+    Releases what the before-step holds, then, only when that step gave up on
+    module imports other threads still had in progress, logs one WARNING
+    naming them: the child may hang on its first import of any of them. Logged
+    here rather than before the fork, where the line would wait on the locks
+    the step was about to take, and rather than in the child, whose log path
+    could import one of those very modules.
+    """
     try:
         hold = _pop_fork_log_hold()
     except Exception:
         return
     if hold is None:
         return
-    for lock in reversed(hold.handler_locks):
+    _release_held_locks(hold)
+    if hold.imports_in_progress:
         try:
-            lock.release()
+            logger.warning(
+                "process_utils.fork_import_wait_timeout",
+                extra={
+                    "modules": list(hold.imports_in_progress),
+                    "waited_seconds": round(hold.import_wait_seconds, 3),
+                },
+            )
         except Exception:
-            continue
-    for lock in hold.module_locks:
-        try:
-            lock.release()
-        except Exception:
-            continue
+            return
+
+
+def _record_inherited_import_locks() -> None:
+    """In a fork child: remember the module import locks it inherited held.
+
+    Their owners did not survive the fork, so the locks are never released
+    here, and without the record each fork this process makes would wait its
+    whole import budget for them. Runs on every child step, whatever the
+    before-step did.
+    """
+    try:
+        for lock in _module_locks_held_elsewhere():
+            _fork_inherited_import_locks.add(lock)
+    except Exception:
+        return
 
 
 def _repair_after_fork_in_child() -> None:
@@ -472,9 +765,12 @@ def _repair_after_fork_in_child() -> None:
     module lock and the handler locks it tracks, so the module-lock hold is not
     released here — releasing a re-initialized RLock raises. The held handler
     locks are re-initialized once more to cover a handler whose lock was not
-    created through ``Handler.createLock``.
+    created through ``Handler.createLock``. Module import locks are not
+    repaired — an import the before-step gave up on stays as inherited — only
+    recorded, so this process's own forks do not wait for them.
     """
     _reinit_fork_safe_locks()
+    _record_inherited_import_locks()
     try:
         hold = _pop_fork_log_hold()
     except Exception:
@@ -495,13 +791,16 @@ def _install_fork_hook() -> None:
     before this one. Child and parent steps run in registration order and
     before-steps in reverse: logging's child step re-initializes its locks
     before this module's runs, and this module's before-step runs ahead of
-    logging's and takes the module lock first.
+    logging's and takes the module lock first. The import wait shares this one
+    registration with the stream-handler hold because it runs as one fixed
+    sequence with it — wait, hold, re-check — which a second registration,
+    ordered by import order, could not guarantee.
     """
     register_at_fork = getattr(os, "register_at_fork", None)
     if register_at_fork is None:
         return
     register_at_fork(
-        before=_hold_stream_handler_locks,
+        before=_before_fork,
         after_in_parent=_release_stream_handler_locks,
         after_in_child=_repair_after_fork_in_child,
     )
