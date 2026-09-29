@@ -25,6 +25,12 @@ Test Categories:
     D. Log streams: parent threads write through a stream handler and through a
        handler chained to it while the parent forks; every child logs its first
        record, and no fork waits long.
+    E. Imports in progress: a parent thread is inside a module body when the
+       parent forks. The fork waits for an import that finishes within its
+       wait and gives up, bounded, on one that does not; a child that inherited
+       such an import forks again without waiting; parent threads importing
+       modules that create loggers, or importing under logging's own lock
+       (``dictConfig``), neither stall the forks nor deadlock them.
 
 Children report through a pipe (or their exit status) and always leave through
 ``os._exit`` so they never run pytest's exit handlers or flush the parent's
@@ -37,13 +43,18 @@ Infrastructure: POSIX ``fork()``; category B also needs Redis.
 from __future__ import annotations
 
 import contextlib
+import importlib
 import json
 import logging
+import logging.config
 import logging.handlers
 import os
 import signal
+import sys
 import threading
 import time
+import types
+import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -51,6 +62,7 @@ from unittest.mock import patch
 
 import pytest
 
+from baldur.core import process_utils
 from baldur.core.process_utils import fork_safe_lock, fork_safe_rlock
 
 pytestmark = pytest.mark.skipif(
@@ -68,6 +80,20 @@ _PARENT_SETUP_SECONDS = 10.0
 _LOG_STREAM_FORKS = 100
 _CHILD_FIRST_RECORD_SECONDS = 3
 _FORK_DURATION_SECONDS = 0.5
+# (E) the bound on a child's import of a module its parent was importing; when
+# a held parent import is let go after the fork call starts; the slack a fork
+# past the import wait may take over the wait itself; forks while a parent
+# thread imports in bursts (burst size, pause between bursts); forks while a
+# parent thread re-runs ``dictConfig`` back to back, and the bound on each of
+# those forks.
+_CHILD_IMPORT_SECONDS = 3.0
+_PARENT_IMPORT_RELEASE_SECONDS = 0.1
+_FORK_PAST_THE_WAIT_SLACK_SECONDS = 0.5
+_IMPORT_BURST_FORKS = 100
+_IMPORT_BURST_SIZE = 5
+_IMPORT_BURST_PAUSE_SECONDS = 0.01
+_DICT_CONFIG_FORKS = 30
+_DICT_CONFIG_FORK_SECONDS = 2.0
 
 
 # =============================================================================
@@ -89,12 +115,14 @@ def _run_in_child(
     body: Callable[[], dict[str, Any] | None],
     *,
     kill_after: int = _CHILD_KILL_SECONDS,
+    after_fork_in_parent: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Fork, run ``body()`` in the child, and return the child's report.
 
     The child writes one JSON object to a pipe: ``ok`` plus whatever ``body``
     returned, or the exception it raised. A child killed by its backstop
-    writes nothing, which is reported as a failure.
+    writes nothing, which is reported as a failure. ``after_fork_in_parent``
+    runs in the parent the moment ``fork()`` returns there.
     """
     read_fd, write_fd = os.pipe()
     pid = os.fork()
@@ -110,6 +138,8 @@ def _run_in_child(
         finally:
             os._exit(0)
 
+    if after_fork_in_parent is not None:
+        after_fork_in_parent()
     os.close(write_fd)
     with os.fdopen(read_fd, "rb") as reader:
         payload = reader.read()
@@ -786,3 +816,397 @@ class TestLogStreamsAcrossTheFork:
 
         assert failed_children == 0
         assert max(fork_seconds) < _FORK_DURATION_SECONDS, max(fork_seconds)
+
+
+# =============================================================================
+# E. Module imports in progress at the fork instant
+# =============================================================================
+
+# A module body a parent thread is held inside. It reaches its events through a
+# gate module placed in ``sys.modules``, so it makes no import of its own.
+_HELD_MODULE_BODY = """\
+import sys
+
+_gate = sys.modules[{gate!r}]
+_gate.entered.set()
+_gate.release.wait(timeout=60)
+DONE = True
+"""
+
+# A module body that creates a logger, as nearly every module does; that takes
+# logging's module lock, which the before-fork step's hold owns.
+_LOGGER_MODULE_BODY = """\
+import logging
+
+_LOG = logging.getLogger(__name__)
+"""
+
+# A handler class that ``dictConfig`` imports by name.
+_DICT_CONFIG_HANDLER_BODY = """\
+import logging
+
+
+class Handler(logging.NullHandler):
+    pass
+"""
+
+
+@pytest.fixture
+def module_dir(tmp_path, monkeypatch) -> Path:
+    """A directory on ``sys.path`` for the module files a test writes."""
+    monkeypatch.syspath_prepend(str(tmp_path))
+    return tmp_path
+
+
+def _write_module(directory: Path, name: str, body: str) -> None:
+    (directory / f"{name}.py").write_text(body, encoding="utf-8")
+    importlib.invalidate_caches()
+
+
+class _ParentImportHeld:
+    """A parent thread held inside the body of a fresh module it is importing.
+
+    While the body waits, the thread owns the module's import lock — the window
+    a fork must not land in. ``completed()`` lets the body finish; leaving the
+    ``with`` block does too, joins the thread and removes the module and its
+    gate from ``sys.modules``.
+    """
+
+    def __init__(self, directory: Path, purpose: str) -> None:
+        self.name = f"x800_{purpose}_{uuid.uuid4().hex[:12]}"
+        self._gate = types.ModuleType(f"{self.name}_gate")
+        self._gate.entered = threading.Event()
+        self._gate.release = threading.Event()
+        _write_module(
+            directory, self.name, _HELD_MODULE_BODY.format(gate=self._gate.__name__)
+        )
+        self._thread = threading.Thread(
+            target=importlib.import_module, args=(self.name,), daemon=True
+        )
+
+    @property
+    def released(self) -> bool:
+        return self._gate.release.is_set()
+
+    def release(self) -> None:
+        self._gate.release.set()
+
+    def completed(self) -> bool:
+        """Let the body finish; True once the import ran it to its end."""
+        self.release()
+        self._thread.join(timeout=_PARENT_SETUP_SECONDS)
+        return getattr(sys.modules.get(self.name), "DONE", False) is True
+
+    def __enter__(self) -> _ParentImportHeld:
+        sys.modules[self._gate.__name__] = self._gate
+        self._thread.start()
+        assert self._gate.entered.wait(_PARENT_SETUP_SECONDS), (
+            "the parent import never reached its module body"
+        )
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.release()
+        self._thread.join(timeout=_PARENT_SETUP_SECONDS)
+        sys.modules.pop(self.name, None)
+        sys.modules.pop(self._gate.__name__, None)
+
+
+class _ParentThreadImportingBursts:
+    """A parent thread that imports fresh modules in bursts until stopped.
+
+    Each burst writes ``_IMPORT_BURST_SIZE`` module files whose bodies create a
+    logger, publishes their names as ``current``, imports them back to back,
+    then pauses. A child forked at any instant can import the burst its parent
+    was on: a module the parent finished is already loaded, one it had not
+    started loads from its file, and one it was inside at the fork — its
+    import lock inherited held — would block the child for good.
+    """
+
+    def __init__(self, directory: Path) -> None:
+        self._directory = directory
+        self._prefix = f"x800_burst_{uuid.uuid4().hex[:8]}"
+        self.current: list[str] = []
+        self.imported: list[str] = []
+        self.errors: list[BaseException] = []
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._import_bursts, daemon=True)
+
+    def _import_bursts(self) -> None:
+        burst = 0
+        try:
+            while not self._stop.is_set():
+                names = [
+                    f"{self._prefix}_{burst}_{i}" for i in range(_IMPORT_BURST_SIZE)
+                ]
+                for name in names:
+                    _write_module(self._directory, name, _LOGGER_MODULE_BODY)
+                self.current = names
+                for name in names:
+                    importlib.import_module(name)
+                    self.imported.append(name)
+                burst += 1
+                self._stop.wait(_IMPORT_BURST_PAUSE_SECONDS)
+        except BaseException as e:  # pragma: no cover - asserted by the test
+            self.errors.append(e)
+
+    def __enter__(self) -> _ParentThreadImportingBursts:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._stop.set()
+        self._thread.join(timeout=_PARENT_SETUP_SECONDS)
+        for name in [*self.imported, *self.current]:
+            sys.modules.pop(name, None)
+            logging.Logger.manager.loggerDict.pop(name, None)
+
+
+class _ParentThreadReconfiguringLogging:
+    """A parent thread that re-runs ``dictConfig`` back to back until stopped,
+    importing its handler class afresh on every run.
+
+    ``dictConfig`` holds logging's module lock while it resolves a class name,
+    so each run imports under the lock the before-fork step's hold takes; with
+    no pause between runs, a fork almost always meets a run in progress. It
+    also closes and forgets every handler registered before it, so the runs
+    happen against a private handler registry, and the ``disabled`` flags it
+    rewrites on existing loggers are put back afterwards.
+    """
+
+    def __init__(self, directory: Path) -> None:
+        self._module = f"x800_dictconfig_{uuid.uuid4().hex[:12]}"
+        _write_module(directory, self._module, _DICT_CONFIG_HANDLER_BODY)
+        self._logger_name = f"{self._module}.configured"
+        self._config = {
+            "version": 1,
+            "disable_existing_loggers": False,
+            "handlers": {"reimported": {"class": f"{self._module}.Handler"}},
+            "loggers": {
+                self._logger_name: {"handlers": ["reimported"], "propagate": False}
+            },
+        }
+        self.runs = 0
+        self.errors: list[BaseException] = []
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._reconfigure, daemon=True)
+
+    def _reconfigure(self) -> None:
+        try:
+            while not self._stop.is_set():
+                sys.modules.pop(self._module, None)
+                logging.config.dictConfig(self._config)
+                self.runs += 1
+        except BaseException as e:  # pragma: no cover - asserted by the test
+            self.errors.append(e)
+
+    def __enter__(self) -> _ParentThreadReconfiguringLogging:
+        manager = logging.Logger.manager
+        self._disabled_before = {
+            name: logger.disabled
+            for name, logger in list(manager.loggerDict.items())
+            if isinstance(logger, logging.Logger)
+        }
+        self._registry_before = (logging._handlerList, logging._handlers)
+        logging._handlerList, logging._handlers = [], {}
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._stop.set()
+        self._thread.join(timeout=_PARENT_SETUP_SECONDS)
+        configured = logging.getLogger(self._logger_name)
+        for handler in list(configured.handlers):
+            configured.removeHandler(handler)
+            handler.close()
+        logging._handlerList, logging._handlers = self._registry_before
+        manager = logging.Logger.manager
+        for name, disabled in self._disabled_before.items():
+            logger = manager.loggerDict.get(name)
+            if isinstance(logger, logging.Logger):
+                logger.disabled = disabled
+        manager.loggerDict.pop(self._logger_name, None)
+        sys.modules.pop(self._module, None)
+
+
+class TestImportsAcrossTheFork:
+    """No child is born holding a module import lock a parent thread owned.
+
+    Python guards each module under import with a lock the importing thread
+    owns until the body has run; a fork inside that window hands the child the
+    lock with no thread left to release it, and the child's import of that
+    module blocks forever. The fork waits, bounded, for such imports.
+    """
+
+    def test_fork_waits_for_a_parent_import_and_the_child_imports_the_module(
+        self, module_dir
+    ):
+        """
+        Purpose:
+            A parent thread is inside a module body when the parent forks, and
+            finishes it shortly after the fork call starts.
+        Expected:
+            - The fork returns only after the import was let go, and before the
+              wait's budget ran out
+            - The child imports the module, complete, within its bound
+        """
+        # Given
+        budget = process_utils._FORK_IMPORT_WAIT_SECONDS
+        observed: dict[str, Any] = {}
+        held = _ParentImportHeld(module_dir, "waited_for")
+
+        def child() -> dict[str, Any]:
+            started = time.monotonic()
+            module = importlib.import_module(held.name)
+            return {
+                "done": getattr(module, "DONE", False),
+                "seconds": time.monotonic() - started,
+            }
+
+        with held:
+            let_go = threading.Timer(_PARENT_IMPORT_RELEASE_SECONDS, held.release)
+            started = time.monotonic()
+
+            def fork_returned() -> None:
+                observed["seconds"] = time.monotonic() - started
+                observed["released"] = held.released
+
+            let_go.start()
+            try:
+                # When
+                report = _run_in_child(child, after_fork_in_parent=fork_returned)
+            finally:
+                let_go.cancel()
+                let_go.join(timeout=_PARENT_SETUP_SECONDS)
+
+        # Then
+        assert observed["released"] is True
+        assert observed["seconds"] < budget
+        assert report["ok"], report
+        assert report["done"] is True
+        assert report["seconds"] < _CHILD_IMPORT_SECONDS
+
+    def test_fork_past_a_parent_import_that_outlives_the_wait_is_bounded(
+        self, module_dir
+    ):
+        """
+        Purpose:
+            A parent import that outlives the wait (network in a module body)
+            must not turn into a stuck fork; the child inherits that import's
+            lock held, and its own forks must not wait for it.
+        Expected:
+            - The fork returns after the wait's budget and within its slack
+            - The parent's import then completes
+            - The child's own fork returns within the per-fork bound
+        """
+        # Given
+        budget = process_utils._FORK_IMPORT_WAIT_SECONDS
+        observed: dict[str, float] = {}
+
+        def child() -> dict[str, Any]:
+            started = time.monotonic()
+            pid = os.fork()
+            if pid == 0:  # pragma: no cover - runs only in the grandchild
+                os._exit(0)
+            seconds = time.monotonic() - started
+            os.waitpid(pid, 0)
+            return {"fork_seconds": seconds}
+
+        with _ParentImportHeld(module_dir, "outlives_wait") as held:
+            started = time.monotonic()
+
+            # When
+            report = _run_in_child(
+                child,
+                after_fork_in_parent=lambda: observed.setdefault(
+                    "seconds", time.monotonic() - started
+                ),
+            )
+            completed = held.completed()
+
+        # Then
+        assert (
+            budget <= observed["seconds"] < budget + _FORK_PAST_THE_WAIT_SLACK_SECONDS
+        )
+        assert completed
+        assert report["ok"], report
+        assert report["fork_seconds"] < _FORK_DURATION_SECONDS
+
+    def test_forks_while_a_parent_thread_imports_logging_modules_stall_no_one(
+        self, module_dir
+    ):
+        """
+        Purpose:
+            A parent thread imports bursts of modules that create loggers while
+            another writes through a stream handler, and the parent forks
+            repeatedly. The hold owns logging's module lock, which each such
+            body needs: waiting before the hold lets the body finish, and
+            the re-check after it catches one that started meanwhile.
+        Expected:
+            - Every child imports the burst its parent was on and logs its
+              first record within the per-child bound
+            - No fork takes longer than the per-fork bound
+        """
+        # Given
+        fork_seconds: list[float] = []
+        failed_children = 0
+
+        with (
+            _parent_threads_writing(module_dir / "stream.log") as direct_logger,
+            _ParentThreadImportingBursts(module_dir) as importer,
+        ):
+            # When
+            for _ in range(_IMPORT_BURST_FORKS):
+                started = time.monotonic()
+                pid = os.fork()
+                if pid == 0:  # pragma: no cover - runs only in the forked child
+                    _arm_child_backstop(_CHILD_FIRST_RECORD_SECONDS)
+                    try:
+                        for name in importer.current:
+                            importlib.import_module(name)
+                        direct_logger.info("child first record")
+                    except BaseException:
+                        os._exit(1)
+                    os._exit(0)
+                fork_seconds.append(time.monotonic() - started)
+                _, status = os.waitpid(pid, 0)
+                if os.waitstatus_to_exitcode(status) != 0:
+                    failed_children += 1
+            imported = len(importer.imported)
+
+        # Then — the bursts really ran while the parent forked
+        assert importer.errors == []
+        assert imported >= _IMPORT_BURST_SIZE
+        assert failed_children == 0
+        assert max(fork_seconds) < _FORK_DURATION_SECONDS, max(fork_seconds)
+
+    def test_forks_while_a_parent_thread_imports_under_loggings_lock_never_deadlock(
+        self, module_dir
+    ):
+        """
+        Purpose:
+            ``dictConfig`` imports the handler classes it names while it holds
+            logging's module lock. A fork that held the interpreter's import
+            lock and then waited for logging's lock would deadlock against it;
+            the before-fork step never takes the import lock.
+        Expected:
+            - Every fork returns within the per-fork bound
+        """
+        # Given
+        fork_seconds: list[float] = []
+
+        with _ParentThreadReconfiguringLogging(module_dir) as reconfigurer:
+            # When
+            for _ in range(_DICT_CONFIG_FORKS):
+                started = time.monotonic()
+                pid = os.fork()
+                if pid == 0:  # pragma: no cover - runs only in the forked child
+                    os._exit(0)
+                fork_seconds.append(time.monotonic() - started)
+                os.waitpid(pid, 0)
+            runs = reconfigurer.runs
+
+        # Then — the reconfiguration really ran while the parent forked
+        assert reconfigurer.errors == []
+        assert runs > 0
+        assert max(fork_seconds) < _DICT_CONFIG_FORK_SECONDS, max(fork_seconds)

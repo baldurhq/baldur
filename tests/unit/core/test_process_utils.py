@@ -27,7 +27,11 @@ The last group covers what a fork child inherits from the threads it does not
 have: ``fork_safe_lock()`` / ``fork_safe_rlock()`` / ``register_fork_safe_lock()``
 register locks for the child step that re-initializes them, and the before-fork
 step holds each stream handler's lock so no parent thread is inside a log write
-when the child is created. The steps are module functions, so they are driven
+when the child is created. The same step first waits, bounded, for module
+imports other threads have in progress; those cases hold a real import inside
+a module body written to ``tmp_path``, or give the step a stub of the import
+state through ``process_utils``' own references, which leaves the interpreter's
+import system untouched. The steps are module functions, so they are driven
 directly here without forking; the real-fork compositions live in the
 integration suite. ``_at_fork_reinit`` exists only where ``fork()`` does, so the
 registration and repair cases are POSIX-only.
@@ -35,6 +39,8 @@ registration and repair cases are POSIX-only.
 
 from __future__ import annotations
 
+import _imp
+import importlib
 import io
 import logging
 import logging.handlers
@@ -44,6 +50,9 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
+import types
+import uuid
 import weakref
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -1622,6 +1631,1078 @@ class TestForkHookInstallContract:
         monkeypatch.setattr(process_utils, "os", SimpleNamespace())
 
         process_utils._install_fork_hook()
+
+
+# =============================================================================
+# Import wait across the fork — shared doubles
+# =============================================================================
+
+# How long a test waits for a helper thread to reach the state it sets up.
+_HELPER_SETUP_SECONDS = 5.0
+
+# A held body a test never released finishes on its own after this, so its
+# thread cannot outlive the test by long.
+_HELD_BODY_RELEASE_TIMEOUT = 10.0
+
+# The bound a finished import wait, or a budget patched short, must return in
+# (the design's slack over the budget for a step that did not wait it out).
+_STEP_RETURN_SLACK_SECONDS = 0.2
+_STEP_WITHOUT_BUDGET_SECONDS = 0.5
+
+# A module body held mid-import. It reaches its events through a gate module
+# placed in ``sys.modules``, so it makes no import of its own before ``tail``.
+_HELD_MODULE_BODY = """\
+import sys
+
+_gate = sys.modules[{gate!r}]
+_gate.entered.set()
+_gate.release.wait(timeout={release_timeout!r})
+{tail}
+DONE = True
+"""
+
+# A body that asks the detector, from inside its own import, what it sees.
+_REPORT_THE_DETECTOR_FROM_THE_BODY = """\
+import importlib
+
+from baldur.core import process_utils
+
+_gate.registered = __name__ in importlib._bootstrap._module_locks
+_gate.seen = [
+    getattr(lock, "name", None)
+    for lock in process_utils._module_locks_held_elsewhere()
+]
+"""
+
+# A body that creates a logger — as nearly every module does — which takes
+# logging's module lock.
+_CREATE_A_LOGGER = """\
+import logging
+
+logging.getLogger(__name__)
+"""
+
+_ABSENT = object()
+
+
+def _lock_names(locks: list) -> list:
+    """The module names of the import locks the detector returned."""
+    return [getattr(lock, "name", None) for lock in locks]
+
+
+class _ImportHeldInsideItsBody:
+    """A fresh module whose import is held inside the module body.
+
+    The file is written to ``directory``, which the ``held_import`` fixture puts
+    on ``sys.path``. The body sets ``entered``, waits for ``release``, runs
+    ``tail`` and binds ``DONE``; both events live on a gate module placed in
+    ``sys.modules``. While the body waits, the importing thread owns the
+    module's import lock — the state a fork taken at that instant hands the
+    child. ``cleanup()`` releases the body, joins the thread and removes the
+    module, its gate and any logger named after it, so no later test finds an
+    import in progress it did not start.
+    """
+
+    def __init__(
+        self, directory, purpose: str, *, tail: str = "", released: bool = False
+    ) -> None:
+        self.name = f"x800_{purpose}_{uuid.uuid4().hex[:12]}"
+        self.gate = types.ModuleType(f"{self.name}_gate")
+        self.gate.entered = threading.Event()
+        self.gate.release = threading.Event()
+        if released:
+            self.gate.release.set()
+        sys.modules[self.gate.__name__] = self.gate
+        (directory / f"{self.name}.py").write_text(
+            _HELD_MODULE_BODY.format(
+                gate=self.gate.__name__,
+                release_timeout=_HELD_BODY_RELEASE_TIMEOUT,
+                tail=tail,
+            ),
+            encoding="utf-8",
+        )
+        importlib.invalidate_caches()
+        self.errors: list[BaseException] = []
+        self._thread = threading.Thread(target=self.import_here, daemon=True)
+
+    def import_here(self) -> None:
+        """Import the module on the calling thread, recording what it raised."""
+        try:
+            importlib.import_module(self.name)
+        except BaseException as e:  # pragma: no cover - reported by finish()
+            self.errors.append(e)
+
+    def start(self) -> None:
+        """Import on a helper thread; return once it is inside the body."""
+        self._thread.start()
+        assert self.gate.entered.wait(_HELPER_SETUP_SECONDS), (
+            "the import never reached its module body"
+        )
+
+    def release(self) -> None:
+        self.gate.release.set()
+
+    def finish(self) -> bool:
+        """Let the body run to its end; True if the import then completed."""
+        self.release()
+        if self._thread.ident is not None:
+            self._thread.join(timeout=_HELPER_SETUP_SECONDS)
+        module = sys.modules.get(self.name)
+        return self.errors == [] and getattr(module, "DONE", False) is True
+
+    def cleanup(self) -> None:
+        self.finish()
+        sys.modules.pop(self.name, None)
+        sys.modules.pop(self.gate.__name__, None)
+        logging.Logger.manager.loggerDict.pop(self.name, None)
+
+
+@pytest.fixture
+def held_import(tmp_path, monkeypatch):
+    """Build imports held inside their module body; each is cleaned up after."""
+    monkeypatch.syspath_prepend(str(tmp_path))
+    built: list[_ImportHeldInsideItsBody] = []
+
+    def build(purpose: str, **options) -> _ImportHeldInsideItsBody:
+        held = _ImportHeldInsideItsBody(tmp_path, purpose, **options)
+        built.append(held)
+        return held
+
+    yield build
+    for held in built:
+        held.cleanup()
+
+
+class _StubModuleLock:
+    """Stands in for ``importlib._bootstrap._ModuleLock``: only the attributes
+    the detector reads, each given a value or left absent."""
+
+    def __init__(self, *, owner=_ABSENT, count=_ABSENT, name=_ABSENT) -> None:
+        for attribute, value in (("owner", owner), ("count", count), ("name", name)):
+            if value is not _ABSENT:
+                setattr(self, attribute, value)
+
+
+def _owned_elsewhere(name=_ABSENT) -> _StubModuleLock:
+    """A module lock another thread owns — an import in progress there."""
+    return _StubModuleLock(owner=threading.get_ident() + 1, count=[True], name=name)
+
+
+class _StubImportSystem:
+    """The import state the before-fork step reads, owned by the test.
+
+    Installed through ``process_utils``' own references to ``importlib`` and
+    ``_imp``: the interpreter's import system, which the rest of the test
+    process keeps using, is never touched, and no real import elsewhere in the
+    process changes what the step sees.
+    """
+
+    def __init__(self, monkeypatch, *, import_lock_held: bool = False) -> None:
+        self.registry: dict = {}
+        # The importing thread keeps its lock object alive; the registry itself
+        # holds only a weak reference, as CPython's does.
+        self._importing: dict = {}
+        self.import_lock_held = import_lock_held
+        monkeypatch.setattr(
+            process_utils,
+            "importlib",
+            SimpleNamespace(_bootstrap=SimpleNamespace(_module_locks=self.registry)),
+        )
+        monkeypatch.setattr(
+            process_utils,
+            "_imp",
+            SimpleNamespace(lock_held=lambda: self.import_lock_held),
+        )
+
+    def begin(self, lock) -> None:
+        """An import begins: its module lock enters the registry."""
+        key = getattr(lock, "name", id(lock))
+        self._importing[key] = lock
+        self.registry[key] = weakref.ref(lock)
+
+    def end(self, lock) -> None:
+        """The import ends: its module lock leaves the registry."""
+        key = getattr(lock, "name", id(lock))
+        self.registry.pop(key, None)
+        self._importing.pop(key, None)
+
+
+class _RaisingModuleLockRegistry:
+    """A module-lock registry whose snapshot raises."""
+
+    def __init__(self) -> None:
+        self.touched = False
+
+    def values(self):
+        self.touched = True
+        raise RuntimeError("registry unreadable")
+
+
+class _ImportLockQuery:
+    """Stands in for ``_imp.lock_held``: answers ``result`` or raises."""
+
+    def __init__(self, result: bool = False, *, raises: bool = False) -> None:
+        self._result = result
+        self._raises = raises
+        self.calls = 0
+
+    def __call__(self) -> bool:
+        self.calls += 1
+        if self._raises:
+            raise RuntimeError("import-lock query failed")
+        return self._result
+
+
+class _SignalHandlerException(Exception):
+    """Stands in for what a Python signal handler raises inside a sleep —
+    Celery's ``SoftTimeLimitExceeded``, an alarm timeout: an ``Exception``."""
+
+
+class _ObservedTime:
+    """``process_utils``' view of ``time``: the real clock, observed sleeps.
+
+    Each ``sleep`` is recorded and runs ``on_sleep`` first; it then raises
+    ``raises`` if one was given, or pauses for the requested time on an event
+    that is never set — a real pause that releases the GIL, with no
+    ``time.sleep`` in the test.
+    """
+
+    def __init__(self, *, on_sleep=None, raises: Exception | None = None) -> None:
+        self.sleeps: list[float] = []
+        self._on_sleep = on_sleep
+        self._raises = raises
+        self._never = threading.Event()
+
+    def monotonic(self) -> float:
+        return time.monotonic()
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        if self._on_sleep is not None:
+            self._on_sleep()
+        if self._raises is not None:
+            raise self._raises
+        self._never.wait(seconds)
+
+
+class _StepPasses:
+    """Counts the before-fork step's passes and lets a test act at their edges.
+
+    Wraps the step's hold and release helpers in place, so ``after_hold(n)``
+    runs once pass ``n`` holds its locks — before the step re-checks the import
+    state — and ``after_release(n)`` once the ``n``-th release (a retry, or the
+    parent step) has let them go. Both see the real helpers' effects.
+    """
+
+    def __init__(self, monkeypatch, *, after_hold=None, after_release=None) -> None:
+        self.holds = 0
+        self.releases = 0
+        real_hold = process_utils._hold_stream_handler_locks
+        real_release = process_utils._release_held_locks
+
+        def hold(frame) -> bool:
+            complete = real_hold(frame)
+            self.holds += 1
+            if after_hold is not None:
+                after_hold(self.holds)
+            return complete
+
+        def release(frame) -> None:
+            real_release(frame)
+            self.releases += 1
+            if after_release is not None:
+                after_release(self.releases)
+
+        monkeypatch.setattr(process_utils, "_hold_stream_handler_locks", hold)
+        monkeypatch.setattr(process_utils, "_release_held_locks", release)
+
+
+class _ImportLockHeldOnDemand:
+    """A helper thread that takes the interpreter's global import lock when
+    asked and gives it back when asked — a thread inside ``_get_module_lock``
+    or a finder call, which owns no module lock yet.
+
+    Nothing may import while it holds the lock: that import would wait for
+    this thread. Its own waits are bounded, so a stray import in the process
+    makes a failing test slow, never hung.
+    """
+
+    def __init__(self) -> None:
+        self._take = threading.Event()
+        self._taken = threading.Event()
+        self._give_back = threading.Event()
+        self.given_back = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self) -> None:
+        self._take.wait(_HELPER_SETUP_SECONDS)
+        _imp.acquire_lock()
+        self._taken.set()
+        self._give_back.wait(_HELPER_SETUP_SECONDS)
+        _imp.release_lock()
+        self.given_back.set()
+
+    def take(self) -> None:
+        self._take.set()
+        assert self._taken.wait(_HELPER_SETUP_SECONDS), "import lock never taken"
+
+    def give_back(self) -> None:
+        self._give_back.set()
+
+    def __enter__(self) -> _ImportLockHeldOnDemand:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._give_back.set()
+        self._take.set()
+        self._thread.join(timeout=_HELPER_SETUP_SECONDS)
+
+
+class _LockTakenOnDemand:
+    """A helper thread that takes ``lock`` when asked and frees it when asked,
+    each call returning once the helper has done it — a log write that starts
+    and ends at the instants the test chooses."""
+
+    def __init__(self, lock) -> None:
+        self._lock = lock
+        self._take = threading.Event()
+        self._taken = threading.Event()
+        self._free = threading.Event()
+        self._freed = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self) -> None:
+        self._take.wait(_HELD_BODY_RELEASE_TIMEOUT)
+        self._lock.acquire()
+        self._taken.set()
+        self._free.wait(_HELD_BODY_RELEASE_TIMEOUT)
+        self._lock.release()
+        self._freed.set()
+
+    def take(self) -> None:
+        self._take.set()
+        assert self._taken.wait(_HELPER_SETUP_SECONDS), "the writer never took it"
+
+    def free(self) -> None:
+        self._free.set()
+        assert self._freed.wait(_HELPER_SETUP_SECONDS), "the writer never freed it"
+
+    def __enter__(self) -> _LockTakenOnDemand:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._free.set()
+        self._take.set()
+        self._thread.join(timeout=_HELPER_SETUP_SECONDS)
+
+
+class _LockAwareCapture(logging.Handler):
+    """Records each log record, and whether the emitting thread then held
+    logging's module lock or any of the ``watch``-ed stream-handler locks."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.DEBUG)
+        self._watched: tuple = ()
+        self.records: list[tuple[logging.LogRecord, bool]] = []
+
+    def watch(self, *locks) -> None:
+        self._watched = locks
+
+    def emit(self, record: logging.LogRecord) -> None:
+        held = logging._lock._is_owned() or any(
+            lock._is_owned() for lock in self._watched
+        )
+        self.records.append((record, held))
+
+
+@pytest.fixture
+def fork_step_warnings(monkeypatch):
+    """Capture ``process_utils``' own records at WARNING and above.
+
+    Set on the module's logger itself: the test process's logging setup may
+    have raised its level or disabled it.
+    """
+    capture = _LockAwareCapture()
+    log = process_utils.logger
+    monkeypatch.setattr(log, "disabled", False)
+    previous_level = log.level
+    log.setLevel(logging.WARNING)
+    log.addHandler(capture)
+    yield capture
+    log.removeHandler(capture)
+    log.setLevel(previous_level)
+
+
+# =============================================================================
+# Import wait across the fork
+# =============================================================================
+
+
+class TestForkImportWaitContract:
+    """The import wait's named values and the interpreter internals it reads."""
+
+    def test_import_wait_budget_and_poll_interval_are_the_designed_values(self):
+        """One second of waiting in total, read every millisecond."""
+        assert process_utils._FORK_IMPORT_WAIT_SECONDS == 1.0
+        assert process_utils._FORK_IMPORT_POLL_SECONDS == 0.001
+
+    def test_private_attributes_the_import_wait_reads_exist_on_this_interpreter(
+        self,
+    ):
+        """Tripwire: every read degrades to "no import in progress", so a
+        CPython release that renames one of these would silently drop the wait.
+
+        A module lock is read as held by its ``owner`` and a truthy ``count``
+        (an int on 3.11, a list from 3.12) — the shape the stub locks copy.
+        """
+        # Given
+        lock = importlib._bootstrap._ModuleLock("x800_tripwire")
+        free_shape = (lock.owner, bool(lock.count))
+
+        # When
+        lock.acquire()
+        try:
+            held_shape = (lock.owner, bool(lock.count))
+        finally:
+            lock.release()
+
+        # Then
+        assert isinstance(importlib._bootstrap._module_locks, dict)
+        assert lock.name == "x800_tripwire"
+        assert free_shape == (None, False)
+        assert held_shape == (threading.get_ident(), True)
+        assert isinstance(_imp.lock_held(), bool)
+
+
+@pytest.mark.usefixtures("clean_fork_log_stack")
+class TestForkImportWaitBehavior:
+    """The before-fork step waits out other threads' imports, bounded.
+
+    A fork taken while another thread is inside a module import hands the
+    child that module's import lock owned by a thread it does not have. The
+    step waits holding nothing, takes the stream-handler hold, re-checks and
+    retries; after its budget it forks with the hold in place and the parent
+    step reports the module. The test thread plays the forking thread.
+    """
+
+    # -- the detector ---------------------------------------------------------
+
+    def test_detector_reads_a_thread_inside_a_module_body_until_the_body_finishes(
+        self, held_import
+    ):
+        """The live registry: in progress while the body runs, clear after."""
+        # Given
+        held = held_import("inside_body")
+        held.start()
+
+        # When
+        during = _lock_names(process_utils._module_locks_held_elsewhere())
+        completed = held.finish()
+        after = _lock_names(process_utils._module_locks_held_elsewhere())
+
+        # Then
+        assert held.name in during
+        assert completed
+        assert held.name not in after
+
+    def test_detector_called_inside_a_module_body_ignores_the_callers_own_import(
+        self, held_import
+    ):
+        """A fork made from a module body (a module that starts a process pool
+        when imported) must not wait its whole budget on its own import.
+        """
+        # Given
+        held = held_import(
+            "own_import", released=True, tail=_REPORT_THE_DETECTOR_FROM_THE_BODY
+        )
+
+        # When
+        held.import_here()
+
+        # Then — the caller's lock was registered, and the detector left it out
+        assert held.errors == []
+        assert held.gate.registered is True
+        assert held.name not in held.gate.seen
+
+    @pytest.mark.parametrize(
+        ("owner", "count", "inherited", "expected_held"),
+        [
+            ("another thread", [True], False, True),
+            ("another thread", 1, False, True),
+            ("another thread", [True], True, False),
+            ("calling thread", [True], False, False),
+            (None, [True], False, False),
+            ("another thread", [], False, False),
+            ("another thread", 0, False, False),
+            (_ABSENT, [True], False, False),
+            ("another thread", _ABSENT, False, False),
+        ],
+        ids=[
+            "list_count_owned_elsewhere",
+            "int_count_owned_elsewhere",
+            "inherited_held_at_this_process_creation",
+            "owned_by_the_caller",
+            "no_owner",
+            "empty_list_count",
+            "zero_int_count",
+            "owner_attribute_absent",
+            "count_attribute_absent",
+        ],
+    )
+    def test_detector_counts_only_a_lock_another_live_thread_owns(
+        self, monkeypatch, owner, count, inherited, expected_held
+    ):
+        """Held means: another thread's ident, a truthy count, and not a lock
+        this process inherited held — whose owner does not exist here."""
+        # Given
+        me = threading.get_ident()
+        owner = {"another thread": me + 1, "calling thread": me}.get(owner, owner)
+        lock = _StubModuleLock(owner=owner, count=count, name="x800_stub")
+        imports = _StubImportSystem(monkeypatch)
+        imports.begin(lock)
+        monkeypatch.setattr(
+            process_utils,
+            "_fork_inherited_import_locks",
+            weakref.WeakSet([lock] if inherited else []),
+        )
+
+        # When
+        held = process_utils._module_locks_held_elsewhere()
+
+        # Then
+        assert held == ([lock] if expected_held else [])
+
+    def test_detector_skips_a_dead_registry_entry_and_reads_on(self, monkeypatch):
+        """A lock object that died leaves a dead reference behind for a moment;
+        the scan passes over it to the entries after it."""
+        # Given — a dead reference ahead of a live import
+        imports = _StubImportSystem(monkeypatch)
+        imports.registry["x800_dead"] = weakref.ref(_owned_elsewhere("x800_dead"))
+        live = _owned_elsewhere("x800_live")
+        imports.begin(live)
+
+        # When
+        held = process_utils._module_locks_held_elsewhere()
+
+        # Then
+        assert held == [live]
+
+    @pytest.mark.parametrize(
+        "make_importlib",
+        [
+            lambda: SimpleNamespace(),
+            lambda: SimpleNamespace(_bootstrap=SimpleNamespace()),
+            lambda: SimpleNamespace(
+                _bootstrap=SimpleNamespace(_module_locks=_RaisingModuleLockRegistry())
+            ),
+        ],
+        ids=["bootstrap_absent", "registry_absent", "registry_raises"],
+    )
+    def test_unreadable_registry_reads_as_no_import_in_progress(
+        self, monkeypatch, make_importlib
+    ):
+        """Fail toward "no import in progress": the fork behaves as without
+        the wait, never worse."""
+        # Given
+        stand_in = make_importlib()
+        monkeypatch.setattr(process_utils, "importlib", stand_in)
+        registry = getattr(getattr(stand_in, "_bootstrap", None), "_module_locks", None)
+
+        # When
+        held = process_utils._module_locks_held_elsewhere()
+
+        # Then — a registry that is there was read, not bypassed
+        assert held == []
+        assert registry is None or registry.touched
+
+    @pytest.mark.parametrize(
+        ("make_query", "expected_held"),
+        [
+            (lambda: _ImportLockQuery(True), True),
+            (lambda: _ImportLockQuery(False), False),
+            (lambda: _ImportLockQuery(raises=True), False),
+            (lambda: None, False),
+        ],
+        ids=["held", "free", "query_raises", "query_absent"],
+    )
+    def test_import_lock_reads_as_held_only_when_its_query_says_so(
+        self, monkeypatch, make_query, expected_held
+    ):
+        """An absent or failing ``_imp.lock_held`` reads as free."""
+        query = make_query()
+        stand_in = (
+            SimpleNamespace() if query is None else SimpleNamespace(lock_held=query)
+        )
+        monkeypatch.setattr(process_utils, "_imp", stand_in)
+
+        held = process_utils._import_lock_held()
+
+        assert held is expected_held
+        assert query is None or query.calls == 1
+
+    # -- the before step --------------------------------------------------------
+
+    def test_before_step_waits_for_an_import_in_progress_then_holds_the_log_locks(
+        self, monkeypatch, isolated_handlers, held_import
+    ):
+        """The import finishes within the wait; the step then takes the log
+        hold, and the parent step leaves every lock it took free."""
+        # Given — a thread inside a module body, let go once the step sleeps
+        handler = logging.StreamHandler(io.StringIO())
+        isolated_handlers(handler)
+        held = held_import("waited_for")
+        held.start()
+        clock = _ObservedTime(on_sleep=held.release)
+        monkeypatch.setattr(process_utils, "time", clock)
+
+        # When
+        started = time.monotonic()
+        process_utils._before_fork()
+        elapsed = time.monotonic() - started
+        try:
+            done_at_return = getattr(sys.modules.get(held.name), "DONE", False)
+            frame = _frames()[-1]
+            state = (frame.module_lock, list(frame.handler_locks))
+            reported = list(frame.imports_in_progress)
+        finally:
+            process_utils._release_stream_handler_locks()
+
+        # Then
+        assert clock.sleeps
+        assert done_at_return is True
+        assert elapsed < process_utils._FORK_IMPORT_WAIT_SECONDS
+        assert state == (logging._lock, [handler.lock])
+        assert reported == []
+        assert _frames() == []
+        assert _free_from_another_thread(logging._lock)
+        assert _free_from_another_thread(handler.lock)
+
+    def test_before_step_gives_up_on_an_import_that_outlives_the_budget(
+        self, monkeypatch, isolated_handlers, held_import
+    ):
+        """A slow import never becomes a stuck fork: the step returns at the
+        budget with the log hold in place, names the module for the parent
+        step, and the parent step frees the locks."""
+        # Given — a budget patched short and a body that stays put
+        monkeypatch.setattr(process_utils, "_FORK_IMPORT_WAIT_SECONDS", 0.1)
+        handler = logging.StreamHandler(io.StringIO())
+        isolated_handlers(handler)
+        held = held_import("outlives_budget")
+        held.start()
+
+        # When
+        started = time.monotonic()
+        process_utils._before_fork()
+        elapsed = time.monotonic() - started
+        try:
+            frame = _frames()[-1]
+            state = (frame.module_lock, list(frame.handler_locks))
+            reported = list(frame.imports_in_progress)
+        finally:
+            process_utils._release_stream_handler_locks()
+
+        # Then
+        budget = process_utils._FORK_IMPORT_WAIT_SECONDS
+        assert budget <= elapsed < budget + _STEP_RETURN_SLACK_SECONDS
+        assert state == (logging._lock, [handler.lock])
+        assert held.name in reported
+        assert _free_from_another_thread(logging._lock)
+        assert _free_from_another_thread(handler.lock)
+
+    def test_an_import_blocked_on_the_hold_makes_the_step_retry_not_spend_its_budget(
+        self, monkeypatch, isolated_handlers, held_import
+    ):
+        """A module body that calls ``logging.getLogger()`` — nearly every
+        module — blocks on logging's lock while the hold owns it. The re-check
+        sees that import, the step lets go, waits for it and holds again: one
+        more pass, no budget spent, still one frame for the after-step to pop.
+        """
+        # Given — the import starts inside the first pass's hold
+        handler = logging.StreamHandler(io.StringIO())
+        isolated_handlers(handler)
+        held = held_import("blocked_on_hold", released=True, tail=_CREATE_A_LOGGER)
+        passes = _StepPasses(
+            monkeypatch, after_hold=lambda n: held.start() if n == 1 else None
+        )
+
+        # When
+        started = time.monotonic()
+        process_utils._before_fork()
+        elapsed = time.monotonic() - started
+        frames_after_step = len(_frames())
+        process_utils._release_stream_handler_locks()
+
+        # Then
+        assert passes.holds >= 2
+        assert elapsed < _STEP_WITHOUT_BUDGET_SECONDS
+        assert frames_after_step == 1
+        assert _frames() == []
+        assert held.finish()
+
+    def test_before_step_with_no_import_in_progress_does_not_sleep(
+        self, monkeypatch, isolated_handlers
+    ):
+        """The common fork pays one read of an empty registry, no wait."""
+        # Given
+        _StubImportSystem(monkeypatch)
+        clock = _ObservedTime()
+        monkeypatch.setattr(process_utils, "time", clock)
+        handler = logging.StreamHandler(io.StringIO())
+        isolated_handlers(handler)
+
+        # When
+        process_utils._before_fork()
+        try:
+            frame = _frames()[-1]
+            state = (frame.module_lock, list(frame.handler_locks))
+        finally:
+            process_utils._release_stream_handler_locks()
+
+        # Then
+        assert clock.sleeps == []
+        assert state == (logging._lock, [handler.lock])
+
+    def test_an_import_lock_taken_during_the_hold_makes_the_step_retry_until_free(
+        self, monkeypatch, isolated_handlers
+    ):
+        """A thread inside ``_get_module_lock`` holds the global import lock but
+        owns no module lock yet; the re-check's import-lock half catches it,
+        and the step retries until the lock is free."""
+        # Given — the import lock is taken inside the first pass's hold and
+        # given back once that hold is released
+        handler = logging.StreamHandler(io.StringIO())
+        isolated_handlers(handler)
+
+        with _ImportLockHeldOnDemand() as importer:
+            passes = _StepPasses(
+                monkeypatch,
+                after_hold=lambda n: importer.take() if n == 1 else None,
+                after_release=lambda n: importer.give_back() if n == 1 else None,
+            )
+
+            # When
+            process_utils._before_fork()
+            frames_after_step = len(_frames())
+            process_utils._release_stream_handler_locks()
+
+        # Then
+        assert passes.holds >= 2
+        assert importer.given_back.is_set()
+        assert frames_after_step == 1
+        assert _frames() == []
+
+    def test_a_signal_handler_exception_during_the_wait_leaves_the_hold_taken_once(
+        self, monkeypatch, isolated_handlers
+    ):
+        """An ``Exception`` raised inside the sleep ends the wait, the hold still
+        follows, and the parent step's one release frees logging's lock."""
+        # Given — an import in progress and a sleep a signal handler interrupts
+        imports = _StubImportSystem(monkeypatch)
+        imports.begin(_owned_elsewhere("x800_signal"))
+        clock = _ObservedTime(raises=_SignalHandlerException("soft time limit"))
+        monkeypatch.setattr(process_utils, "time", clock)
+        handler = logging.StreamHandler(io.StringIO())
+        isolated_handlers(handler)
+
+        # When
+        process_utils._before_fork()
+        try:
+            owns_module_lock = logging._lock._is_owned()
+            module_locks = list(_frames()[-1].module_locks)
+        finally:
+            process_utils._release_stream_handler_locks()
+
+        # Then — one sleep: the exception ended the wait rather than one poll
+        assert clock.sleeps == [process_utils._FORK_IMPORT_POLL_SECONDS]
+        assert owns_module_lock is True
+        assert module_locks == [logging._lock]
+        assert _free_from_another_thread(logging._lock)
+
+    def test_before_step_keeps_the_hold_at_the_budget_end_while_imports_run(
+        self, monkeypatch, isolated_handlers
+    ):
+        """At the budget's end nothing the hold took is let go, even with a
+        module import and the global import lock both still busy."""
+        # Given
+        monkeypatch.setattr(process_utils, "_FORK_IMPORT_WAIT_SECONDS", 0.05)
+        imports = _StubImportSystem(monkeypatch, import_lock_held=True)
+        imports.begin(_owned_elsewhere("x800_budget_end"))
+        handler = logging.StreamHandler(io.StringIO())
+        isolated_handlers(handler)
+
+        # When
+        process_utils._before_fork()
+        try:
+            frame = _frames()[-1]
+            state = (frame.module_lock, list(frame.handler_locks))
+            free_before_parent_step = (
+                _free_from_another_thread(logging._lock),
+                _free_from_another_thread(handler.lock),
+            )
+        finally:
+            process_utils._release_stream_handler_locks()
+
+        # Then
+        assert state == (logging._lock, [handler.lock])
+        assert free_before_parent_step == (False, False)
+        assert _free_from_another_thread(logging._lock)
+        assert _free_from_another_thread(handler.lock)
+
+    def test_import_lock_busy_throughout_is_waited_out_in_sleeps_not_passes(
+        self, monkeypatch, isolated_handlers
+    ):
+        """The forking thread's own import-lock hold (a fork made from inside a
+        finder) never reads free: the step sleeps between reads, takes the hold
+        once at the budget's end and returns — no spin, no endless loop."""
+        # Given
+        monkeypatch.setattr(process_utils, "_FORK_IMPORT_WAIT_SECONDS", 0.05)
+        _StubImportSystem(monkeypatch, import_lock_held=True)
+        clock = _ObservedTime()
+        monkeypatch.setattr(process_utils, "time", clock)
+        passes = _StepPasses(monkeypatch)
+        handler = logging.StreamHandler(io.StringIO())
+        isolated_handlers(handler)
+
+        # When
+        started = time.monotonic()
+        process_utils._before_fork()
+        elapsed = time.monotonic() - started
+        process_utils._release_stream_handler_locks()
+
+        # Then
+        budget = process_utils._FORK_IMPORT_WAIT_SECONDS
+        assert passes.holds == 1
+        assert clock.sleeps
+        assert set(clock.sleeps) == {process_utils._FORK_IMPORT_POLL_SECONDS}
+        assert budget <= elapsed < budget + _STEP_RETURN_SLACK_SECONDS
+
+    def test_a_retry_spends_no_second_handler_budget_and_holds_the_free_handler(
+        self, monkeypatch, isolated_handlers
+    ):
+        """The handler budget is once per fork: a second pass tries the stuck
+        stream without waiting, and still holds the free one."""
+        # Given — a stream stuck on its write ahead of a free one, and an import
+        # that begins during the first pass's hold and ends once it is released
+        clock = _FakeMonotonicClock()
+        monkeypatch.setattr(process_utils, "time", clock)
+        blocked = logging.StreamHandler(io.StringIO())
+        free = logging.StreamHandler(io.StringIO())
+        blocked.lock = blocked_lock = _TimedOutLock(clock)
+        free.lock = free_lock = _ImmediatelyFreeLock()
+        isolated_handlers(blocked, free)
+        imports = _StubImportSystem(monkeypatch)
+        in_progress = _owned_elsewhere("x800_second_pass")
+        passes = _StepPasses(
+            monkeypatch,
+            after_hold=lambda n: imports.begin(in_progress) if n == 1 else None,
+            after_release=lambda n: imports.end(in_progress) if n == 1 else None,
+        )
+
+        # When
+        process_utils._before_fork()
+        try:
+            held = list(_frames()[-1].handler_locks)
+        finally:
+            process_utils._release_stream_handler_locks()
+
+        # Then
+        budget = process_utils._FORK_LOG_HANDLER_WAIT_SECONDS
+        assert passes.holds == 2
+        assert blocked_lock.timeouts == [budget, 0.0]
+        assert free_lock.timeouts == [0.0, 0.0]
+        assert held == [free_lock]
+
+    def test_a_handler_an_earlier_pass_took_is_held_at_the_fork_not_skipped(
+        self, monkeypatch, isolated_handlers
+    ):
+        """Once the handler budget is spent a pass tries each handler without
+        waiting. A handler the first pass held, which a thread took the moment
+        the hold let go, is inside a write now — forking without it would hand
+        the child its stream's buffer lock held. The pass fails instead, the
+        step sleeps one poll, and a later pass holds it.
+        """
+        # Given — a short handler budget; A free, B behind a writer throughout;
+        # an import that begins during the first hold and ends when it is
+        # released, at which instant another thread starts writing through A
+        monkeypatch.setattr(process_utils, "_FORK_LOG_HANDLER_WAIT_SECONDS", 0.05)
+        handler_a = logging.StreamHandler(io.StringIO())
+        handler_b = logging.StreamHandler(io.StringIO())
+        isolated_handlers(handler_a, handler_b)
+        imports = _StubImportSystem(monkeypatch)
+        in_progress = _owned_elsewhere("x800_held_handler")
+        writer_on_a = _LockTakenOnDemand(handler_a.lock)
+
+        def after_release(n: int) -> None:
+            if n == 1:
+                imports.end(in_progress)
+                writer_on_a.take()
+
+        passes = _StepPasses(
+            monkeypatch,
+            after_hold=lambda n: imports.begin(in_progress) if n == 1 else None,
+            after_release=after_release,
+        )
+        polls: list[float] = []
+        real_poll = process_utils._sleep_one_poll
+
+        def poll_then_let_the_write_finish(budget: float) -> float:
+            polls.append(budget)
+            writer_on_a.free()
+            return real_poll(budget)
+
+        monkeypatch.setattr(
+            process_utils, "_sleep_one_poll", poll_then_let_the_write_finish
+        )
+
+        with _HeldByAnotherThread(handler_b.lock), writer_on_a:
+            # When
+            process_utils._before_fork()
+            try:
+                held = list(_frames()[-1].handler_locks)
+            finally:
+                process_utils._release_stream_handler_locks()
+
+        # Then — pass 2 failed on A and polled; pass 3 held it
+        assert held == [handler_a.lock]
+        assert len(polls) == 1
+        assert passes.holds == 3
+
+    def test_before_step_whose_frame_cannot_be_pushed_holds_nothing(self, monkeypatch):
+        """No frame, no hold: the fork proceeds as it would without the step."""
+        # Given
+        attempts: list[int] = []
+
+        def unpushable():
+            attempts.append(1)
+            raise RuntimeError("thread-local storage unavailable")
+
+        monkeypatch.setattr(process_utils, "_push_fork_log_hold", unpushable)
+
+        # When
+        process_utils._before_fork()
+
+        # Then
+        assert attempts == [1]
+        assert _frames() == []
+        assert _free_from_another_thread(logging._lock)
+
+    # -- the child and parent steps ---------------------------------------------
+
+    @pytest.mark.parametrize(
+        "with_frame", [True, False], ids=["with_a_frame", "without_a_frame"]
+    )
+    def test_child_step_records_the_import_locks_it_inherited_held(
+        self, monkeypatch, with_frame
+    ):
+        """Their owners did not survive the fork, so the locks are never freed;
+        recorded, they no longer make this process's own forks wait. The record
+        is kept whether or not the before-step left a frame.
+        """
+        # Given — two imports other threads had in progress, the forking
+        # thread's own, and a lock no one holds
+        monkeypatch.setattr(process_utils, "_fork_safe_locks", [])
+        inherited = weakref.WeakSet()
+        monkeypatch.setattr(process_utils, "_fork_inherited_import_locks", inherited)
+        imports = _StubImportSystem(monkeypatch)
+        me = threading.get_ident()
+        list_count = _StubModuleLock(owner=me + 1, count=[True], name="x800_a")
+        int_count = _StubModuleLock(owner=me + 2, count=1, name="x800_b")
+        own = _StubModuleLock(owner=me, count=[True], name="x800_own")
+        free = _StubModuleLock(owner=None, count=[], name="x800_free")
+        for lock in (list_count, int_count, own, free):
+            imports.begin(lock)
+        if with_frame:
+            process_utils._push_fork_log_hold()
+
+        # When
+        process_utils._repair_after_fork_in_child()
+
+        # Then
+        assert set(inherited) == {list_count, int_count}
+        assert process_utils._imports_in_progress() is False
+        assert _frames() == []
+
+    def test_child_step_with_an_unreadable_registry_records_nothing_quietly(
+        self, monkeypatch
+    ):
+        """Fail-open: the child keeps going with nothing recorded."""
+        # Given
+        monkeypatch.setattr(process_utils, "_fork_safe_locks", [])
+        inherited = weakref.WeakSet()
+        monkeypatch.setattr(process_utils, "_fork_inherited_import_locks", inherited)
+        registry = _RaisingModuleLockRegistry()
+        monkeypatch.setattr(
+            process_utils,
+            "importlib",
+            SimpleNamespace(_bootstrap=SimpleNamespace(_module_locks=registry)),
+        )
+
+        # When
+        process_utils._repair_after_fork_in_child()
+
+        # Then
+        assert registry.touched
+        assert len(inherited) == 0
+
+    @pytest.mark.parametrize(
+        ("module_imports", "import_lock_held", "expected_modules"),
+        [
+            (lambda: [_owned_elsewhere("x_800_mod")], False, [["x_800_mod"]]),
+            (
+                lambda: [_owned_elsewhere()],
+                False,
+                [[process_utils._UNNAMED_MODULE]],
+            ),
+            (lambda: [], True, []),
+            (lambda: [], False, []),
+        ],
+        ids=[
+            "module_import_past_the_budget",
+            "unnamed_module_import_past_the_budget",
+            "import_lock_alone_past_the_budget",
+            "nothing_in_progress",
+        ],
+    )
+    def test_parent_step_warns_once_for_a_fork_that_gave_up_on_a_module_import(
+        self,
+        monkeypatch,
+        isolated_handlers,
+        fork_step_warnings,
+        module_imports,
+        import_lock_held,
+        expected_modules,
+    ):
+        """The child may hang on its first import of that module, so the parent
+        names it — once the step's locks are given back. A budget spent on the
+        global import lock alone hands the child nothing held (CPython
+        re-initializes that lock there), and logs nothing.
+        """
+        # Given
+        monkeypatch.setattr(process_utils, "_FORK_IMPORT_WAIT_SECONDS", 0.05)
+        imports = _StubImportSystem(monkeypatch, import_lock_held=import_lock_held)
+        in_progress = module_imports()
+        for lock in in_progress:
+            imports.begin(lock)
+        handler = logging.StreamHandler(io.StringIO())
+        isolated_handlers(handler)
+        fork_step_warnings.watch(handler.lock)
+
+        # When
+        process_utils._before_fork()
+        process_utils._release_stream_handler_locks()
+
+        # Then
+        records = [record for record, _ in fork_step_warnings.records]
+        assert [record.modules for record in records] == expected_modules
+        assert all(
+            record.getMessage() == "process_utils.fork_import_wait_timeout"
+            and record.levelno == logging.WARNING
+            and record.waited_seconds >= process_utils._FORK_IMPORT_WAIT_SECONDS
+            for record in records
+        )
+        assert not any(held for _, held in fork_step_warnings.records)
 
 
 # =============================================================================
