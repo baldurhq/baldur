@@ -324,11 +324,50 @@ def _reinit_fork_safe_locks() -> None:
 class _ForkLogHold:
     """The locks one fork's before-step took, for its matching after-step."""
 
-    __slots__ = ("handler_locks", "module_lock")
+    __slots__ = ("handler_locks", "module_locks")
 
     def __init__(self) -> None:
-        self.module_lock: Any = None
+        # A list rather than a slot so that recording it is one append (see
+        # _take_recorded); it holds logging's module lock or nothing.
+        self.module_locks: list[Any] = []
         self.handler_locks: list[Any] = []
+
+    @property
+    def module_lock(self) -> Any:
+        return self.module_locks[0] if self.module_locks else None
+
+
+def _owned_by_this_thread(lock: Any) -> bool:
+    """Return True if ``lock`` reports the calling thread as its owner.
+
+    Only an RLock can say; a plain lock records no owner and reads as False.
+    """
+    is_owned = getattr(lock, "_is_owned", None)
+    return is_owned is not None and is_owned() is True
+
+
+def _take_recorded(lock: Any, held: list[Any], timeout: float) -> None:
+    """Acquire ``lock`` and append it to ``held``, never leaving it taken unrecorded.
+
+    ``timeout`` is the lock's own: ``-1`` waits without a deadline.
+
+    A signal handler can raise between a successful acquire and the append —
+    gunicorn's master raises ``HaltServer`` from its SIGCHLD handler while it
+    forks workers, a command-line program gets ``KeyboardInterrupt`` — and the
+    after-step releases only what was recorded, so an unrecorded lock would
+    stay held by this thread for the rest of the parent's life. On any
+    exception the lock is given back if it reports this thread as its owner,
+    and the exception propagates, as logging's own before-fork step does. The
+    caller passes only locks this thread did not already hold, so ownership
+    here means this acquire took it.
+    """
+    try:
+        if lock.acquire(timeout=timeout):
+            held.append(lock)
+    except BaseException:
+        if not any(entry is lock for entry in held) and _owned_by_this_thread(lock):
+            lock.release()
+        raise
 
 
 def _push_fork_log_hold() -> _ForkLogHold:
@@ -370,7 +409,10 @@ def _hold_stream_handler_locks() -> None:
 
     Each fork pushes its own frame on a per-thread stack, so two threads
     forking at once, or a fork started by a signal handler inside this step,
-    never release each other's locks. Never raises.
+    never release each other's locks. A lock the forking thread already holds
+    is not taken again: no other thread can be inside that section. Never
+    raises an ``Exception``; a ``BaseException`` a signal handler raises
+    mid-step propagates once the lock it interrupted is given back.
     """
     try:
         hold = _push_fork_log_hold()
@@ -378,9 +420,8 @@ def _hold_stream_handler_locks() -> None:
         return
     try:
         module_lock = getattr(logging, "_lock", None)
-        if module_lock is not None:
-            module_lock.acquire()
-            hold.module_lock = module_lock
+        if module_lock is not None and not _owned_by_this_thread(module_lock):
+            _take_recorded(module_lock, hold.module_locks, -1)
     except Exception:
         pass
     try:
@@ -397,8 +438,9 @@ def _hold_stream_handler_locks() -> None:
             if not isinstance(handler, logging.StreamHandler):
                 continue
             lock = handler.lock
-            if lock is not None and lock.acquire(timeout=remaining):
-                hold.handler_locks.append(lock)
+            if lock is None or _owned_by_this_thread(lock):
+                continue
+            _take_recorded(lock, hold.handler_locks, remaining)
         except Exception:
             continue
 
@@ -416,11 +458,11 @@ def _release_stream_handler_locks() -> None:
             lock.release()
         except Exception:
             continue
-    if hold.module_lock is not None:
+    for lock in hold.module_locks:
         try:
-            hold.module_lock.release()
+            lock.release()
         except Exception:
-            pass
+            continue
 
 
 def _repair_after_fork_in_child() -> None:

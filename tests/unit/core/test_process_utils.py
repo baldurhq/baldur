@@ -785,6 +785,35 @@ class _WaitSignallingLock:
         self.release()
 
 
+class _SignalHandlerRaised(BaseException):
+    """Stands in for what a signal handler raises (gunicorn's ``HaltServer``,
+    ``KeyboardInterrupt``): not an ``Exception``, so no ``except Exception``
+    stops it."""
+
+
+class _RaisesRightAfterAcquire:
+    """Takes the lock, then raises before the caller's next instruction runs.
+
+    That is where a pending signal's handler runs once a C call returns, so
+    this reproduces a handler raising between a successful acquire and the
+    caller's record of it, deterministically and without signals. Ownership is
+    read through to the real lock, as an RLock reports it.
+    """
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        self._inner.acquire(blocking, timeout)
+        raise _SignalHandlerRaised()
+
+    def release(self) -> None:
+        self._inner.release()
+
+    def _is_owned(self) -> bool:
+        return self._inner._is_owned()
+
+
 class _FakeMonotonicClock:
     """The only clock the before-fork step reads, advanced by the lock doubles."""
 
@@ -1390,6 +1419,87 @@ class TestForkLogHoldBehavior:
         process_utils._release_stream_handler_locks()
 
         assert _frames() == []
+        assert _free_from_another_thread(handler.lock)
+        assert _free_from_another_thread(logging._lock)
+
+    def test_handler_lock_taken_when_a_signal_handler_raises_is_given_back(
+        self, isolated_handlers
+    ):
+        """A signal handler that raises between the acquire and its record (a
+        SIGCHLD arriving while gunicorn's master forks a worker) must not leave
+        the lock held by the forking thread: the after-step releases only what
+        was recorded, and every other parent thread would then block on its
+        next record through that handler.
+        """
+        # Given
+        handler = logging.StreamHandler(io.StringIO())
+        inner = handler.lock
+        handler.lock = _RaisesRightAfterAcquire(inner)
+        isolated_handlers(handler)
+
+        # When
+        with pytest.raises(_SignalHandlerRaised):
+            process_utils._hold_stream_handler_locks()
+        recorded = list(_frames()[-1].handler_locks)
+        process_utils._release_stream_handler_locks()
+
+        # Then — the exception still reaches the caller, and nothing is held
+        assert recorded == []
+        assert not inner._is_owned()
+        assert _free_from_another_thread(inner)
+        assert _free_from_another_thread(logging._lock)
+
+    def test_module_lock_taken_when_a_signal_handler_raises_is_given_back(
+        self, isolated_handlers
+    ):
+        """Same window on logging's module lock: left held, every other thread's
+        ``getLogger`` of a new name and every handler creation block forever.
+        """
+        # Given
+        handler = logging.StreamHandler(io.StringIO())
+        isolated_handlers(handler)
+        inner = threading.RLock()
+        real_module_lock = logging._lock
+        logging._lock = _RaisesRightAfterAcquire(inner)
+        try:
+            # When
+            with pytest.raises(_SignalHandlerRaised):
+                process_utils._hold_stream_handler_locks()
+            process_utils._release_stream_handler_locks()
+        finally:
+            # Restored here rather than by monkeypatch: pytest's own logging
+            # teardown takes the module lock before fixtures are undone.
+            logging._lock = real_module_lock
+
+        # Then
+        assert not inner._is_owned()
+        assert _free_from_another_thread(inner)
+        assert _free_from_another_thread(handler.lock)
+
+    def test_lock_the_forking_thread_already_holds_is_not_taken_again(
+        self, isolated_handlers
+    ):
+        """A fork made while this thread is inside a handler (or holds logging's
+        module lock): no other thread can be in that section, so the step does
+        not take it again, and the thread's own hold is exactly what it was.
+        """
+        # Given
+        handler = logging.StreamHandler(io.StringIO())
+        isolated_handlers(handler)
+        handler.lock.acquire()
+        logging._lock.acquire()
+        try:
+            # When
+            process_utils._hold_stream_handler_locks()
+            frame = _frames()[-1]
+            recorded = (list(frame.handler_locks), frame.module_lock)
+            process_utils._release_stream_handler_locks()
+        finally:
+            logging._lock.release()
+            handler.lock.release()
+
+        # Then — one release each ends this thread's hold
+        assert recorded == ([], None)
         assert _free_from_another_thread(handler.lock)
         assert _free_from_another_thread(logging._lock)
 
