@@ -191,6 +191,8 @@ All under the admin server (mount prefix is deployment-specific):
 | Regional / cell (2) | `PartitionHeartbeat`, `cell-topology-anti-entropy` |
 | PRO services (5) | `ThrottleAuditWorker`, `CanaryStateRefresher`, `ChaosWorkerHeartbeat`, `EmergencyGradualRecovery` (bespoke row below), `synthetic-load-*` (one per experiment) |
 
+**Pre-fork servers** (gunicorn `--preload`, Celery prefork): `Scheduler-*` and `LeaderElector-*` run only in the process that started them — the master or worker main — and that process runs no watchdog, so no watchdog reports them there. From 1.17.0 forked workers, which inherit their registrations but not their threads, skip them too (earlier workers reported both DEAD from their first probe). Read a master's scheduler from the master's own admin `/metrics` (`baldur_daemon_worker_alive{name="Scheduler-…"}`; the admin server binds `127.0.0.1` by default). A worker forked while a gradual recovery started through the master's admin server is running can still page `EmergencyGradualRecovery` DEAD for that master-side episode — check the master before acting.
+
 Bespoke rows (the 2 respawn-ineligible workers) and the catch-all:
 
 | Worker | Why no auto-respawn | Remediation |

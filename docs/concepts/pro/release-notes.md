@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A forked worker no longer reports the leader scheduler and the leader elector dead.** Both run only in the process that started them — under gunicorn `--preload` or a Celery prefork worker, the master or worker main — and every forked worker inherited their registrations without their threads, so each worker's watchdog reported `Scheduler-*` (and, with leader election on, `LeaderElector-*`) DEAD from its first probe and raised a CRITICAL `daemon_worker.died`; with worker respawn enabled it also started a second scheduler loop inside the worker. Forked workers now skip those two and keep reporting every worker they do use — one whose thread is not running in the worker is still reported DEAD. **A real scheduler death in a pre-fork master is not paged by the watchdog**, because the master runs none: read it from the master's own admin `/metrics` (`baldur_daemon_worker_alive`). The licensed tier's own locks are also repaired in a forked worker, so a worker forked while a background thread held one no longer blocks on its first use. This needs the free core at **1.17.0**, which ships the fork repair and the flag the watchdog reads — the package's dependency floor requires it.
+
 ## [1.5.0] - 2026-09-16
 
 ### Added
