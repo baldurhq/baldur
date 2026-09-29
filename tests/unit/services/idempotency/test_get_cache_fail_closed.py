@@ -87,7 +87,7 @@ class TestServiceCacheOutcomeMatrix:
     """8-row outcome matrix for the service-layer resolver call.
 
     Service-layer (``raise_on_prod_no_toggle=False``) NEVER raises:
-    - Adapter present → adapter (env + escape don't matter).
+    - Distributed adapter present → adapter (env + escape don't matter).
     - Adapter absent + prod + escape off → fallback (with WARN + counter).
     - Adapter absent + prod + escape on  → fallback (with WARN + counter).
     - Adapter absent + non-prod         → fallback (silent).
@@ -127,12 +127,12 @@ class TestServiceCacheOutcomeMatrix:
         escape_hatch,
         expected_outcome,
     ):
-        from baldur.adapters.cache.memory_adapter import InMemoryCacheAdapter
+        from tests.factories.cache_doubles import DistributedCacheStandIn
 
         # Given — environment + escape hatch + adapter presence.
         _seed_env(monkeypatch, in_production=in_production, escape_hatch=escape_hatch)
 
-        registered = InMemoryCacheAdapter(key_prefix="matrix_registered:")
+        registered = DistributedCacheStandIn(key_prefix="matrix_registered:")
         fallback = resolver_module._SERVICE_FALLBACK_CACHE
         if adapter_present:
             ctx = patch(
@@ -688,11 +688,11 @@ class TestServiceCacheResolverIntegration:
         reset_idempotency_settings_singleton,
         reset_runtime_isolation,
     ):
-        from baldur.adapters.cache.memory_adapter import InMemoryCacheAdapter
         from baldur.services.idempotency.service import IdempotencyService
+        from tests.factories.cache_doubles import DistributedCacheStandIn
 
         _seed_env(monkeypatch, in_production=True, escape_hatch=False)
-        registered = InMemoryCacheAdapter(key_prefix="registered:")
+        registered = DistributedCacheStandIn(key_prefix="registered:")
 
         with patch(
             "baldur.factory.registry.ProviderRegistry.get_cache",

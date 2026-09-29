@@ -68,10 +68,19 @@ from tests.factories.time_helpers import freeze_time
 
 @pytest.fixture(autouse=True)
 def reset_module_state():
-    """Clear the module-level fallback cache before/after each test."""
+    """Clear the module-level fallback cache before/after each test, and drop
+    the runtime a test rebuilt under a patched ``BALDUR_ENVIRONMENT``.
+
+    The runtime reads the environment once, when it is built. A production
+    runtime left behind would make a later test's resolver refuse the
+    registry's in-process default cache.
+    """
+    from baldur.runtime import reset_runtime
+
     _reset_fallback_cache()
     yield
     _reset_fallback_cache()
+    reset_runtime()
 
 
 @pytest.fixture
@@ -728,20 +737,20 @@ class TestProductionEnvironmentDetection:
 
 
 class TestResolveCacheRegistryHit:
-    """461 D1: when ProviderRegistry returns a cache adapter, that adapter
-    is returned unchanged (no fallback, no environment check)."""
+    """461 D1: when ProviderRegistry returns a distributed cache adapter, that
+    adapter is returned unchanged (no fallback), in production too."""
 
     def test_registered_adapter_returned_without_inspecting_env(self, monkeypatch):
-        from baldur.adapters.cache.memory_adapter import InMemoryCacheAdapter
         from baldur.decorators.idempotent import _resolve_cache_via_registry
         from baldur.runtime import reset_runtime
+        from tests.factories.cache_doubles import DistributedCacheStandIn
 
         # Force production with no escape hatch — none of those branches
-        # should run because the registry hit short-circuits everything.
+        # should run because a distributed registry hit short-circuits them.
         monkeypatch.setenv("BALDUR_ENVIRONMENT", "production")
         reset_runtime()
 
-        registered = InMemoryCacheAdapter(key_prefix="test_registered:")
+        registered = DistributedCacheStandIn(key_prefix="test_registered:")
         with patch(
             "baldur.factory.registry.ProviderRegistry.get_cache",
             return_value=registered,
@@ -756,12 +765,15 @@ class TestResolveCacheFallbackMatrix:
       - "adapter": ProviderRegistry's cache is returned.
       - "fallback": module-level _FALLBACK_CACHE is returned.
       - "raises":   ConfigurationError is raised (fail-closed).
+
+    "Adapter present" means a distributed adapter; the registry's in-process
+    default is not one in production.
     """
 
     @pytest.mark.parametrize(
         ("in_production", "adapter_present", "escape_hatch", "expected_outcome"),
         [
-            # Adapter present → env / escape_hatch don't matter, adapter wins.
+            # Distributed adapter present → env / escape_hatch don't matter.
             (True, True, False, "adapter"),
             (True, True, True, "adapter"),
             (False, True, False, "adapter"),
@@ -795,10 +807,10 @@ class TestResolveCacheFallbackMatrix:
         import sys
 
         _mod = sys.modules["baldur.decorators.idempotent"]
-        from baldur.adapters.cache.memory_adapter import InMemoryCacheAdapter
         from baldur.core.exceptions import AdapterNotFoundError, ConfigurationError
         from baldur.runtime import reset_runtime
         from baldur.settings.idempotency import IdempotencySettings
+        from tests.factories.cache_doubles import DistributedCacheStandIn
 
         # Given — env drives ``is_production()``; the escape hatch (686:
         # console-editable) resolves via the cached layered seam, so patch the
@@ -809,7 +821,7 @@ class TestResolveCacheFallbackMatrix:
         )
         reset_runtime()
 
-        registered = InMemoryCacheAdapter(key_prefix="matrix_registered:")
+        registered = DistributedCacheStandIn(key_prefix="matrix_registered:")
         if adapter_present:
             ctx = patch(
                 "baldur.factory.registry.ProviderRegistry.get_cache",

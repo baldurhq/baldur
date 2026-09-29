@@ -115,8 +115,10 @@ class IdempotencyService:
         Behavior (mirrors :func:`baldur.services.idempotency._cache_resolver.
         resolve_cache_via_registry`, with ``raise_on_prod_no_toggle=False``):
 
-        - Adapter registered → return it.
-        - No adapter + production + ``BALDUR_IDEMPOTENCY_ALLOW_INMEMORY_FALLBACK=false``
+        - Adapter registered → return it (in production, only a distributed
+          one: Baldur's in-process default counts as no adapter).
+        - No adapter, or only the in-process default + production +
+          ``BALDUR_IDEMPOTENCY_ALLOW_INMEMORY_FALLBACK=false``
           → emit one-shot WARN ``idempotency.distributed_dedup_unavailable`` +
           increment ``baldur_idempotency_cache_unavailable_fallback_total{layer="service",
           reason="no_cache_adapter_registered"}`` and return the module-level
@@ -124,7 +126,8 @@ class IdempotencyService:
           (audit sync_worker, cascade auditor, correlation engine) is fail-open
           by design and would silence a raised exception, leaving operators
           with zero signal. The Prometheus counter is the SRE-visible channel.
-        - No adapter + production + escape hatch on → WARN
+        - No adapter, or only the in-process default + production + escape
+          hatch on → WARN
           ``idempotency.inmemory_fallback_active`` + counter + fallback.
         - No adapter + non-production → silent fallback (no WARN, no counter).
         """

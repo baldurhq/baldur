@@ -2,7 +2,10 @@
 
 Two-phase idempotency enforcement:
 - IdempotencyGuard (Phase 1): Pre-execution check+acquire via IdempotencyGate
-- IdempotencyHook (Phase 2): Post-execution mark (completed/failed)
+- IdempotencyHook (Phase 2): Post-execution mark — completed when the function
+  itself returned, or when a fallback answered a timeout (the timed-out work
+  may still be running); failed (re-claimable) when the call raised, or when a
+  fallback answered a failure or a refusal in the function's place
 
 Key communication via context.extra["_idempotency_key"]; the guard also
 threads the per-call retry count and dedup memory window
@@ -26,7 +29,9 @@ The cache-backed gate is resolved once (memoized) via the same ProviderRegistry
 path the ``@idempotent`` decorator uses, so the guard/hook dedup against the
 registered distributed cache (or a shared in-process fallback when none is
 registered) instead of the bare ``cache=None`` singleton, which would never
-block a duplicate.
+block a duplicate. In production, a registry holding only Baldur's in-process
+default counts as none registered, so a refused resolution memoizes nothing and
+the first call after a shared cache is wired resolves it.
 """
 
 from __future__ import annotations
@@ -39,7 +44,11 @@ import structlog
 
 from baldur.adapters.cache.async_memory_adapter import AsyncInMemoryCacheAdapter
 from baldur.adapters.cache.memory_adapter import InMemoryCacheAdapter
-from baldur.interfaces.resilience_policy import GuardResult, PolicyResult
+from baldur.interfaces.resilience_policy import (
+    GuardResult,
+    PolicyOutcome,
+    PolicyResult,
+)
 
 if TYPE_CHECKING:
     from baldur.core.idempotency_gate import AsyncIdempotencyGate, IdempotencyGate
@@ -95,9 +104,10 @@ def _ensure_policy_gate() -> IdempotencyGate:
 
     Builds the gate once from a ProviderRegistry-resolved cache (or the shared
     in-process fallback when no adapter is registered), reusing the decorator's
-    proven resolver path. In production with no registered cache adapter and the
-    escape hatch off, :func:`resolve_cache_via_registry` raises
-    ``ConfigurationError`` (fail-closed).
+    proven resolver path. In production with no distributed cache adapter
+    registered (none, or only Baldur's in-process default) and the escape hatch
+    off, :func:`resolve_cache_via_registry` raises ``ConfigurationError``
+    (fail-closed) and nothing is memoized.
     """
     if not _policy_gate_state["initialized"]:
         from baldur.core.idempotency_gate import IdempotencyGate
@@ -122,7 +132,7 @@ def _ensure_async_policy_gate() -> AsyncIdempotencyGate:
     :func:`resolve_async_cache` — which reuses the sync resolver's
     production-fail-closed decision, then selects an ``AsyncRedisCacheAdapter``
     (Redis registered) or the async in-process fallback. In production with no
-    registered cache adapter and the escape hatch off, it raises
+    distributed cache adapter registered and the escape hatch off, it raises
     ``ConfigurationError`` here (fail-closed) — the same posture as the sync
     gate.
     """
@@ -211,7 +221,7 @@ class IdempotencyGuard:
         self._ttl = ttl
         self._execution_ttl = execution_ttl
         # Resolve the cache-backed gate at construction so a production
-        # misconfiguration (no registered cache adapter + escape hatch off)
+        # misconfiguration (no distributed cache adapter + escape hatch off)
         # surfaces loudly here — propagating out of the facade's composer
         # build — rather than being swallowed by the fail-open ``check()``.
         # Idempotency is a correctness gate, not a side-effect, so it is
@@ -302,8 +312,20 @@ class IdempotencyGuard:
 class IdempotencyHook:
     """Post-execution idempotency mark hook (fail-open).
 
-    Phase 2: On success, marks the key as completed via IdempotencyGate.
-    On failure, marks as failed so the key can be retried.
+    Phase 2 marks the key through IdempotencyGate by one rule, shared with
+    :class:`AsyncIdempotencyHook`:
+
+    - The function returned → completed; a repeat is refused for the memory
+      window.
+    - A fallback answered a timeout → completed as well: the timed-out work may
+      still be running, and a repeat must not run beside it.
+    - A fallback answered a failure or a refusal (the function raised, retries
+      ran out, the circuit breaker refused the call) → failed, like a call that
+      raised, so a genuine repeat runs the function.
+    - The call failed, timed out or was rejected with no fallback answer →
+      failed.
+
+    A failed record is re-claimable by the next call on the key.
     """
 
     def on_success(
@@ -313,22 +335,40 @@ class IdempotencyHook:
         context: PolicyContext | None = None,
     ) -> None:
         key = self._get_key(context)
-        if key:
+        if not key:
+            return
+        if self._fallback_answered_failure(result):
             try:
-                _ensure_policy_gate().mark_completed(
+                _ensure_policy_gate().mark_failed(
                     key,
+                    error=str(result.metadata.get("original_error", "")),
                     retry_count=self._get_retry_count(context),
                     ttl=self._get_ttl(context),
                 )
             except Exception as e:
-                # Fail-open: the call already succeeded, so a mark failure must
-                # never raise. Log so the silent degradation is observable.
+                # Fail-open: the fallback's answer has already been served.
                 logger.warning(
-                    "idempotency.mark_completed_failed",
+                    "idempotency.mark_failed_failed",
                     key=key,
                     error=str(e),
                     fail_open=True,
                 )
+            return
+        try:
+            _ensure_policy_gate().mark_completed(
+                key,
+                retry_count=self._get_retry_count(context),
+                ttl=self._get_ttl(context),
+            )
+        except Exception as e:
+            # Fail-open: the call already succeeded, so a mark failure must
+            # never raise. Log so the silent degradation is observable.
+            logger.warning(
+                "idempotency.mark_completed_failed",
+                key=key,
+                error=str(e),
+                fail_open=True,
+            )
 
     def on_failure(
         self,
@@ -374,6 +414,19 @@ class IdempotencyHook:
         self, guard_name: str, reason: str, context: PolicyContext | None = None
     ) -> None:
         pass
+
+    @staticmethod
+    def _fallback_answered_failure(result: PolicyResult) -> bool:
+        """True when a fallback answered a failure or a refusal for the function.
+
+        Only ``PolicyOutcome.SUCCESS`` means the function itself returned. A
+        fallback that answered a timeout is the one exception: its work may
+        still be running, so its key is held like a completed call's.
+        """
+        return (
+            result.outcome != PolicyOutcome.SUCCESS
+            and result.metadata.get("fallback_trigger") != PolicyOutcome.TIMEOUT.value
+        )
 
     @staticmethod
     def _get_key(context: PolicyContext | None) -> str | None:
@@ -430,7 +483,7 @@ class AsyncIdempotencyGuard:
         self._ttl = ttl
         self._execution_ttl = execution_ttl
         # Resolve the async cache-backed gate at construction so a production
-        # misconfiguration (no registered cache adapter + escape hatch off)
+        # misconfiguration (no distributed cache adapter + escape hatch off)
         # surfaces loudly out of the facade's composer build — a correctness
         # gate fails closed. Gated on ``enabled`` so a disabled feature never
         # raises. Construction opens no socket (redis.asyncio connects lazily).
@@ -513,10 +566,13 @@ class AsyncIdempotencyGuard:
 class AsyncIdempotencyHook:
     """Async twin of :class:`IdempotencyHook` (implements ``AsyncPolicyHook``).
 
-    Phase 2, awaited natively: on success marks the key completed, on failure
-    marks it failed (retryable). Fail-open — a transient mark failure is logged
-    but never raises. Reuses the sync hook's context readers (same threading
-    channel).
+    Phase 2, awaited natively, by the sync hook's rule: completed when the
+    function returned or a fallback answered a timeout (a function that handed
+    its work to a thread keeps running after the cancel); failed (re-claimable)
+    when the call raised or a fallback answered a failure or a refusal.
+    Fail-open — a transient mark failure is logged but never raises. Reuses the
+    sync hook's context readers (same threading channel) and its
+    fallback-answer predicate.
     """
 
     async def on_success(
@@ -526,20 +582,37 @@ class AsyncIdempotencyHook:
         context: PolicyContext | None = None,
     ) -> None:
         key = IdempotencyHook._get_key(context)
-        if key:
+        if not key:
+            return
+        if IdempotencyHook._fallback_answered_failure(result):
             try:
-                await _ensure_async_policy_gate().mark_completed(
+                await _ensure_async_policy_gate().mark_failed(
                     key,
+                    error=str(result.metadata.get("original_error", "")),
                     retry_count=IdempotencyHook._get_retry_count(context),
                     ttl=IdempotencyHook._get_ttl(context),
                 )
             except Exception as e:
                 logger.warning(
-                    "idempotency.mark_completed_failed",
+                    "idempotency.mark_failed_failed",
                     key=key,
                     error=str(e),
                     fail_open=True,
                 )
+            return
+        try:
+            await _ensure_async_policy_gate().mark_completed(
+                key,
+                retry_count=IdempotencyHook._get_retry_count(context),
+                ttl=IdempotencyHook._get_ttl(context),
+            )
+        except Exception as e:
+            logger.warning(
+                "idempotency.mark_completed_failed",
+                key=key,
+                error=str(e),
+                fail_open=True,
+            )
 
     async def on_failure(
         self,

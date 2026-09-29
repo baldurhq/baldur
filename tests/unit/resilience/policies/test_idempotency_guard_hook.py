@@ -1051,16 +1051,16 @@ class TestGuardConstructionResolveContract:
         assert guard._globally_enabled is False
 
     def test_prod_with_registered_adapter_does_not_raise(self, monkeypatch):
-        from baldur.adapters.cache.memory_adapter import InMemoryCacheAdapter
+        from tests.factories.cache_doubles import DistributedCacheStandIn
 
         monkeypatch.setenv("BALDUR_ENVIRONMENT", "production")
         monkeypatch.setenv("BALDUR_IDEMPOTENCY_ALLOW_INMEMORY_FALLBACK", "false")
         self._reset_for_env()
 
-        # Registered adapter present → resolution returns it, no raise.
+        # Distributed adapter registered → resolution returns it, no raise.
         with patch(
             "baldur.factory.registry.ProviderRegistry.get_cache",
-            return_value=InMemoryCacheAdapter(key_prefix="present:"),
+            return_value=DistributedCacheStandIn(key_prefix="present:"),
         ):
             guard = IdempotencyGuard(key_generator=lambda c: "k")
         assert guard.name == "idempotency"

@@ -8,14 +8,23 @@ and extended by #532 (service layer).
 The two callers differ in one respect only:
 
 - ``@idempotent`` decorator: user code calls it directly, so a raised
-  ``ConfigurationError`` is visible. Production + no adapter + no escape hatch
-  ⇒ **raise**.
+  ``ConfigurationError`` is visible. Production + no distributed adapter + no
+  escape hatch ⇒ **raise**.
 - ``IdempotencyService``: called from infrastructure pipelines (audit sync
   worker, cascade auditor, correlation engine) that wrap every call in
   ``except Exception`` by design. Raising would be silenced; the loud signal
   must live in WARN log + Prometheus counter, both of which escape the caller's
-  ``except``. Production + no adapter + no escape hatch ⇒ **WARN + counter +
-  return in-process fallback** (fail-loud-and-degrade).
+  ``except``. Production + no distributed adapter + no escape hatch ⇒ **WARN +
+  counter + return in-process fallback** (fail-loud-and-degrade).
+
+"No distributed adapter" covers two registry states: nothing registered
+(``AdapterNotFoundError``), and only Baldur's in-process default — the
+``"memory"`` adapter every process holds from import until ``baldur.init()``
+wires a shared cache. The second is detected from the returned adapter's
+``provider_name``, so a process that skipped ``init()``, or whose ``init()``
+failed before wiring the cache, cannot deduplicate per process in production
+without the escape hatch. Outside production the registry's adapter, in-process
+or not, is returned as-is.
 
 The behavioral asymmetry is expressed by the ``raise_on_prod_no_toggle``
 parameter on :func:`resolve_cache_via_registry`. This concentration makes the
@@ -56,6 +65,10 @@ logger = logging.getLogger(__name__)
 # when both run in-process in a single-worker testbed.
 _SERVICE_FALLBACK_CACHE = InMemoryCacheAdapter(key_prefix="idempotency_service:")
 
+# ``provider_name`` of Baldur's in-process cache adapter — the registry default
+# a process holds before ``init()`` wires a shared cache.
+_IN_PROCESS_PROVIDER = "memory"
+
 # One-shot WARN guard. Keyed by ``(layer, reason)``. ``set.add`` and ``in``
 # are GIL-atomic for primitive members under CPython; first-race double-WARN
 # is harmless because the Prometheus counter is the cumulative signal and the
@@ -77,29 +90,43 @@ def resolve_cache_via_registry(
             or ``"recovery_coordinator"`` — identifies the caller in WARN logs,
             the Prometheus counter, and the one-shot guard key.
         fallback_cache: Module-level :class:`InMemoryCacheAdapter` instance
-            owned by the caller. Returned when no adapter is registered and
-            the production / escape-hatch combination permits fallback.
+            owned by the caller. Returned when no distributed adapter is
+            registered and the production / escape-hatch combination permits
+            fallback.
         raise_on_prod_no_toggle: If True (decorator), production with no
-            adapter and no escape hatch raises ``ConfigurationError``. If
-            False (service), the same scenario emits WARN +
-            Prometheus counter and returns ``fallback_cache``.
+            distributed adapter and no escape hatch raises
+            ``ConfigurationError``. If False (service), the same scenario emits
+            WARN + Prometheus counter and returns ``fallback_cache``.
 
     Returns:
-        The registered cache adapter, or ``fallback_cache`` when no adapter
-        is registered (and policy permits fallback).
+        The registered cache adapter — outside production whatever the registry
+        returns, in production only a non-in-process one — else
+        ``fallback_cache`` (when policy permits fallback).
 
     Raises:
         ConfigurationError: Only when ``raise_on_prod_no_toggle=True`` AND
-            running in production AND no adapter registered AND escape hatch
-            off.
+            running in production AND no distributed adapter is registered
+            (none, or only the in-process default) AND escape hatch off.
     """
     from baldur.factory.registry import ProviderRegistry
     from baldur.runtime import is_production
 
+    in_production = is_production()
     try:
-        return ProviderRegistry.get_cache()
+        registered = ProviderRegistry.get_cache()
     except AdapterNotFoundError:
         pass
+    else:
+        # Before ``init()`` wires a shared cache, the registry returns Baldur's
+        # own in-process default as a success. Outside production that adapter
+        # is the ledger; in production it is refused like a missing adapter,
+        # judged by what came back rather than by the configured default name.
+        concrete = _unwrap_to_concrete(registered)
+        if not (
+            in_production
+            and getattr(concrete, "provider_name", "") == _IN_PROCESS_PROVIDER
+        ):
+            return registered
 
     # Cached layered read (686 D3/D5) so a console edit of the idempotency
     # domain's allow_inmemory_fallback is observed within the read-cache TTL; env
@@ -110,7 +137,6 @@ def resolve_cache_via_registry(
     allow_fallback = get_layered_settings_cached(
         IdempotencySettings, "idempotency"
     ).allow_inmemory_fallback
-    in_production = is_production()
 
     if in_production and not allow_fallback:
         reason = "no_cache_adapter_registered"
@@ -122,11 +148,14 @@ def resolve_cache_via_registry(
             # surface or it would misdirect a facade operator to a decorator
             # they never wrote.
             raise ConfigurationError(
-                "Baldur idempotency requires a cache adapter registered via "
-                "ProviderRegistry in production (BALDUR_ENVIRONMENT=production). "
-                "Multi-worker deployments would otherwise silently degrade to "
-                "per-worker dedup. Register a Redis (or equivalent distributed) "
-                "cache adapter, or set "
+                "Baldur idempotency requires a distributed cache adapter in "
+                "production (BALDUR_ENVIRONMENT=production), and ProviderRegistry "
+                "holds none: only the in-process default a process has before "
+                "baldur.init() wires one, or nothing. Multi-worker deployments "
+                "would otherwise silently degrade to per-worker dedup. Call "
+                "baldur.init() at startup with BALDUR_REDIS_URL set, register a "
+                "Redis (or equivalent distributed) cache adapter via "
+                "ProviderRegistry, or set "
                 "BALDUR_IDEMPOTENCY_ALLOW_INMEMORY_FALLBACK=true to explicitly "
                 "accept in-process-only semantics."
             )
@@ -148,7 +177,7 @@ def resolve_async_cache(
     """Resolve an :class:`AsyncCacheProviderInterface` for the async dedup path.
 
     Reuses :func:`resolve_cache_via_registry` for the production-fail-closed
-    decision (production + no adapter + no escape hatch ⇒ raise
+    decision (production + no distributed adapter + no escape hatch ⇒ raise
     ``ConfigurationError``) — the fail-closed correctness logic is NOT
     duplicated. It then selects the async backing by inspecting the resolved
     (unwrapped) sync cache's ``provider_name``:
@@ -180,7 +209,7 @@ def resolve_async_cache(
         async_fallback_cache: The caller's ``AsyncInMemoryCacheAdapter``,
             returned when no distributed (Redis) adapter is registered.
         raise_on_prod_no_toggle: Forwarded to the sync resolver — production
-            with no adapter and no escape hatch raises when True.
+            with no distributed adapter and no escape hatch raises when True.
 
     Returns:
         An ``AsyncCacheProviderInterface`` (async Redis or async in-memory).

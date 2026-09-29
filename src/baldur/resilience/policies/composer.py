@@ -353,6 +353,46 @@ def _build_failure_result(
     )
 
 
+def _build_fallback_result(
+    signal: _FallbackApplied,
+    executed_policies: list[str],
+    chain_metadata: dict[str, Any],
+    total_attempts: int,
+) -> PolicyResult:
+    """Build the SUCCESS_WITH_FALLBACK PolicyResult and log the degraded answer.
+
+    Shared by the sync and async chain executors. Under the facade's
+    fallback-outermost order the inner stages populate ``chain_metadata``
+    (attempt counts, CB state) before the fallback absorbs; it is merged under
+    the fallback's own metadata (fallback keys win). ``fallback_trigger``
+    records which failure the fallback answered — ``"timeout"``,
+    ``"rejected"`` or ``"failure"`` — for the idempotency hook: a timed-out
+    call's work may still be running, any other answered failure did not
+    complete.
+    """
+    fb_result: PolicyResult = signal.result
+    original_error = signal.__cause__
+    logger.warning(
+        "policy_chain.fallback_applied",
+        error_type=(
+            type(original_error).__name__ if original_error is not None else None
+        ),
+        error=str(original_error) if original_error is not None else None,
+        fallback_source=_fallback_source(fb_result.metadata),
+    )
+    metadata = {**chain_metadata, **fb_result.metadata}
+    if original_error is not None:
+        metadata["fallback_trigger"] = _classify_exception_outcome(original_error).value
+    return PolicyResult(
+        value=fb_result.value,
+        outcome=fb_result.outcome,
+        error=fb_result.error,
+        executed_policies=list(reversed(executed_policies)),
+        metadata=metadata,
+        total_attempts=total_attempts,
+    )
+
+
 def _merge_chain_metadata(
     chain_metadata: dict[str, Any],
     incoming: dict[str, Any] | None,
@@ -701,29 +741,9 @@ class PolicyComposer(Generic[T]):
                 total_attempts=chain_attempts,
             )
         except _FallbackApplied as fa:
-            # Fallback applied — propagate SUCCESS_WITH_FALLBACK. Under the
-            # facade's fallback-outermost order the inner stages populate
-            # chain_metadata (attempt counts, CB state) before the fallback
-            # absorbs; merge it under fb_result.metadata (fallback keys win).
-            fb_result: PolicyResult = fa.result
-            original_error = fa.__cause__
-            logger.warning(
-                "policy_chain.fallback_applied",
-                error_type=(
-                    type(original_error).__name__
-                    if original_error is not None
-                    else None
-                ),
-                error=str(original_error) if original_error is not None else None,
-                fallback_source=_fallback_source(fb_result.metadata),
-            )
-            return PolicyResult(
-                value=fb_result.value,
-                outcome=fb_result.outcome,
-                error=fb_result.error,
-                executed_policies=list(reversed(executed_policies)),
-                metadata={**chain_metadata, **fb_result.metadata},
-                total_attempts=chain_attempts,
+            # Fallback applied — propagate SUCCESS_WITH_FALLBACK.
+            return _build_fallback_result(
+                fa, executed_policies, chain_metadata, chain_attempts
             )
         except Exception as e:
             return _build_failure_result(
@@ -1095,28 +1115,10 @@ class AsyncPolicyComposer(Generic[T]):
                 total_attempts=chain_attempts,
             )
         except _FallbackApplied as fa:
-            # Fallback applied — propagate SUCCESS_WITH_FALLBACK. Merge the inner
-            # chain_metadata under fb_result.metadata (sync-symmetric; fallback
-            # keys win) and log the degraded-mode WARNING once here.
-            fb_result: PolicyResult = fa.result
-            original_error = fa.__cause__
-            logger.warning(
-                "policy_chain.fallback_applied",
-                error_type=(
-                    type(original_error).__name__
-                    if original_error is not None
-                    else None
-                ),
-                error=str(original_error) if original_error is not None else None,
-                fallback_source=_fallback_source(fb_result.metadata),
-            )
-            return PolicyResult(
-                value=fb_result.value,
-                outcome=fb_result.outcome,
-                error=fb_result.error,
-                executed_policies=list(reversed(executed_policies)),
-                metadata={**chain_metadata, **fb_result.metadata},
-                total_attempts=chain_attempts,
+            # Fallback applied — propagate SUCCESS_WITH_FALLBACK (sync-symmetric;
+            # the degraded-mode WARNING is logged once, in the builder).
+            return _build_fallback_result(
+                fa, executed_policies, chain_metadata, chain_attempts
             )
         except Exception as e:
             return _build_failure_result(

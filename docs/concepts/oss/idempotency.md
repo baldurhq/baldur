@@ -53,16 +53,20 @@ You attach a key to the operation on whichever surface fits:
   (e.g. `"order_id"`); a callable builds a composite key. The key is checked once when the call
   starts, before the circuit breaker and retry run, and marked once the call hands you its result
   or its error, so the retry attempts in between are not deduplicated. A call the `fallback=`
-  rescued counts as finished: its key is marked completed, and a genuine repeat is then blocked for
-  the memory window even though the work never ran. On work that must eventually happen, leave the
-  fallback off, or give it an error parameter and re-raise, which releases the key. A sync call
+  answered after a failure or a circuit-breaker refusal releases its key like a call that raised,
+  so a genuine repeat runs the work. A fallback that answered a timeout marks the key completed
+  instead, because the timed-out work may still be running: a repeat is then blocked for the
+  memory window, even if that work never started or later fails. Without a fallback, a sync call
   that `timeout=` cuts off hands you its error before your function has stopped: the sync path
   cannot kill the function's thread, so the key is released while the work may still be running,
   and a repeat that arrives then runs alongside it. The async path cancels the timed-out work
   instead.
 - **Standalone decorator.** `@idempotent` wraps any sync or `async` function. Name the parameters
   that identify the request (`key_args=["order_id"]`) or supply a `key_fn=` for a custom key, and
-  pick a domain to namespace it.
+  pick a domain to namespace it. To combine it with the facade, stack it beneath
+  `@baldur.protected`, or use the facade's own `idempotency_key=`. Stacked above a facade that has
+  a `fallback=`, it sees the fallback's answer as your function's return and marks the key
+  completed.
 - **Programmatic.** `IdempotencyService` with `IdempotencyKey` gives you explicit
   check-then-mark control when a decorator doesn't fit (batch jobs, event consumers). Its
   contract is looser than the two surfaces above: a duplicate is reported in the returned
@@ -73,6 +77,8 @@ You attach a key to the operation on whichever surface fits:
 On the facade and decorator surfaces, the key's life is the same: the first call **claims** the
 key atomically and runs. Success marks the key **completed**, and it is remembered for a memory
 window (a TTL). A failure marks it **failed**, which releases it so a later call can claim it again.
+Only a raise counts as a failure: a call that *returns* an error response (a 503 object, say)
+instead of raising counts as a success, so raise on error statuses.
 
 ```mermaid
 stateDiagram-v2
@@ -86,8 +92,8 @@ stateDiagram-v2
 
 | What you observe | When it happens |
 |------------------|-----------------|
-| The call runs normally | the key's first arrival, or a later arrival after a call that raised |
-| The duplicate is blocked: `IdempotencyDuplicateError` with `decision` `"SKIP"` | the same key arrives again after a successful run, within the memory window |
+| The call runs normally | the key's first arrival, or a later arrival after a call that raised (or whose failure the facade's fallback answered) |
+| The duplicate is blocked: `IdempotencyDuplicateError` with `decision` `"SKIP"` | the same key arrives again after a successful run (or a timeout the fallback answered), within the memory window |
 | The duplicate is blocked: `IdempotencyDuplicateError` with `decision` `"ABORT"` | the same key arrives while the first call is still running (on a sync call cut off by `timeout=`, only until the timeout fires) |
 | The call is blocked: `IdempotencyUnavailableError` | the dedup store could not be reached, under the default fail-closed posture |
 
@@ -106,9 +112,12 @@ Where the guarantee holds, and where it stops:
 - **Cluster-wide with Redis.** The seen-keys ledger lives in the cache `baldur.init()` wires, so
   with `BALDUR_REDIS_URL` set the same key is blocked across every worker and host. In production,
   `init()` refuses to start without it rather than let dedup shrink to per-worker memory: a dedup
-  that only works within one process is a false promise. A process that never calls `init()` keeps
-  its ledger in its own memory even in production, so call `init()` at startup wherever dedup
-  matters.
+  that only works within one process is a false promise. A production process with no shared
+  cache (it skipped `init()`, or `init()` failed before wiring one) refuses its first guarded call
+  with `ConfigurationError`, unless `BALDUR_IDEMPOTENCY_ALLOW_INMEMORY_FALLBACK=true` accepts a
+  per-process ledger. Outside production, or with that setting on, call `init()` before the first
+  guarded call: a surface first used before `init()` keeps its in-process ledger for the life of
+  the process.
 - **The honest boundary.** Dedup is exactly-once for the duplicate and concurrent cases. If a
   process crashes *after* the side effect but *before* the completion mark, the key's claim
   eventually goes stale and a later call may run the operation again, an essential
@@ -158,6 +167,7 @@ The most common knobs an operator sets. The full list lives in the API reference
 | `BALDUR_IDEMPOTENCY_ENABLED` | `true` | Master switch — when `false`, every surface passes calls through with no dedup check |
 | `BALDUR_IDEMPOTENCY_GATE_MEMORY_TTL_SECONDS` | `1800` | Default memory window (in seconds) on the decorator and facade surfaces — how long a completed operation keeps blocking duplicates when no per-call `ttl` is given |
 | `BALDUR_IDEMPOTENCY_DEFAULT_CACHE_TTL` | `60` | How long (in seconds) the programmatic check/mark API remembers a processed operation |
+| `BALDUR_IDEMPOTENCY_ALLOW_INMEMORY_FALLBACK` | `false` | Accepts a per-process ledger in production when no shared cache is wired: guarded calls run instead of raising `ConfigurationError`, and each process blocks only its own duplicates |
 | `BALDUR_REDIS_URL` | `redis://localhost:6379/0` | Points the seen-keys ledger at a shared Redis, so a duplicate key is blocked across all workers and hosts; leave it unset and the ledger stays in process memory (the default address is not dialed for it) and production `init()` refuses to start |
 
 ## See also

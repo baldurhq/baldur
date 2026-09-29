@@ -16,6 +16,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `[django]` no longer installs django-redis, django-db-connection-pool or simplejwt.
 - `[django]` no longer brings redis-py; add `[redis]` when you set `BALDUR_REDIS_URL`.
 - `from baldur.api.django import pool_circuit_breaker` now gives the module, not the breaker.
+- Production idempotency without a shared cache now raises instead of deduping per process.
 
 ### Fixed
 
@@ -24,6 +25,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A forked worker no longer inherits Baldur, Redis-pool or log-stream locks its parent held.
 - A Django app calling `configure_baldur()` no longer fails to start without prometheus-client.
 - FastAPI and Flask apply the `X-Deadline-Remaining` fast-fail without prometheus-client too.
+- A fallback answering an error no longer marks the idempotency key done (timeouts excepted).
 
 ## [1.16.0] - 2026-09-28
 

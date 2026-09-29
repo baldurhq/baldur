@@ -54,13 +54,14 @@ class IdempotencySettings(BaseSettings):
 
     allow_inmemory_fallback: bool = Field(
         default=False,
-        description="Permit the @idempotent decorator AND "
-        "IdempotencyService._get_cache() to fall back to a module-level "
-        "in-process cache when no cache adapter is registered via "
-        "ProviderRegistry. Default False enforces fail-closed semantics in "
-        "production: multi-worker deployments cannot silently degrade to "
-        "per-worker dedup. The decorator raises ConfigurationError on "
-        "prod+no-toggle; the service emits a loud WARN + Prometheus counter "
+        description="Permit the @idempotent decorator, the protect facade's "
+        "idempotency_key= AND IdempotencyService._get_cache() to fall back to "
+        "a module-level in-process cache when no distributed cache adapter is "
+        "registered via ProviderRegistry (none, or only the in-process default "
+        "a process has before init() wires one). Default False enforces "
+        "fail-closed semantics in production: multi-worker deployments cannot "
+        "silently degrade to per-worker dedup. The decorator and the facade "
+        "raise ConfigurationError on prod+no-toggle; the service emits a loud WARN + Prometheus counter "
         "and returns the in-process fallback so audit/recovery callers "
         "(which are fail-open by design) keep running. Set True only for "
         "single-worker OSS installs that knowingly accept in-process-only "
