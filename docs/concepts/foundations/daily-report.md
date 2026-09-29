@@ -77,16 +77,17 @@ baldur report --date today    # show one day's report (or any YYYY-MM-DD)
 The Daily Report runs in every tier, but *how you get it* and *what it contains* scope to the
 features you have active.
 
-- **In OSS**: Baldur generates the report from your real activity, keeps the rolling history, and you
-  **read it on demand** — `baldur report` on the command line, or the report API / admin console.
-  OSS already captures failed work and replays it when a dependency recovers, so the digest shows
-  that activity — the dead-letter queue section and the auto-replay line are both OSS. What OSS does
-  not do is *tune* that recovery for you, so the report also carries a **"what you're missing"
-  insights block**: drawn entirely from your own production numbers, it estimates the impact the PRO
-  features would have had — for example *N circuit-breaker trips with no automatic degradation*,
-  *N operations captured in the dead-letter queue and replayed at a fixed batch size rather than one
-  adapted to the recovering dependency*, or *N drift warnings you had to resolve by hand*. It's a
-  directional estimate from your data, not a synthetic demo, and it appears on a cadence you control.
+- **In OSS**: Baldur generates the report from your real activity, keeps the rolling history, and
+  you **read it on demand** — `baldur report` on the command line, or the report API / admin
+  console. OSS already captures failed work at `dlq=True` call sites and replays it when a
+  dependency recovers, so the digest shows that activity — the dead-letter queue section and the
+  auto-replay line are both OSS. What OSS does not do is *tune* that recovery for you, so the report
+  also carries a **"what you're missing" insights block**: drawn entirely from your own production
+  numbers, it estimates the impact the PRO features would have had — for example *N circuit-breaker
+  trips with no automatic degradation*, *N operations captured in the dead-letter queue and replayed
+  at a fixed batch size rather than one adapted to the recovering dependency*, or *N drift warnings
+  you had to resolve by hand*. It's a directional estimate from your data, not a synthetic demo, and
+  it appears on a cadence you control.
 
 - **With PRO active**: the same report is **delivered to Slack automatically** each day — Baldur's
   notification transports ship with PRO, so in OSS the report is generated and stored but pushing it

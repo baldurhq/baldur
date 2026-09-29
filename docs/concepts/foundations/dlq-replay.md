@@ -24,10 +24,11 @@ at all.
 
 DLQ + Replay turns that permanent loss into a recoverable backlog:
 
-- **No silent loss.** Every failed operation is captured together with the forensic context (what
-  was being done, the request data, the failure reason, the per-attempt retry history) needed to
-  understand and re-run it. That includes the calls an already-open circuit breaker rejected before
-  they ran, and the entries still buffered in memory when a worker process exits.
+- **No silent loss.** Every failed operation at a call site that opts in (`dlq=True`) is captured
+  together with the forensic context (what was being done, the request data, the failure reason, the
+  per-attempt retry history) needed to understand and re-run it. That includes the calls an
+  already-open circuit breaker rejected before they ran, and the entries still buffered in memory
+  when a worker process exits.
 - **Recover on your schedule.** When the dependency comes back, replay the backlog instead of
   rebuilding lost work from log files.
 - **Catch-up is automatic.** Baldur replays queued work the moment a tripped circuit breaker for
@@ -41,17 +42,19 @@ DLQ + Replay turns that permanent loss into a recoverable backlog:
 
 ## How it works in Baldur
 
-When an operation Baldur is protecting fails, it is captured as an **entry** in the dead letter
-queue, recording the context needed to replay it later. A call that never ran because its circuit
-breaker was already open is captured as well: the breaker rejects it in microseconds, but the work
-that call carried is parked under the breaker's own name with the failure type `CIRCUIT_BREAKER_OPEN`,
-so an outage's fast-rejected calls are recoverable alongside the ones that timed out. (This capture is
-on by default and can be switched off.) Capturing a failure is designed to stay off the request's
-critical path, so recording a failure doesn't add latency to the call that already failed. If the
-queue's storage backend is itself unreachable at capture time, the entry falls back to a local
-on-disk record (and, as a last resort, to the process's error stream) instead of being silently
-lost. Each entry then moves through a lifecycle you can watch in the Web Console DLQ panel or query
-over the REST API:
+When an operation Baldur protects with `dlq=True` fails for good, it is captured as an **entry** in
+the dead letter queue, recording the context needed to replay it later. Two failures skip the queue
+even there: one a `fallback=` answered (the caller got a value, so the call counts as handled), and
+one that Baldur's own `timeout=` cut off while retry was still running. A call that never ran
+because its circuit breaker was already open is captured as well: the breaker rejects it in
+microseconds, but the work that call carried is parked under the breaker's own name with the failure
+type `CIRCUIT_BREAKER_OPEN`, so an outage's fast-rejected calls are recoverable alongside the ones
+that timed out. (This capture is on by default and can be switched off.) Capturing a failure is
+designed to stay off the request's critical path, so recording a failure doesn't add latency to the
+call that already failed. If the queue's storage backend is itself unreachable at capture time, the
+entry falls back to a local on-disk record (and, as a last resort, to the process's error stream)
+instead of being silently lost. Each entry then moves through a lifecycle you can watch in the Web
+Console DLQ panel or query over the REST API:
 
 ```mermaid
 stateDiagram-v2

@@ -59,8 +59,9 @@ survive a dependency failing, with zero infrastructure to start:
   worker.
 - [Health Check](../oss/health-check.md) and [Graceful Shutdown](../oss/graceful-shutdown.md) — tell
   a load balancer the truth and drain in-flight work cleanly when the process restarts.
-- [DLQ + Replay](dlq-replay.md) — a call that fails for good is captured with the context needed to
-  run it again, and the backlog replays once the dependency recovers, so no work is silently lost.
+- [DLQ + Replay](dlq-replay.md) — a call that fails for good at a `dlq=True` call site is captured
+  with the context needed to run it again, and the backlog replays once the dependency recovers, so
+  no work is silently lost.
 - [Metrics](../oss/metrics.md), [System Control](../oss/system-control.md), and
   [Precomputed Cache](../oss/precomputed-cache.md) — see what's happening and switch protection on
   or off at runtime.

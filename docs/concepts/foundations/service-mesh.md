@@ -64,7 +64,7 @@ reach, because they exist only inside your process:
 | **Visibility** — a proxy sees an HTTP status, not your call. It can't tell a retryable error from a fatal one, or know this request belongs to a critical-tier customer. | Baldur's decisions read the actual exception and the call's business context — order, customer, tier — which it pulls from the call site automatically (a `PolicyContext`). |
 | **Semantics** — the wire retries a request blind; it has no idea two attempts are the *same* operation, so a retried charge double-charges. | Idempotency keyed to *your* business identifier, so a repeated operation runs its side effect once. |
 | **Action** — on failure a proxy can only error out or reroute; it can't compute a domain answer. | A fallback returns a safe, domain-specific value, so the caller still gets a useful response. |
-| **State** — a proxy is stateless per request: once a call fails for good, the work is gone. | Failed work is captured into a dead-letter queue with the context needed to run it again, and replays when the dependency recovers. |
+| **State** — a proxy is stateless per request: once a call fails for good, the work is gone. | Failed work at a `dlq=True` call site is captured into a dead-letter queue with the context needed to run it again, and replays when the dependency recovers. |
 
 Two of these you reach through the same facade you would use anyway — by business key, both opt-in:
 
