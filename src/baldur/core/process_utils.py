@@ -109,6 +109,10 @@ _FORK_IMPORT_POLL_SECONDS = 0.001
 # How a module whose import lock carries no readable name is logged.
 _UNNAMED_MODULE = "<unnamed>"
 
+# The short-lived thread that writes the parent's report of a fork that gave
+# up waiting for imports (see _report_imports_in_progress).
+_FORK_REPORT_THREAD_NAME = "baldur-fork-import-report"
+
 # The C lock types the fork repair can re-initialize. Built from the
 # constructors themselves so a lock handed in from outside (a redis-py pool's)
 # is accepted by type, and a test double that answers every attribute is not.
@@ -523,22 +527,26 @@ def _import_system_idle() -> bool:
 def _wait_for_import_system_idle(budget: float) -> float:
     """Wait, holding nothing, until the import system is idle or ``budget`` is up.
 
-    Returns the seconds it waited. A Python signal handler can run inside the
-    sleep; an ``Exception`` it raises (a soft time limit, an alarm timeout)
-    ends the wait, which then reports all of ``budget`` as spent so the caller
-    goes on to its hold. The exception is not re-raised: CPython drops what an
-    at-fork callback raises, and raising here would skip the hold. A
-    ``BaseException`` propagates.
+    Returns the seconds it waited: each sleep counts at least the poll
+    interval, so the budget ends the wait even on a clock that does not
+    advance (a test suite that freezes ``time.monotonic``). A Python signal
+    handler can run inside the sleep; an ``Exception`` it raises (a soft time
+    limit, an alarm timeout) ends the wait, which then reports all of
+    ``budget`` as spent so the caller goes on to its hold. The exception is
+    not re-raised: CPython drops what an at-fork callback raises, and raising
+    here would skip the hold. A ``BaseException`` propagates.
     """
     started = time.monotonic()
+    slept = 0.0
     try:
         while not _import_system_idle():
-            if time.monotonic() - started >= budget:
+            if max(time.monotonic() - started, slept) >= budget:
                 break
             time.sleep(_FORK_IMPORT_POLL_SECONDS)
+            slept += _FORK_IMPORT_POLL_SECONDS
     except Exception:
         return max(budget, 0.0)
-    return time.monotonic() - started
+    return max(time.monotonic() - started, slept)
 
 
 def _sleep_one_poll(budget: float) -> float:
@@ -717,11 +725,11 @@ def _release_stream_handler_locks() -> None:
     """After ``fork()`` in the parent — CPython also runs it when fork fails.
 
     Releases what the before-step holds, then, only when that step gave up on
-    module imports other threads still had in progress, logs one WARNING
-    naming them: the child may hang on its first import of any of them. Logged
-    here rather than before the fork, where the line would wait on the locks
-    the step was about to take, and rather than in the child, whose log path
-    could import one of those very modules.
+    module imports other threads still had in progress, has one WARNING
+    written naming them: the child may hang on its first import of any of
+    them. Reported from the parent rather than before the fork, where the line
+    would wait on the locks the step was about to take, and rather than in the
+    child, whose log path could import one of those very modules.
     """
     try:
         hold = _pop_fork_log_hold()
@@ -731,16 +739,61 @@ def _release_stream_handler_locks() -> None:
         return
     _release_held_locks(hold)
     if hold.imports_in_progress:
-        try:
-            logger.warning(
+        _report_imports_in_progress(
+            list(hold.imports_in_progress), round(hold.import_wait_seconds, 3)
+        )
+
+
+def _report_imports_in_progress(modules: list[str], waited_seconds: float) -> None:
+    """Have a short-lived thread log that a fork gave up waiting for ``modules``.
+
+    Not logged on the forking thread: this step runs among the fork's parent
+    callbacks, and one registered after this module's — ``concurrent.futures``
+    registers one when first imported, usually later — still holds its lock
+    until this step returns. A handler that needs that lock (one that submits
+    to a thread pool) would wait on the forking thread itself, for ever. The
+    thread writes once the forking thread has moved on. Never raises an
+    ``Exception``; a thread that cannot be started drops the line.
+    """
+    try:
+        threading.Thread(
+            target=_log_imports_in_progress,
+            args=(modules, waited_seconds),
+            name=_FORK_REPORT_THREAD_NAME,
+            daemon=True,
+        ).start()
+    except Exception:
+        return
+
+
+def _log_imports_in_progress(modules: list[str], waited_seconds: float) -> None:
+    """Log one WARNING naming the modules a fork gave up waiting for.
+
+    Through structlog once it is configured, so a host's own formatter — a
+    Celery worker's prints the message alone — shows the names as
+    ``key=value``, like every other baldur event; the names are the point of
+    the line. Before any configuration, through this module's stdlib logger
+    with the names in the message itself: structlog's defaults would print to
+    stdout unfiltered.
+    """
+    try:
+        # Deferred: this module's own imports stay stdlib-only.
+        import structlog
+
+        if structlog.is_configured():
+            structlog.get_logger(__name__).warning(
                 "process_utils.fork_import_wait_timeout",
-                extra={
-                    "modules": list(hold.imports_in_progress),
-                    "waited_seconds": round(hold.import_wait_seconds, 3),
-                },
+                modules=modules,
+                waited_seconds=waited_seconds,
             )
-        except Exception:
-            return
+        else:
+            logger.warning(
+                "process_utils.fork_import_wait_timeout modules=%s waited_seconds=%s",
+                modules,
+                waited_seconds,
+            )
+    except Exception:
+        return
 
 
 def _record_inherited_import_locks() -> None:

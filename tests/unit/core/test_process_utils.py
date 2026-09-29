@@ -58,6 +58,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+import structlog
 
 from baldur.core import process_utils
 from baldur.core.process_utils import (
@@ -2017,12 +2018,43 @@ class _LockAwareCapture(logging.Handler):
         self.records.append((record, held))
 
 
+def _join_fork_reports() -> None:
+    """Wait for the report threads the parent step started to finish writing."""
+    for thread in threading.enumerate():
+        if thread.name == process_utils._FORK_REPORT_THREAD_NAME:
+            thread.join(_HELPER_SETUP_SECONDS)
+
+
+class _EndlessWait(BaseException):
+    """Ends a wait that never counts its sleeps — a ``BaseException``, so the
+    step's own ``except Exception`` cannot swallow it."""
+
+
+class _FrozenMonotonicTime(_ObservedTime):
+    """``_ObservedTime`` whose monotonic clock never advances, as under a test
+    suite's freezegun. Past ``give_up_after`` sleeps it raises ``_EndlessWait``,
+    so a wait that never ends fails the test instead of hanging it."""
+
+    def __init__(self, *, give_up_after: int) -> None:
+        super().__init__(on_sleep=self._give_up_past_the_limit)
+        self._give_up_after = give_up_after
+
+    def _give_up_past_the_limit(self) -> None:
+        if len(self.sleeps) > self._give_up_after:
+            raise _EndlessWait(f"{len(self.sleeps)} sleeps and still waiting")
+
+    def monotonic(self) -> float:
+        return 1000.0
+
+
 @pytest.fixture
 def fork_step_warnings(monkeypatch):
-    """Capture ``process_utils``' own records at WARNING and above.
+    """Capture the records that reach ``process_utils``' logger at WARNING and above.
 
-    Set on the module's logger itself: the test process's logging setup may
-    have raised its level or disabled it.
+    Set on the module's stdlib logger itself: the test process's logging setup
+    may have raised its level or disabled it. The test session routes
+    structlog to stdlib, so a structlog event emitted under the module's name
+    arrives here too, its event dict as the record's message.
     """
     capture = _LockAwareCapture()
     log = process_utils.logger
@@ -2569,6 +2601,55 @@ class TestForkImportWaitBehavior:
         assert len(polls) == 1
         assert passes.holds == 3
 
+    def test_a_signal_handler_exception_in_the_poll_leaves_the_hold_taken_once(
+        self, monkeypatch, isolated_handlers
+    ):
+        """The step also sleeps, holding nothing, after a pass that could not
+        hold a handler an earlier pass took. An ``Exception`` raised inside
+        that sleep spends the budget as one raised in the wait does: the hold
+        still follows and the step returns, never raising out of the callback.
+        """
+        # Given — as above, but the writer keeps A, and every sleep raises
+        monkeypatch.setattr(process_utils, "_FORK_LOG_HANDLER_WAIT_SECONDS", 0.05)
+        handler_a = logging.StreamHandler(io.StringIO())
+        handler_b = logging.StreamHandler(io.StringIO())
+        isolated_handlers(handler_a, handler_b)
+        imports = _StubImportSystem(monkeypatch)
+        in_progress = _owned_elsewhere("x800_poll_signal")
+        writer_on_a = _LockTakenOnDemand(handler_a.lock)
+
+        def after_release(n: int) -> None:
+            if n == 1:
+                imports.end(in_progress)
+                writer_on_a.take()
+
+        _StepPasses(
+            monkeypatch,
+            after_hold=lambda n: imports.begin(in_progress) if n == 1 else None,
+            after_release=after_release,
+        )
+        clock = _ObservedTime(raises=_SignalHandlerException("soft time limit"))
+        monkeypatch.setattr(process_utils, "time", clock)
+
+        with _HeldByAnotherThread(handler_b.lock), writer_on_a:
+            # When
+            started = time.monotonic()
+            process_utils._before_fork()
+            elapsed = time.monotonic() - started
+            try:
+                owns_module_lock = logging._lock._is_owned()
+                module_locks = list(_frames()[-1].module_locks)
+            finally:
+                process_utils._release_stream_handler_locks()
+
+        # Then — only polls slept, and the raise ended the waiting
+        assert clock.sleeps
+        assert set(clock.sleeps) == {process_utils._FORK_IMPORT_POLL_SECONDS}
+        assert owns_module_lock is True
+        assert module_locks == [logging._lock]
+        assert elapsed < _STEP_WITHOUT_BUDGET_SECONDS
+        assert _free_from_another_thread(logging._lock)
+
     def test_before_step_whose_frame_cannot_be_pushed_holds_nothing(self, monkeypatch):
         """No frame, no hold: the fork proceeds as it would without the step."""
         # Given
@@ -2675,9 +2756,10 @@ class TestForkImportWaitBehavior:
         expected_modules,
     ):
         """The child may hang on its first import of that module, so the parent
-        names it — once the step's locks are given back. A budget spent on the
-        global import lock alone hands the child nothing held (CPython
-        re-initializes that lock there), and logs nothing.
+        names it — written off the forking thread, once the step's locks are
+        given back. A budget spent on the global import lock alone hands the
+        child nothing held (CPython re-initializes that lock there), and logs
+        nothing.
         """
         # Given
         monkeypatch.setattr(process_utils, "_FORK_IMPORT_WAIT_SECONDS", 0.05)
@@ -2692,17 +2774,131 @@ class TestForkImportWaitBehavior:
         # When
         process_utils._before_fork()
         process_utils._release_stream_handler_locks()
+        _join_fork_reports()
+
+        # Then — structlog, configured for the session, hands stdlib its event
+        records = [record for record, _ in fork_step_warnings.records]
+        events = [record.msg for record in records]
+        assert all(isinstance(event, dict) for event in events), events
+        assert [event["modules"] for event in events] == expected_modules
+        assert all(
+            event["event"] == "process_utils.fork_import_wait_timeout"
+            and record.levelno == logging.WARNING
+            and record.threadName == process_utils._FORK_REPORT_THREAD_NAME
+            and event["waited_seconds"] >= process_utils._FORK_IMPORT_WAIT_SECONDS
+            for record, event in zip(records, events, strict=True)
+        )
+        assert not any(held for _, held in fork_step_warnings.records)
+
+    @pytest.mark.parametrize(
+        "structlog_configured",
+        [True, False],
+        ids=["structlog_configured", "before_any_structlog_configuration"],
+    )
+    def test_parent_step_warning_names_the_module_through_a_plain_host_formatter(
+        self, monkeypatch, isolated_handlers, fork_step_warnings, structlog_configured
+    ):
+        """A host that set up its own logging — a Celery worker does — prints
+        each record's message and nothing else. The module the child may hang
+        on is the point of the line, so the message itself must carry it.
+        """
+        # Given
+        monkeypatch.setattr(process_utils, "_FORK_IMPORT_WAIT_SECONDS", 0.05)
+        imports = _StubImportSystem(monkeypatch)
+        imports.begin(_owned_elsewhere("x_800_mod"))
+        isolated_handlers(logging.StreamHandler(io.StringIO()))
+        if not structlog_configured:
+            monkeypatch.setattr(structlog, "is_configured", lambda: False)
+        host_formatter = logging.Formatter("%(message)s")
+
+        # When
+        process_utils._before_fork()
+        process_utils._release_stream_handler_locks()
+        _join_fork_reports()
 
         # Then
         records = [record for record, _ in fork_step_warnings.records]
-        assert [record.modules for record in records] == expected_modules
-        assert all(
-            record.getMessage() == "process_utils.fork_import_wait_timeout"
-            and record.levelno == logging.WARNING
-            and record.waited_seconds >= process_utils._FORK_IMPORT_WAIT_SECONDS
-            for record in records
+        lines = [host_formatter.format(record) for record in records]
+        assert [record.levelno for record in records] == [logging.WARNING]
+        assert "process_utils.fork_import_wait_timeout" in lines[0]
+        assert "x_800_mod" in lines[0]
+
+    def test_parent_step_warning_never_waits_on_a_lock_the_forking_thread_holds(
+        self, monkeypatch, isolated_handlers, fork_step_warnings
+    ):
+        """A fork hook registered after this module's — ``concurrent.futures``
+        registers one when first imported — takes its lock before this
+        module's before-step and gives it back only after this module's
+        parent step. A handler that needs that lock (one that submits to a
+        thread pool) must get it once the forking thread moves on, not wait
+        on the forking thread for ever.
+        """
+        # Given — the budget spent on an import, and a handler that needs a
+        # plain lock the forking thread holds across the whole fork
+        monkeypatch.setattr(process_utils, "_FORK_IMPORT_WAIT_SECONDS", 0.05)
+        imports = _StubImportSystem(monkeypatch)
+        imports.begin(_owned_elsewhere("x800_later_hook"))
+        isolated_handlers(logging.StreamHandler(io.StringIO()))
+        later_hooks_lock = threading.Lock()
+        obtained: list[bool] = []
+
+        class _NeedsTheLaterHooksLock(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                got = later_hooks_lock.acquire(timeout=_HELPER_SETUP_SECONDS)
+                obtained.append(got)
+                if got:
+                    later_hooks_lock.release()
+
+        submitting_handler = _NeedsTheLaterHooksLock()
+        process_utils.logger.addHandler(submitting_handler)
+        try:
+            # When — the hooks in CPython's order: the later hook's before-step,
+            # this module's steps, then the later hook's parent step
+            later_hooks_lock.acquire()
+            process_utils._before_fork()
+            process_utils._release_stream_handler_locks()
+            later_hooks_lock.release()
+            _join_fork_reports()
+        finally:
+            process_utils.logger.removeHandler(submitting_handler)
+
+        # Then
+        assert obtained == [True]
+        assert len(fork_step_warnings.records) == 1
+
+    def test_a_clock_that_does_not_advance_still_ends_the_import_wait(
+        self, monkeypatch, isolated_handlers
+    ):
+        """A test suite that freezes ``time.monotonic`` (freezegun) and forks
+        while another thread imports: every sleep counts at least one poll,
+        so the budget still ends the wait."""
+        # Given
+        monkeypatch.setattr(process_utils, "_FORK_IMPORT_WAIT_SECONDS", 0.05)
+        imports = _StubImportSystem(monkeypatch)
+        imports.begin(_owned_elsewhere("x800_frozen_clock"))
+        polls_in_budget = round(
+            process_utils._FORK_IMPORT_WAIT_SECONDS
+            / process_utils._FORK_IMPORT_POLL_SECONDS
         )
-        assert not any(held for _, held in fork_step_warnings.records)
+        clock = _FrozenMonotonicTime(give_up_after=10 * polls_in_budget)
+        monkeypatch.setattr(process_utils, "time", clock)
+        handler = logging.StreamHandler(io.StringIO())
+        isolated_handlers(handler)
+
+        # When
+        process_utils._before_fork()
+        try:
+            frame = _frames()[-1]
+            state = (frame.module_lock, list(frame.handler_locks))
+            reported = list(frame.imports_in_progress)
+        finally:
+            process_utils._release_stream_handler_locks()
+            _join_fork_reports()
+
+        # Then — about one budget's worth of polls, then the fork's hold
+        assert polls_in_budget <= len(clock.sleeps) <= polls_in_budget + 1
+        assert state == (logging._lock, [handler.lock])
+        assert reported == ["x800_frozen_clock"]
 
 
 # =============================================================================
