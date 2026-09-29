@@ -42,7 +42,8 @@ blocked instead of executed again.
   run the operation, and if several race for it, exactly one wins. The flip side: a call that
   raised *after* its side effect took hold (the charge went through, then the response timed out)
   releases the key too, so the repeat runs the charge again. The payment provider's own key is
-  what covers that case (below).
+  what covers that case (below). The exception is an async call cancelled from outside, which
+  keeps its key held instead (below).
 
 ## How it works in Baldur
 
@@ -71,7 +72,10 @@ You attach a key to the operation on whichever surface fits:
   check-then-mark control when a decorator doesn't fit (batch jobs, event consumers). Its
   contract is looser than the two surfaces above: a duplicate is reported in the returned
   result rather than raised, and because checking and marking are two separate steps, two
-  callers racing on a not-yet-marked key can both pass the check. Reach for the facade or the
+  callers racing on a not-yet-marked key can both pass the check. It also fails open where they
+  fail closed. When the store can't be reached, the check does not raise; it carries on as if
+  the store held no record of the key. In production with no shared cache, the service falls
+  back to per-process state (logging a warning) instead of refusing. Reach for the facade or the
   decorator (or the service's distributed-lock helpers) when concurrent duplicates matter.
 
 On the facade and decorator surfaces, the key's life is the same: the first call **claims** the
@@ -79,7 +83,11 @@ key atomically and runs. Success marks the key **completed**, and it is remember
 window (a TTL). A failure marks it **failed**, which releases it so a later call can claim it again.
 Only a raise counts as a failure, plus a returned value that the retry's `retry_on_result`
 predicate still rejects when the retries run out: a call that *returns* an error response (a 503
-object, say) that nothing rejects counts as a success, so raise on error statuses.
+object, say) that nothing rejects counts as a success, so raise on error statuses. An async call
+cancelled from outside Baldur (`asyncio.CancelledError`, such as an enclosing `asyncio.wait_for`
+giving up on it) is neither: its claim stays in place until the execution window runs out, so a
+repeat in the meantime is blocked with `"ABORT"`. Baldur's own `timeout=` is not that case; it
+follows the timeout rules above.
 
 ```mermaid
 stateDiagram-v2
@@ -95,7 +103,7 @@ stateDiagram-v2
 |------------------|-----------------|
 | The call runs normally | the key's first arrival, or a later arrival after a call that raised (or whose failure the facade's fallback answered) |
 | The duplicate is blocked: `IdempotencyDuplicateError` with `decision` `"SKIP"` | the same key arrives again after a successful run (or a timeout the fallback answered), within the memory window |
-| The duplicate is blocked: `IdempotencyDuplicateError` with `decision` `"ABORT"` | the same key arrives while the first call is still running (on a sync call cut off by `timeout=`, only until the timeout fires) |
+| The duplicate is blocked: `IdempotencyDuplicateError` with `decision` `"ABORT"` | the same key arrives while the first call is still running (on a sync call cut off by `timeout=`, only until the timeout fires), or after an async call holding it was cancelled, until the execution window runs out |
 | The call is blocked: `IdempotencyUnavailableError` | the dedup store could not be reached, under the default fail-closed posture |
 
 Where the guarantee holds, and where it stops:
@@ -105,16 +113,16 @@ Where the guarantee holds, and where it stops:
   its `decision` tells you whether the original already completed (`"SKIP"`) or is still in
   flight (`"ABORT"`). Baldur does *not* replay the original call's response — catch the error and
   treat it as "this work already happened."
-- **Fail-closed by default.** Supplying a key is a "must not duplicate" signal, so if the dedup
-  store can't be checked (say, a momentary network blip), the call is blocked with
-  `IdempotencyUnavailableError` rather than risking a duplicate side effect. If availability
-  matters more than the guarantee, you can opt a facade call into fail-open with
-  `idempotency_fail_open=True` (or the whole service), letting the unverifiable call proceed.
+- **Fail-closed by default.** On the facade and the decorator, supplying a key is a "must not
+  duplicate" signal, so if the dedup store can't be checked (say, a momentary network blip), the
+  call is blocked with `IdempotencyUnavailableError` rather than risking a duplicate side effect.
+  If availability matters more than the guarantee, you can opt a facade call into fail-open with
+  `idempotency_fail_open=True`, letting the unverifiable call proceed.
 - **Cluster-wide with Redis.** The seen-keys ledger lives in the cache `baldur.init()` wires, so
   with `BALDUR_REDIS_URL` set the same key is blocked across every worker and host. In production,
   `init()` refuses to start without it rather than let dedup shrink to per-worker memory: a dedup
   that only works within one process is a false promise. A production process with no shared
-  cache (it skipped `init()`, or `init()` failed before wiring one) refuses its first guarded call
+  cache (it skipped `init()`, or `init()` failed before wiring one) refuses every guarded call
   with `ConfigurationError`, unless `BALDUR_IDEMPOTENCY_ALLOW_INMEMORY_FALLBACK=true` accepts a
   per-process ledger. The async facade shares the ledger only through Redis, so in production its
   keyed calls refuse the same way when the registered cache is another backend, while sync calls
@@ -167,9 +175,9 @@ The most common knobs an operator sets. The full list lives in the API reference
 
 | Env Var | Default | What it controls |
 |---------|---------|------------------|
-| `BALDUR_IDEMPOTENCY_ENABLED` | `true` | Master switch — when `false`, every surface passes calls through with no dedup check |
+| `BALDUR_IDEMPOTENCY_ENABLED` | `true` | Master switch — when `false`, no surface checks or records a key, so duplicates are no longer blocked anywhere |
 | `BALDUR_IDEMPOTENCY_GATE_MEMORY_TTL_SECONDS` | `1800` | Default memory window (in seconds) on the decorator and facade surfaces — how long a completed operation keeps blocking duplicates when no per-call `ttl` is given |
-| `BALDUR_IDEMPOTENCY_DEFAULT_CACHE_TTL` | `60` | How long (in seconds) the programmatic check/mark API remembers a processed operation |
+| `BALDUR_IDEMPOTENCY_DEFAULT_CACHE_TTL` | `60` | How long (in seconds) the programmatic check/mark API remembers a processed operation when neither the service nor the call is given its own TTL |
 | `BALDUR_IDEMPOTENCY_ALLOW_INMEMORY_FALLBACK` | `false` | Accepts a per-process ledger in production when no shared cache is wired: guarded calls run instead of raising `ConfigurationError`, and each process blocks only its own duplicates |
 | `BALDUR_REDIS_URL` | `redis://localhost:6379/0` | Points the seen-keys ledger at a shared Redis, so a duplicate key is blocked across all workers and hosts; leave it unset and the ledger stays in process memory (the default address is not dialed for it) and production `init()` refuses to start |
 
