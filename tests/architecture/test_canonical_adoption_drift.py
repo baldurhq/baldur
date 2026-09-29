@@ -1,4 +1,4 @@
-"""G55/G56/G57/G73/G88 — canonical-module adoption may not re-drift (OSS halves).
+"""G55/G56/G57/G73/G88/G89/G90 — canonical-module adoption may not re-drift (OSS halves).
 
 A recurring audit signature: a canonical implementation exists (exponential
 backoff, client-IP extraction, the UTC time source), later code re-implemented
@@ -41,6 +41,20 @@ Detected idioms:
    lock built outside the factory is not repaired in a fork child, so a parent
    thread holding it at the fork instant leaves the child blocked forever on
    its first acquisition.
+6. **G89 — owner-check lock Lua** (canonical: the ``DistributedLock`` ABC in
+   ``baldur.interfaces.cache_provider``, taken from ``cache.get_lock(name)``;
+   its Redis implementation is the one module allowed to carry the script): a
+   string constant holding ``redis.call("get", KEYS[1]) == ARGV[1]`` (or
+   ``~=``, any quote style or case) — the owner check that makes a release or
+   extend safe. Measured at landing, the same release script sat in six files.
+7. **G90 — boolean text parse**: text compared against a ``"true"`` literal —
+   membership in a literal tuple / list / set holding ``"true"``, or equality
+   with ``"true"`` in any case. Measured at landing, 67 sites across the trees
+   used at least four vocabularies (``"true"`` only; ``true/1``;
+   ``true/1/yes``; ``true/1/yes/on``), so one operator value means true at one
+   site and false at the next. No module hosts the idiom: an env-var boolean
+   belongs in a settings field, and no shared parser exists for other text
+   yet.
 
 By construction the scanners do NOT flag: docstrings and comments (invisible
 to the AST scan — markdown bold like ``**counter's**`` never parses as a
@@ -53,21 +67,32 @@ type used as an annotation (``_lock: threading.Lock = fork_safe_lock()``,
 ``-> threading.RLock``) or another module's ``Lock`` (``asyncio.Lock()``,
 ``multiprocessing.Lock()``).
 
-ENFORCED-EMPTY: there is no baseline budget. A new inline backoff triad,
-forwarded-header read, parallel now-module reference, re-inlined tier probe, or
-bare lock is migrated to compose the canonical, never baselined.
+ENFORCED-EMPTY for G55/G56/G57/G73/G88: there is no baseline budget. A new
+inline backoff triad, forwarded-header read, parallel now-module reference,
+re-inlined tier probe, or bare lock is migrated to compose the canonical, never
+baselined.
+
+FROZEN BUDGET for G89/G90: the copies that existed at landing are counted, not
+listed — an exact-match budget per gate (the clone-recurrence ratchet's
+shape). A new copy fails; a migrated copy must lower the budget in the same
+change, so freed slack cannot be reclaimed. Each copy migrates when the change
+that next touches it lands, never in a standalone sweep. Residual: a change
+that removes one copy and adds another nets zero and passes.
 
 Architectural fitness function rule registry:
 ``ARCHITECTURE.md#g55-backoff-primitive-drift`` /
 ``ARCHITECTURE.md#g56-client-ip-extraction-drift`` /
 ``ARCHITECTURE.md#g57-time-source-drift`` /
 ``ARCHITECTURE.md#g73-pro-probe-drift`` /
-``ARCHITECTURE.md#g88-fork-safe-lock-drift``
+``ARCHITECTURE.md#g88-fork-safe-lock-drift`` /
+``ARCHITECTURE.md#g89-owner-lock-lua-drift`` /
+``ARCHITECTURE.md#g90-boolean-text-parse-drift``
 """
 
 from __future__ import annotations
 
 import ast
+import re
 from collections.abc import Callable
 from pathlib import Path
 
@@ -102,6 +127,22 @@ _PRIVATE_DISTRIBUTIONS = frozenset({"baldur_pro", "baldur_dormant"})
 _LOCK_FACTORY_ALLOWED_ORIGIN = "core/process_utils.py"
 
 _THREADING_LOCK_NAMES = frozenset({"Lock", "RLock"})
+
+# The one module allowed to carry the owner-check lock Lua: the Redis
+# implementation of the DistributedLock ABC.
+_OWNER_LOCK_LUA_ALLOWED_ORIGIN = "adapters/cache/redis_adapter.py"
+# Read the key and compare it with the caller's token — ``==`` in a
+# compare-and-act script, ``~=`` in an early-return one.
+_OWNER_CHECK_LUA = re.compile(
+    r"redis\.call\(\s*['\"]get['\"]\s*,\s*KEYS\[1\]\s*\)\s*(?:==|~=)\s*ARGV\[1\]",
+    re.IGNORECASE,
+)
+# Frozen copies outside the canonical at landing: the canary rollout store
+# (release + extend) and the hash-chain merge and shard locks.
+_OWNER_LOCK_LUA_BUDGET = 4
+
+# Frozen hand-rolled boolean text parses under src/baldur at landing.
+_BOOLEAN_TEXT_BUDGET = 56
 
 
 # ---------------------------------------------------------------------------
@@ -421,6 +462,75 @@ def scan_bare_lock_source(
     return sorted(hits)
 
 
+def scan_owner_lock_lua_source(
+    source: str, filename: str = "<planted>"
+) -> list[tuple[int, str]]:
+    """Return ``(lineno, kind)`` hits for the owner-check Lua in a string constant.
+
+    One hit per occurrence, so a script carrying both a release and an extend
+    branch counts twice. Docstrings are skipped — prose describing the script
+    is not a copy of it.
+    """
+    try:
+        tree = ast.parse(source, filename=filename)
+    except SyntaxError:
+        return []
+    docstrings = _docstring_constants(tree)
+    hits: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and id(node) not in docstrings
+        ):
+            hits.extend(
+                (node.lineno, "owner-check-lua")
+                for _ in _OWNER_CHECK_LUA.finditer(node.value)
+            )
+    return sorted(hits)
+
+
+def _is_true_text(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node.value.strip().lower() == "true"
+    )
+
+
+def scan_boolean_text_source(
+    source: str, filename: str = "<planted>"
+) -> list[tuple[int, str]]:
+    """Return ``(lineno, kind)`` hits for text compared against a ``"true"`` literal.
+
+    Two shapes, one hit per comparison: membership in a literal tuple / list /
+    set that holds ``"true"`` (``v.lower() in ("true", "1")``), and equality or
+    inequality with ``"true"`` in any case (``v.upper() == "TRUE"``). A parse
+    whose vocabulary omits ``"true"`` (``v in {"yes", "on"}``) is not seen.
+    """
+    try:
+        tree = ast.parse(source, filename=filename)
+    except SyntaxError:
+        return []
+    hits: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Compare):
+            continue
+        operands = [node.left, *node.comparators]
+        for op, left, right in zip(node.ops, operands[:-1], operands[1:], strict=True):
+            if (
+                isinstance(op, (ast.In, ast.NotIn))
+                and isinstance(right, (ast.Tuple, ast.List, ast.Set))
+                and any(_is_true_text(element) for element in right.elts)
+            ):
+                hits.append((node.lineno, "true-in-literal-set"))
+            elif isinstance(op, (ast.Eq, ast.NotEq)) and (
+                _is_true_text(left) or _is_true_text(right)
+            ):
+                hits.append((node.lineno, "compare-to-true-text"))
+    return sorted(hits)
+
+
 def scan_tree(
     root: Path,
     scan: Callable[[str, str], list[tuple[int, str]]],
@@ -447,6 +557,28 @@ def scan_tree(
 
 def _format(hits: list[tuple[Path, int, str]]) -> str:
     return "\n".join(f"  {p}:{ln} — {kind}" for p, ln, kind in hits)
+
+
+def budget_verdict(
+    hits: list[tuple[Path, int, str]], budget: int, *, gate: str, remedy: str
+) -> str | None:
+    """Failure text when the live count differs from a frozen budget, else ``None``.
+
+    Every live site is listed either way: the count cannot say which copy
+    moved, but the author of the change finds their own by path.
+    """
+    if len(hits) > budget:
+        return (
+            f"{gate}: {len(hits)} copies > frozen budget {budget} — a new copy "
+            f"landed. {remedy}\n" + _format(hits)
+        )
+    if len(hits) < budget:
+        return (
+            f"{gate}: {len(hits)} copies < frozen budget {budget} — a copy was "
+            f"migrated; lower the budget to {len(hits)} in the same change so "
+            "the slack cannot be reclaimed.\n" + _format(hits)
+        )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -529,6 +661,51 @@ class TestForkSafeLockAdoptionDrift:
             "fork child, which then blocks forever on it if a parent thread "
             "held it at the fork instant.\n" + _format(hits)
         )
+
+
+# ---------------------------------------------------------------------------
+# Gates (frozen budget over src/baldur/**).
+# ---------------------------------------------------------------------------
+
+
+class TestOwnerLockLuaAdoptionDrift:
+    """G89 — the owner-check lock Lua may not be re-typed outside the lock adapter."""
+
+    def test_owner_lock_lua_matches_frozen_budget(self):
+        hits = scan_tree(
+            _SRC_ROOT, scan_owner_lock_lua_source, _OWNER_LOCK_LUA_ALLOWED_ORIGIN
+        )
+        verdict = budget_verdict(
+            hits,
+            _OWNER_LOCK_LUA_BUDGET,
+            gate="G89",
+            remedy=(
+                "Take the lock from the cache provider — cache.get_lock(name) "
+                "returns a DistributedLock whose release() / extend() already "
+                "carry the owner check — instead of re-typing the Lua; a fix to "
+                "the check must land in one place, never N."
+            ),
+        )
+        assert verdict is None, verdict
+
+
+class TestBooleanTextParseDrift:
+    """G90 — hand-rolled ``"true"``-text boolean parsing may not grow."""
+
+    def test_boolean_text_parse_matches_frozen_budget(self):
+        hits = scan_tree(_SRC_ROOT, scan_boolean_text_source, None)
+        verdict = budget_verdict(
+            hits,
+            _BOOLEAN_TEXT_BUDGET,
+            gate="G90",
+            remedy=(
+                "An env-var boolean belongs in a settings field (pydantic "
+                "accepts true/false, 1/0, yes/no, on/off). For any other text "
+                "the family is past the rule of three with four vocabularies in "
+                "use — extract one shared parser instead of adding a copy."
+            ),
+        )
+        assert verdict is None, verdict
 
 
 # ---------------------------------------------------------------------------
@@ -942,6 +1119,134 @@ class TestG88Scanner:
         assert scan_bare_lock_source("def f(:\n") == []
 
 
+class TestG89Scanner:
+    """`scan_owner_lock_lua_source` flags the owner-check Lua in code constants."""
+
+    @pytest.mark.parametrize(
+        ("source", "expected", "note"),
+        [
+            pytest.param(
+                'RELEASE = """\n'
+                'if redis.call("get", KEYS[1]) == ARGV[1] then\n'
+                '    return redis.call("del", KEYS[1])\n'
+                'end\n"""\n',
+                1,
+                "compare-and-delete release script",
+                id="release",
+            ),
+            pytest.param(
+                "S = \"if redis.call('GET',KEYS[1]) ~= ARGV[1] then return 0 end\"\n",
+                1,
+                "early-return form, single quotes, upper-case command",
+                id="early-return",
+            ),
+            pytest.param(
+                'S = """\n'
+                'if redis.call("get", KEYS[1]) == ARGV[1] then return 1 end\n'
+                'if redis.call("get", KEYS[1]) == ARGV[1] then return 2 end\n"""\n',
+                2,
+                "one script, two owner checks, counted twice",
+                id="two-in-one",
+            ),
+            pytest.param(
+                "def release():\n"
+                '    """Runs redis.call("get", KEYS[1]) == ARGV[1] atomically."""\n',
+                0,
+                "a docstring describing the script is not a copy",
+                id="neg-docstring",
+            ),
+            pytest.param(
+                "S = \"return redis.call('get', KEYS[1])\"\n",
+                0,
+                "a plain read without the owner comparison",
+                id="neg-plain-get",
+            ),
+        ],
+    )
+    def test_scan_flags_expected(self, source: str, expected: int, note: str):
+        assert len(scan_owner_lock_lua_source(source)) == expected, note
+
+    def test_unparseable_source_returns_empty(self):
+        assert scan_owner_lock_lua_source("def f(:\n") == []
+
+
+class TestG90Scanner:
+    """`scan_boolean_text_source` flags text compared against a ``"true"`` literal."""
+
+    @pytest.mark.parametrize(
+        ("source", "expected", "note"),
+        [
+            pytest.param(
+                'ok = raw.lower() in ("true", "1", "yes")\n',
+                1,
+                "membership in a literal tuple holding true",
+                id="in-tuple",
+            ),
+            pytest.param(
+                'ok = raw.strip().lower() in {"1", "true"}\n',
+                1,
+                "membership in a literal set",
+                id="in-set",
+            ),
+            pytest.param(
+                'ok = raw.upper() == "TRUE"\n',
+                1,
+                "equality with TRUE in upper case",
+                id="eq-upper",
+            ),
+            pytest.param(
+                'off = "true" != raw\n',
+                1,
+                "inequality with the literal on the left",
+                id="ne-left",
+            ),
+            pytest.param(
+                'ok = a == "true" or b in ("true", "on")\n',
+                2,
+                "two comparisons in one expression",
+                id="two",
+            ),
+            pytest.param(
+                'ok = raw in {"yes", "on"}\n',
+                0,
+                "a vocabulary without true is not seen (documented limit)",
+                id="neg-no-true-literal",
+            ),
+            pytest.param(
+                'ok = raw == "truest"\n',
+                0,
+                "a different word",
+                id="neg-other-word",
+            ),
+        ],
+    )
+    def test_scan_flags_expected(self, source: str, expected: int, note: str):
+        assert len(scan_boolean_text_source(source)) == expected, note
+
+    def test_unparseable_source_returns_empty(self):
+        assert scan_boolean_text_source("def f(:\n") == []
+
+
+class TestBudgetVerdict:
+    """`budget_verdict` fails in both directions and names every live site."""
+
+    _HIT = (Path("pkg/a.py"), 3, "kind")
+
+    def test_equal_count_passes(self):
+        assert budget_verdict([self._HIT], 1, gate="GX", remedy="r") is None
+
+    def test_growth_fails_and_lists_the_sites(self):
+        verdict = budget_verdict([self._HIT, self._HIT], 1, gate="GX", remedy="r")
+        assert verdict is not None
+        assert "new copy" in verdict
+        assert f"{self._HIT[0]}:3" in verdict
+
+    def test_shrink_fails_and_names_the_new_budget(self):
+        verdict = budget_verdict([], 1, gate="GX", remedy="r")
+        assert verdict is not None
+        assert "lower the budget to 0" in verdict
+
+
 class TestScanTree:
     """`scan_tree` honors the allowed-origin skip for every scanner."""
 
@@ -957,6 +1262,8 @@ class TestScanTree:
 
 __all__ = [
     "TestBackoffAdoptionDrift",
+    "TestBooleanTextParseDrift",
+    "TestBudgetVerdict",
     "TestClientIpAdoptionDrift",
     "TestForkSafeLockAdoptionDrift",
     "TestG55Scanner",
@@ -964,12 +1271,18 @@ __all__ = [
     "TestG57Scanner",
     "TestG73Scanner",
     "TestG88Scanner",
+    "TestG89Scanner",
+    "TestG90Scanner",
+    "TestOwnerLockLuaAdoptionDrift",
     "TestProProbeAdoptionDrift",
     "TestScanTree",
     "TestTimeSourceAdoptionDrift",
+    "budget_verdict",
     "scan_backoff_source",
     "scan_bare_lock_source",
+    "scan_boolean_text_source",
     "scan_client_ip_source",
+    "scan_owner_lock_lua_source",
     "scan_pro_probe_source",
     "scan_timezone_source",
     "scan_tree",
