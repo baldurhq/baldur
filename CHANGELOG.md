@@ -17,6 +17,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `[django]` no longer brings redis-py; add `[redis]` when you set `BALDUR_REDIS_URL`.
 - `from baldur.api.django import pool_circuit_breaker` now gives the module, not the breaker.
 - Production idempotency without a shared cache now raises instead of deduping per process.
+- Async idempotency in production refuses a non-Redis cache adapter instead of deduping per process.
 
 ### Fixed
 

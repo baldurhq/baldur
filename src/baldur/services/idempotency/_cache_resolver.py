@@ -26,6 +26,10 @@ failed before wiring the cache, cannot deduplicate per process in production
 without the escape hatch. Outside production the registry's adapter, in-process
 or not, is returned as-is.
 
+The async path (:func:`resolve_async_cache`) shares its ledger through Redis
+only, so for it a third state counts as no distributed adapter: a registered
+distributed adapter that is not Redis. Production refuses it the same way.
+
 The behavioral asymmetry is expressed by the ``raise_on_prod_no_toggle``
 parameter on :func:`resolve_cache_via_registry`. This concentration makes the
 asymmetry auditable in one place rather than diffused across two files.
@@ -128,43 +132,29 @@ def resolve_cache_via_registry(
         ):
             return registered
 
-    # Cached layered read (686 D3/D5) so a console edit of the idempotency
-    # domain's allow_inmemory_fallback is observed within the read-cache TTL; env
-    # base when no RuntimeConfigManager is registered.
-    from baldur.settings.idempotency import IdempotencySettings
-    from baldur.settings.layered_provider import get_layered_settings_cached
-
-    allow_fallback = get_layered_settings_cached(
-        IdempotencySettings, "idempotency"
-    ).allow_inmemory_fallback
-
-    if in_production and not allow_fallback:
-        reason = "no_cache_adapter_registered"
-        _emit_fallback_signal(layer=layer, reason=reason)
-        if raise_on_prod_no_toggle:
-            # Feature-neutral wording: both the ``@idempotent`` decorator
-            # (layer="decorator") and the ``protect(idempotency_key=…)`` facade
-            # (layer="policy") raise here, so the message must not name a single
-            # surface or it would misdirect a facade operator to a decorator
-            # they never wrote.
-            raise ConfigurationError(
-                "Baldur idempotency requires a distributed cache adapter in "
-                "production (BALDUR_ENVIRONMENT=production), and ProviderRegistry "
-                "holds none: only the in-process default a process has before "
-                "baldur.init() wires one, or nothing. Multi-worker deployments "
-                "would otherwise silently degrade to per-worker dedup. Call "
-                "baldur.init() at startup with BALDUR_REDIS_URL set, register a "
-                "Redis (or equivalent distributed) cache adapter via "
-                "ProviderRegistry, or set "
-                "BALDUR_IDEMPOTENCY_ALLOW_INMEMORY_FALLBACK=true to explicitly "
-                "accept in-process-only semantics."
-            )
-        return fallback_cache
-
-    if in_production and allow_fallback:
-        _emit_fallback_signal(layer=layer, reason="escape_hatch_enabled")
-
-    return fallback_cache
+    # Feature-neutral wording: both the ``@idempotent`` decorator
+    # (layer="decorator") and the ``protect(idempotency_key=…)`` facade
+    # (layer="policy") raise here, so the message must not name a single
+    # surface or it would misdirect a facade operator to a decorator they
+    # never wrote.
+    return _fall_back_without_shared_ledger(
+        layer=layer,
+        fallback_cache=fallback_cache,
+        raise_on_prod_no_toggle=raise_on_prod_no_toggle,
+        in_production=in_production,
+        refusal=(
+            "Baldur idempotency requires a distributed cache adapter in "
+            "production (BALDUR_ENVIRONMENT=production), and ProviderRegistry "
+            "holds none: only the in-process default a process has before "
+            "baldur.init() wires one, or nothing. Multi-worker deployments "
+            "would otherwise silently degrade to per-worker dedup. Call "
+            "baldur.init() at startup with BALDUR_REDIS_URL set, register a "
+            "Redis (or equivalent distributed) cache adapter via "
+            "ProviderRegistry, or set "
+            "BALDUR_IDEMPOTENCY_ALLOW_INMEMORY_FALLBACK=true to explicitly "
+            "accept in-process-only semantics."
+        ),
+    )
 
 
 def resolve_async_cache(
@@ -188,7 +178,13 @@ def resolve_async_cache(
       ``aclose()`` is registered with the framework-independent
       ``GracefulShutdownCoordinator`` so the second pool is drained on graceful
       shutdown / process recycle.
-    - anything else ⇒ ``async_fallback_cache`` (the async in-memory fallback).
+    - ``"memory"`` ⇒ ``async_fallback_cache`` (the async in-memory fallback).
+    - any other provider — a distributed adapter with no async counterpart ⇒
+      outside production ``async_fallback_cache``; in production it is refused
+      like a missing adapter (raise when ``raise_on_prod_no_toggle`` and the
+      escape hatch is off, else the signal and ``async_fallback_cache``), so
+      async calls never dedup per worker silently while sync calls share the
+      registered adapter.
 
     In-memory-fallback caveat (no Redis registered): the async fallback is a
     SEPARATE in-process store from the sync ``protect()`` fallback, so a
@@ -207,15 +203,19 @@ def resolve_async_cache(
         sync_fallback_cache: The caller's sync ``InMemoryCacheAdapter``, passed
             to the sync resolver for the prod-decision + provider detection.
         async_fallback_cache: The caller's ``AsyncInMemoryCacheAdapter``,
-            returned when no distributed (Redis) adapter is registered.
-        raise_on_prod_no_toggle: Forwarded to the sync resolver — production
-            with no distributed adapter and no escape hatch raises when True.
+            returned when no Redis adapter is registered and the production /
+            escape-hatch combination permits fallback.
+        raise_on_prod_no_toggle: Production with no distributed adapter the
+            async path can share (none, the in-process default, or a non-Redis
+            one) and no escape hatch raises when True.
 
     Returns:
         An ``AsyncCacheProviderInterface`` (async Redis or async in-memory).
 
     Raises:
-        ConfigurationError: Propagated from :func:`resolve_cache_via_registry`.
+        ConfigurationError: Propagated from :func:`resolve_cache_via_registry`,
+            or raised here for a non-Redis distributed adapter in production
+            (``raise_on_prod_no_toggle`` True, escape hatch off).
     """
     sync_cache = resolve_cache_via_registry(
         layer=layer,
@@ -230,7 +230,69 @@ def resolve_async_cache(
         adapter = AsyncRedisCacheAdapter()
         _register_async_pool_drain(adapter)
         return adapter
-    return async_fallback_cache
+    if provider == _IN_PROCESS_PROVIDER:
+        return async_fallback_cache
+
+    # A distributed adapter with no async counterpart: the async path would
+    # keep its ledger in this process while the sync path shares the
+    # registered one, so production refuses it like a missing adapter.
+    from baldur.runtime import is_production
+
+    return _fall_back_without_shared_ledger(
+        layer=layer,
+        fallback_cache=async_fallback_cache,
+        raise_on_prod_no_toggle=raise_on_prod_no_toggle,
+        in_production=is_production(),
+        refusal=(
+            "Baldur idempotency requires a distributed cache adapter in "
+            "production (BALDUR_ENVIRONMENT=production) that async calls can "
+            f"share, and ProviderRegistry's cache ({provider!r}) is not Redis, "
+            "the only backend the async path shares its ledger through. Async "
+            "calls would otherwise silently degrade to per-worker dedup. Call "
+            "baldur.init() at startup with BALDUR_REDIS_URL set, register a "
+            "Redis cache adapter via ProviderRegistry, or set "
+            "BALDUR_IDEMPOTENCY_ALLOW_INMEMORY_FALLBACK=true to explicitly "
+            "accept in-process-only semantics for async calls."
+        ),
+    )
+
+
+def _fall_back_without_shared_ledger(
+    *,
+    layer: str,
+    fallback_cache: Any,
+    raise_on_prod_no_toggle: bool,
+    in_production: bool,
+    refusal: str,
+) -> Any:
+    """Resolve a path left without a ledger shared across workers.
+
+    Production with the escape hatch off emits the unavailable signal, then
+    raises ``ConfigurationError(refusal)`` for a raising caller or returns
+    ``fallback_cache``; production with the escape hatch on emits the
+    escape-hatch signal and returns ``fallback_cache``; outside production
+    ``fallback_cache`` is returned silently.
+    """
+    # Cached layered read (686 D3/D5) so a console edit of the idempotency
+    # domain's allow_inmemory_fallback is observed within the read-cache TTL; env
+    # base when no RuntimeConfigManager is registered.
+    from baldur.settings.idempotency import IdempotencySettings
+    from baldur.settings.layered_provider import get_layered_settings_cached
+
+    allow_fallback = get_layered_settings_cached(
+        IdempotencySettings, "idempotency"
+    ).allow_inmemory_fallback
+
+    if in_production and not allow_fallback:
+        _emit_fallback_signal(layer=layer, reason="no_cache_adapter_registered")
+        if raise_on_prod_no_toggle:
+            raise ConfigurationError(refusal)
+        return fallback_cache
+
+    if in_production and allow_fallback:
+        _emit_fallback_signal(layer=layer, reason="escape_hatch_enabled")
+
+    return fallback_cache
 
 
 def _unwrap_to_concrete(cache: Any) -> Any:

@@ -3,8 +3,10 @@
 Async cache resolution reuses ``resolve_cache_via_registry`` for the
 production-fail-closed decision, then selects the async backing by the resolved
 (unwrapped) sync cache's ``provider_name``: ``"redis"`` ⇒ a fresh
-``AsyncRedisCacheAdapter`` (pool-drain registered); anything else ⇒ the async
-in-memory fallback.
+``AsyncRedisCacheAdapter`` (pool-drain registered); ``"memory"`` ⇒ the async
+in-memory fallback; any other (distributed, non-Redis) provider ⇒ the async
+in-memory fallback outside production, refused like a missing adapter in
+production (799 verify V1).
 
 Verification techniques (UNIT_TEST_GUIDELINES §8):
 - §8.5 Dependency interaction — provider topology detection drives the backing
@@ -142,9 +144,9 @@ class TestResolveAsyncCacheTopology:
 
         assert resolved is mock_adapter.return_value
 
-    def test_non_redis_provider_returns_async_in_memory_fallback(self):
-        """A non-redis (e.g. registered memory) provider returns the caller's
-        async in-memory fallback — no Redis adapter constructed, no drain wired."""
+    def test_in_process_provider_returns_async_in_memory_fallback(self):
+        """An in-process (``"memory"``) provider returns the caller's async
+        in-memory fallback — no Redis adapter constructed, no drain wired."""
         sync_fb, async_fb = _fallbacks()
 
         with (
@@ -223,3 +225,102 @@ class TestResolveAsyncCacheFailClosed:
                         async_fallback_cache=async_fb,
                         raise_on_prod_no_toggle=True,
                     )
+
+
+# =============================================================================
+# Behavior — a non-Redis distributed provider on the async path (799 verify V1)
+# =============================================================================
+
+
+class TestResolveAsyncCacheNonRedisBehavior:
+    """The async path shares its ledger through Redis only. A distributed
+    provider that is not Redis passes the sync resolver, so in production the
+    async resolver refuses it itself — the raising caller gets
+    ``ConfigurationError``, the escape hatch accepts the async in-memory
+    fallback with its signal — instead of deduping per worker silently.
+    Outside production the async in-memory fallback is returned as before."""
+
+    @pytest.mark.parametrize("wrapped", [False, True], ids=["bare", "metrics_wrapped"])
+    @pytest.mark.parametrize(
+        ("in_production", "escape_hatch", "raise_on_prod", "expected", "reason"),
+        [
+            (True, False, True, "raises", "no_cache_adapter_registered"),
+            (True, False, False, "fallback", "no_cache_adapter_registered"),
+            (True, True, True, "fallback", "escape_hatch_enabled"),
+            (False, False, True, "fallback", None),
+        ],
+        ids=[
+            "prod_escape_off_raising_caller_raises",
+            "prod_escape_off_non_raising_caller_falls_back",
+            "prod_escape_on_falls_back_with_signal",
+            "dev_falls_back_silently",
+        ],
+    )
+    def test_non_redis_provider_outcome(
+        self,
+        monkeypatch,
+        _reset_settings_and_runtime,
+        wrapped,
+        in_production,
+        escape_hatch,
+        raise_on_prod,
+        expected,
+        reason,
+    ):
+        from baldur.runtime import reset_runtime
+        from baldur.settings.idempotency import IdempotencySettings
+
+        # Given — a registered distributed adapter that is not Redis.
+        monkeypatch.setenv(
+            "BALDUR_ENVIRONMENT", "production" if in_production else "development"
+        )
+        reset_runtime()
+        registered = _StubCache("valkey")
+        if wrapped:
+            registered = _MetricsWrapper(registered)
+        sync_fb, async_fb = _fallbacks()
+
+        with (
+            patch(
+                "baldur.factory.registry.ProviderRegistry.get_cache",
+                return_value=registered,
+            ),
+            patch(
+                "baldur.settings.layered_provider.get_layered_settings_cached",
+                return_value=IdempotencySettings(allow_inmemory_fallback=escape_hatch),
+            ),
+            patch(
+                "baldur.adapters.cache.async_redis_adapter.AsyncRedisCacheAdapter"
+            ) as mock_adapter,
+            patch.object(
+                resolver_module, "_record_fallback_metric", autospec=True
+            ) as record_mock,
+        ):
+            # When
+            if expected == "raises":
+                with pytest.raises(ConfigurationError) as exc_info:
+                    resolve_async_cache(
+                        layer="policy",
+                        sync_fallback_cache=sync_fb,
+                        async_fallback_cache=async_fb,
+                        raise_on_prod_no_toggle=raise_on_prod,
+                    )
+            else:
+                resolved = resolve_async_cache(
+                    layer="policy",
+                    sync_fallback_cache=sync_fb,
+                    async_fallback_cache=async_fb,
+                    raise_on_prod_no_toggle=raise_on_prod,
+                )
+
+        # Then — never an async Redis adapter for a non-Redis registry; the
+        # refusal names the provider; the signal makes the fallback visible.
+        mock_adapter.assert_not_called()
+        if expected == "raises":
+            assert "'valkey'" in str(exc_info.value)
+        else:
+            assert resolved is async_fb
+        if reason is None:
+            record_mock.assert_not_called()
+        else:
+            record_mock.assert_called_once_with(layer="policy", reason=reason)

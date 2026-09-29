@@ -641,19 +641,26 @@ class TestResolverMessageFeatureNeutralContract:
 
     @pytest.mark.parametrize(
         "registry_state",
-        ["no_adapter", "in_process_default"],
-        ids=["no_adapter", "in_process_default"],
+        ["no_adapter", "in_process_default", "non_redis_on_async_path"],
+        ids=["no_adapter", "in_process_default", "non_redis_on_async_path"],
     )
     def test_refusal_message_names_every_fix(self, monkeypatch, registry_state):
-        """799 D2: whichever registry state is refused, the message names each
-        fix — ``baldur.init()`` with ``BALDUR_REDIS_URL``, a distributed adapter
-        via ``ProviderRegistry``, the escape hatch — and stays feature-neutral."""
+        """799 D2: whichever registry state is refused — including a non-Redis
+        adapter on the async path (verify V1) — the message opens with the text
+        the troubleshooting entry is keyed on, names each fix
+        (``baldur.init()`` with ``BALDUR_REDIS_URL``, an adapter via
+        ``ProviderRegistry``, the escape hatch) and stays feature-neutral."""
+        from baldur.adapters.cache.async_memory_adapter import (
+            AsyncInMemoryCacheAdapter,
+        )
         from baldur.adapters.cache.memory_adapter import InMemoryCacheAdapter
         from baldur.runtime import reset_runtime
         from baldur.services.idempotency._cache_resolver import (
+            resolve_async_cache,
             resolve_cache_via_registry,
         )
         from baldur.settings.idempotency import reset_idempotency_settings
+        from tests.factories.cache_doubles import NonRedisCacheStandIn
 
         monkeypatch.setenv("BALDUR_ENVIRONMENT", "production")
         monkeypatch.setenv("BALDUR_IDEMPOTENCY_ALLOW_INMEMORY_FALLBACK", "false")
@@ -664,20 +671,36 @@ class TestResolverMessageFeatureNeutralContract:
                 "baldur.factory.registry.ProviderRegistry.get_cache",
                 side_effect=AdapterNotFoundError(adapter_type="cache"),
             )
-        else:
+        elif registry_state == "in_process_default":
             registry = patch(
                 "baldur.factory.registry.ProviderRegistry.get_cache",
                 return_value=InMemoryCacheAdapter(key_prefix="default:"),
             )
-
-        with registry, pytest.raises(ConfigurationError) as exc_info:
-            resolve_cache_via_registry(
-                layer="policy",
-                fallback_cache=InMemoryCacheAdapter(key_prefix="x:"),
-                raise_on_prod_no_toggle=True,
+        else:
+            registry = patch(
+                "baldur.factory.registry.ProviderRegistry.get_cache",
+                return_value=NonRedisCacheStandIn(key_prefix="shared:"),
             )
 
+        with registry, pytest.raises(ConfigurationError) as exc_info:
+            if registry_state == "non_redis_on_async_path":
+                resolve_async_cache(
+                    layer="policy",
+                    sync_fallback_cache=InMemoryCacheAdapter(key_prefix="x:"),
+                    async_fallback_cache=AsyncInMemoryCacheAdapter(key_prefix="x:"),
+                    raise_on_prod_no_toggle=True,
+                )
+            else:
+                resolve_cache_via_registry(
+                    layer="policy",
+                    fallback_cache=InMemoryCacheAdapter(key_prefix="x:"),
+                    raise_on_prod_no_toggle=True,
+                )
+
         message = str(exc_info.value)
+        assert message.startswith(
+            "Baldur idempotency requires a distributed cache adapter in production"
+        )
         assert "baldur.init()" in message
         assert "BALDUR_REDIS_URL" in message
         assert "ProviderRegistry" in message
@@ -1133,6 +1156,11 @@ class TestProtectIdempotencyTtlBehavior:
 
 # A facade timeout that fires long before a held function would finish.
 _TIMEOUT_FIRES_S = 0.05
+# The sync facade's timeout when the held function must already be running as
+# it fires: a future the executor has not started yet is cancelled and never
+# runs, so the timeout leaves a scheduling margin for the worker thread to pick
+# the call up. The async facade starts the coroutine before its timer can fire.
+_SYNC_TIMEOUT_FIRES_S = 1.0
 # Upper bound on any wait for a held function to enter or be released.
 _HOLD_S = 5.0
 
@@ -1199,6 +1227,48 @@ class TestProtectFallbackAnswerBehavior:
         assert first == repeat == {"status": "unavailable"}
         assert calls["n"] == 2
 
+    def test_protect_fallback_answer_after_rejected_results_releases_key(self):
+        """A value the retry's ``retry_on_result`` still rejects when the
+        attempts run out counts as a failure: the fallback's answer releases
+        the key like a raise, although the function never raised."""
+        from baldur.services.retry_handler.models import RetryPolicyConfig
+
+        # Given — a charge that keeps returning a soft error the predicate
+        # rejects, answered by a fallback once the retries run out.
+        calls = {"n": 0}
+        max_attempts = 2
+
+        def charge():
+            calls["n"] += 1
+            return {"status": "pending"}
+
+        retry = RetryPolicyConfig(
+            domain="svc.farr",
+            max_attempts=max_attempts,
+            backoff_base=0,
+            retry_on_result=lambda r: r["status"] == "pending",
+        )
+
+        def call():
+            return protect(
+                "svc.farr",
+                charge,
+                retry=retry,
+                fallback=lambda: {"status": "unavailable"},
+                idempotency_key="order_id",
+                context=PolicyContext(order_id="o-1"),
+                circuit_breaker=False,
+                dlq=False,
+            )
+
+        # When
+        first = call()
+        repeat = call()
+
+        # Then — the repeat was not refused: every attempt ran again.
+        assert first == repeat == {"status": "unavailable"}
+        assert calls["n"] == 2 * max_attempts
+
 
 class TestProtectTimeoutFallbackBehavior:
     """799 D1 negative: a fallback that answered a timeout keeps the key
@@ -1222,7 +1292,7 @@ class TestProtectTimeoutFallbackBehavior:
                 "svc.tf",
                 charge,
                 fallback=lambda: "pending",
-                timeout=_TIMEOUT_FIRES_S,
+                timeout=_SYNC_TIMEOUT_FIRES_S,
                 idempotency_key="order_id",
                 context=PolicyContext(order_id="o-1"),
                 **_BARE,
@@ -1504,3 +1574,45 @@ class TestProtectIdempotencyInProcessDefaultBehavior:
         assert calls["n"] == 1
         record = await async_shared.aget("svc.aai:o-1")
         assert record["status"] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_aprotect_non_redis_shared_cache_in_production_raises_before_function_runs(
+        self, monkeypatch
+    ):
+        """799 verify V1: a distributed adapter that is not Redis serves the
+        sync facade, but the async path shares its ledger through Redis only —
+        in production the async call refuses instead of deduping per worker,
+        while the sync call on the same key runs on the shared adapter."""
+        from baldur.factory.registry import ProviderRegistry
+        from tests.factories.cache_doubles import NonRedisCacheStandIn
+
+        # Given — production, a non-Redis distributed adapter wired.
+        _enter_production(monkeypatch)
+        calls = {"n": 0}
+        shared = NonRedisCacheStandIn(key_prefix="shared:")
+
+        with ProviderRegistry.cache.override(shared):
+            # When — the async call first, then the sync call.
+            with pytest.raises(ConfigurationError):
+                await aprotect(
+                    "svc.anr",
+                    self._counting_acharge(calls),
+                    idempotency_key="order_id",
+                    context=PolicyContext(order_id="o-1"),
+                    **_BARE,
+                )
+            async_runs = calls["n"]
+            result = protect(
+                "svc.nr",
+                self._counting_charge(calls),
+                idempotency_key="order_id",
+                context=PolicyContext(order_id="o-1"),
+                **_BARE,
+            )
+
+        # Then — the async function never ran; the sync call ran on the
+        # shared adapter.
+        assert async_runs == 0
+        assert result == "charged"
+        assert calls["n"] == 1
+        assert shared.get("svc.nr:o-1")["status"] == "completed"

@@ -165,7 +165,7 @@ class TestServiceCacheOutcomeMatrix:
 
 
 # =============================================================================
-# TestResolveCacheInProcessDefault — 799 D2 in-process default branch
+# TestResolveCacheInProcessDefaultBehavior — 799 D2 in-process default branch
 # =============================================================================
 
 
@@ -179,7 +179,7 @@ def _in_process_default(wrapped: bool):
     return MetricsAwareCacheAdapter(adapter) if wrapped else adapter
 
 
-class TestResolveCacheInProcessDefault:
+class TestResolveCacheInProcessDefaultBehavior:
     """799 D2: the registry returns its in-process default as a success before
     ``init()`` wires a shared cache. In production that adapter is refused
     exactly like a missing one — raise for the decorator/facade caller, WARN +

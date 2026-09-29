@@ -239,8 +239,10 @@ applies to `@idempotent` and to every `@baldur.protected` / `protect` / `aprotec
 carries `idempotency_key=`. `baldur.init()` wires the shared cache when `BALDUR_REDIS_URL` is
 set, so the usual gaps are a process that never calls `init()` (a cron script or a custom
 worker importing guarded functions), a process whose `init()` failed but that kept running,
-and a guarded call that runs before `init()` does. Earlier releases let such a process fall
-back to per-process dedup instead.
+and a guarded call that runs before `init()` does. On the async facade (`aprotect`, or
+`@baldur.protected` on an `async def`) the shared cache must be Redis: when the message names a
+registered cache that is not Redis, the async calls are refused while sync calls use that cache.
+Earlier releases let such a process fall back to per-process dedup instead.
 *Fix:* set `BALDUR_REDIS_URL` and call `baldur.init()` at startup, before the first guarded
 call; the framework adapters do this in their startup path. No restart is needed: the first
 guarded call after the cache is wired goes through. For a single-process job that knowingly

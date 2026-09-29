@@ -77,8 +77,9 @@ You attach a key to the operation on whichever surface fits:
 On the facade and decorator surfaces, the key's life is the same: the first call **claims** the
 key atomically and runs. Success marks the key **completed**, and it is remembered for a memory
 window (a TTL). A failure marks it **failed**, which releases it so a later call can claim it again.
-Only a raise counts as a failure: a call that *returns* an error response (a 503 object, say)
-instead of raising counts as a success, so raise on error statuses.
+Only a raise counts as a failure, plus a returned value that the retry's `retry_on_result`
+predicate still rejects when the retries run out: a call that *returns* an error response (a 503
+object, say) that nothing rejects counts as a success, so raise on error statuses.
 
 ```mermaid
 stateDiagram-v2
@@ -115,7 +116,9 @@ Where the guarantee holds, and where it stops:
   that only works within one process is a false promise. A production process with no shared
   cache (it skipped `init()`, or `init()` failed before wiring one) refuses its first guarded call
   with `ConfigurationError`, unless `BALDUR_IDEMPOTENCY_ALLOW_INMEMORY_FALLBACK=true` accepts a
-  per-process ledger. Outside production, or with that setting on, call `init()` before the first
+  per-process ledger. The async facade shares the ledger only through Redis, so in production its
+  keyed calls refuse the same way when the registered cache is another backend, while sync calls
+  use that backend. Outside production, or with that setting on, call `init()` before the first
   guarded call: a surface first used before `init()` keeps its in-process ledger for the life of
   the process.
 - **The honest boundary.** Dedup is exactly-once for the duplicate and concurrent cases. If a

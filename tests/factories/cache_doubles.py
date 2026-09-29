@@ -9,16 +9,23 @@
   stand-in also backs real sync dedup without a server. The async resolver
   maps a ``"redis"`` provider to a real async Redis adapter, so an async gate
   resolved over this stand-in dials Redis.
+- :class:`NonRedisCacheStandIn` — the same adapter reporting a distributed
+  provider that is not Redis. The async path shares its ledger through Redis
+  only, so in production the async resolver refuses it while the sync resolver
+  accepts it.
 
 Usage:
-    from tests.factories.cache_doubles import DistributedCacheStandIn
+    from tests.factories.cache_doubles import (
+        DistributedCacheStandIn,
+        NonRedisCacheStandIn,
+    )
 """
 
 from __future__ import annotations
 
 from baldur.adapters.cache.memory_adapter import InMemoryCacheAdapter
 
-__all__ = ["DistributedCacheStandIn"]
+__all__ = ["DistributedCacheStandIn", "NonRedisCacheStandIn"]
 
 
 class DistributedCacheStandIn(InMemoryCacheAdapter):
@@ -27,3 +34,11 @@ class DistributedCacheStandIn(InMemoryCacheAdapter):
     @property
     def provider_name(self) -> str:
         return "redis"
+
+
+class NonRedisCacheStandIn(InMemoryCacheAdapter):
+    """In-process cache adapter that reports a distributed, non-Redis backend."""
+
+    @property
+    def provider_name(self) -> str:
+        return "valkey"

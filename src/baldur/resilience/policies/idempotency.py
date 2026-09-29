@@ -132,9 +132,10 @@ def _ensure_async_policy_gate() -> AsyncIdempotencyGate:
     :func:`resolve_async_cache` — which reuses the sync resolver's
     production-fail-closed decision, then selects an ``AsyncRedisCacheAdapter``
     (Redis registered) or the async in-process fallback. In production with no
-    distributed cache adapter registered and the escape hatch off, it raises
+    distributed cache adapter the async path can share (none, the in-process
+    default, or a non-Redis one) and the escape hatch off, it raises
     ``ConfigurationError`` here (fail-closed) — the same posture as the sync
-    gate.
+    gate — and nothing is memoized.
     """
     if not _async_policy_gate_state["initialized"]:
         from baldur.core.idempotency_gate import AsyncIdempotencyGate

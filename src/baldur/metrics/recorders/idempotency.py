@@ -10,7 +10,8 @@ Metrics (3):
 - baldur_idempotency_cache_unavailable_fallback_total{layer, reason}: Counter of
   resolver-level fallback events in production when no distributed cache adapter
   is registered via ``ProviderRegistry`` — none, or only Baldur's in-process
-  default. Distinct from ``check_total`` (which counts
+  default; on the async path, whose ledger is shared through Redis only, also a
+  non-Redis one. Distinct from ``check_total`` (which counts
   ``check()`` outcomes); a fallback is a service-instance-lifecycle event, and
   the decorator never calls ``check()`` (it uses ``IdempotencyGate``). Two
   semantically distinct events → two counters.
@@ -35,8 +36,9 @@ bounded cardinality, no resolve_domain cardinality guard required).
 Layer label values (closed-enum):
 ``decorator | service | policy | singleton | recovery_coordinator`` (5)
 Reason label values (closed-enum): ``no_cache_adapter_registered | escape_hatch_enabled`` (2);
-``no_cache_adapter_registered`` means no distributed adapter — none, or only the
-in-process default a process has before ``init()`` wires one.
+``no_cache_adapter_registered`` means no distributed adapter the resolving path
+can share — none, or only the in-process default a process has before
+``init()`` wires one; for the async path also a non-Redis one.
 Fallback cardinality: 5 × 2 = 10 series — well under the OSS metric budget.
 Decision label values (closed-enum): ``continue | skip | abort`` (3 series, bounded).
 Takeover reason label values (closed-enum): ``failed | stale`` (2 series, bounded).
@@ -98,7 +100,8 @@ class IdempotencyMetricRecorder(BaseMetricRecorder):
             layer: ``decorator`` | ``service`` | ``policy`` | ``singleton`` |
                 ``recovery_coordinator`` — which layer resolved to fallback
             reason: ``no_cache_adapter_registered`` (no distributed adapter:
-                none, or only the in-process default) | ``escape_hatch_enabled``
+                none, only the in-process default, or — on the async path — a
+                non-Redis one) | ``escape_hatch_enabled``
         """
         try:
             self._fallback_total.labels(layer=layer, reason=reason).inc()
