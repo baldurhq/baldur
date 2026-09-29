@@ -20,8 +20,6 @@ from __future__ import annotations
 import threading
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 # =============================================================================
 # Fixtures
 # =============================================================================
@@ -276,32 +274,60 @@ class TestShutdownFactoryFunctionsBehavior:
 
         assert isinstance(handler, HPAExporterShutdownHandler)
 
-    def test_watchdog_factory_returns_handler(self):
-        """integrate_with_shutdown_coordinator returns handler on success."""
-        pytest.importorskip("baldur_pro")
+    # integrate_with_shutdown_coordinator() reads the watchdog from its registry
+    # slot, so each case sets the slot itself inside a snapshot — an earlier
+    # test's registration must not decide the outcome.
+
+    def test_watchdog_factory_with_registered_watchdog_returns_handler(self):
+        """A registered watchdog is wrapped in a WatchdogShutdownHandler."""
+        # Given
+        from baldur.factory.registry import ProviderRegistry
         from baldur.meta.shutdown import (
             WatchdogShutdownHandler,
             integrate_with_shutdown_coordinator,
         )
 
         mock_watchdog = MagicMock()
-        with patch(
-            "baldur_pro.services.meta_watchdog.get_selfhealer_watchdog",
-            return_value=mock_watchdog,
-        ):
+
+        # When
+        with ProviderRegistry.selfhealer_watchdog.snapshot():
+            ProviderRegistry.selfhealer_watchdog.reset()
+            ProviderRegistry.selfhealer_watchdog.register("pro", lambda: mock_watchdog)
             handler = integrate_with_shutdown_coordinator()
 
+        # Then
         assert isinstance(handler, WatchdogShutdownHandler)
+        assert handler._watchdog is mock_watchdog
 
-    def test_watchdog_factory_returns_none_on_error(self):
-        """integrate_with_shutdown_coordinator returns None when getter raises."""
-        pytest.importorskip("baldur_pro")
+    def test_watchdog_factory_without_registered_watchdog_returns_none(self):
+        """With no watchdog registered (an OSS install) no handler is created."""
+        from baldur.factory.registry import ProviderRegistry
         from baldur.meta.shutdown import integrate_with_shutdown_coordinator
 
-        with patch(
-            "baldur_pro.services.meta_watchdog.get_selfhealer_watchdog",
-            side_effect=RuntimeError("test"),
-        ):
+        with ProviderRegistry.selfhealer_watchdog.snapshot():
+            ProviderRegistry.selfhealer_watchdog.reset()
             handler = integrate_with_shutdown_coordinator()
 
+        assert handler is None
+
+    def test_watchdog_factory_when_watchdog_construction_raises_returns_none(self):
+        """A watchdog provider that raises yields None instead of propagating."""
+        # Given
+        from baldur.factory.registry import ProviderRegistry
+        from baldur.meta.shutdown import integrate_with_shutdown_coordinator
+
+        constructed = []
+
+        def _failing_watchdog():
+            constructed.append(True)
+            raise RuntimeError("watchdog construction failed")
+
+        # When
+        with ProviderRegistry.selfhealer_watchdog.snapshot():
+            ProviderRegistry.selfhealer_watchdog.reset()
+            ProviderRegistry.selfhealer_watchdog.register("pro", _failing_watchdog)
+            handler = integrate_with_shutdown_coordinator()
+
+        # Then — the provider was reached, so None came from the error branch
+        assert constructed == [True]
         assert handler is None
