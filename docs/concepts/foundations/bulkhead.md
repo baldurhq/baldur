@@ -6,7 +6,8 @@
     The bulkhead pattern itself — semaphore and async compartments, the registry, the
     `@bulkhead` decorator, the policy, and the live metrics — ships in the **OSS core**.
     **PRO** adds the thread-pool isolation strategy (dedicated worker pools with execution
-    timeouts and graceful shutdown drain) and per-tier admission control built on top of it.
+    timeouts and graceful shutdown drain) and per-tier admission control built on bulkhead
+    compartments.
     It answers the production question behind most cascading outages: *"why did one slow
     dependency take the entire service down with it?"*
 
@@ -72,7 +73,8 @@ Three **isolation strategies** cover the three kinds of work:
 - **Thread pool** (`ThreadPoolBulkhead`, PRO) runs the call inside a dedicated worker pool with a
   bounded waiting queue, fully separating it from the request workers; right for CPU-bound work.
   Request context and trace IDs follow the task into the pool, and each call carries an execution
-  timeout (30 seconds unless you set one), so a runaway task cannot hold a worker forever.
+  timeout (30 seconds unless you set one), so a runaway task cannot hold its caller forever. The
+  task itself keeps its pool worker until it returns, so hung tasks still use up the pool.
 - **Async semaphore** (`AsyncSemaphoreBulkhead`, OSS) is the same permit counting for asyncio
   applications, without ever blocking the event loop.
 
@@ -115,7 +117,7 @@ Each state in that diagram is a live counter you can read per compartment: admit
 `rejected_count`.
 
 A rejection raises `BulkheadFullError`, which names the compartment and its occupancy (for
-example `12/10 active`); the cause reads directly off the exception. A thread-pool call that
+example `10/10 active`); the cause reads directly off the exception. A thread-pool call that
 exceeds its execution timeout raises `BulkheadTimeoutError` instead, so "the compartment was
 full" and "the task ran too long" are never conflated.
 
@@ -131,10 +133,21 @@ was full — your own business exceptions propagate unchanged, and the not-regis
 raised before any fallback is considered, so neither an application bug nor a setup mistake ever
 silently turns into a fallback response.
 
+Async callers draw on their own permits. An `async def` decorated with a compartment's name runs
+on an async semaphore sized to that compartment's capacity, separate from the permits its sync
+callers share, so sync and async callers of one compartment can together run up to twice its
+capacity. On a thread-pool compartment an async caller therefore gets semaphore behavior: no
+worker pool, and a timeout that bounds only the wait for a permit. The async permits' active,
+waiting, and rejected counts are not part of the status surface described below, though their
+rejections do reach the Prometheus rejection counter.
+
 Bulkhead also composes with the rest of Baldur's resilience policies. A compartment-full
-rejection is classified as a *rejection* and a thread-pool overrun as a *timeout* — both distinct
-from a genuine failure of your code — so retry, fallback, and circuit-breaker layers each react
-to the right signal when stacked on the same call.
+rejection is classified as a *rejection* and a thread-pool overrun as a *timeout*, both distinct
+from a genuine failure of your code: that is the outcome the composed call reports, and what a
+fallback stage can match on. A circuit breaker or retry stage stacked outside the bulkhead still
+receives the raised error and, by default, treats it like any other exception: the breaker
+counts a compartment-full rejection as a failure, so a saturated compartment can open the
+circuit on a healthy dependency, and the retry stage tries the call again.
 
 | What you observe | When it happens |
 |------------------|-----------------|
@@ -142,37 +155,36 @@ to the right signal when stacked on the same call.
 | The call waits, then runs | the compartment was full and the call had a wait timeout (semaphore), or every worker was busy and a queue seat was free (thread pool) |
 | The call is rejected, naming the compartment and its occupancy | the compartment is full — on the spot, or once a semaphore call's wait timeout expires |
 | Your fallback answers instead of an error | a fallback is configured and the rejection was compartment-full |
-| A long task is cut off with a timeout error | a thread-pool call exceeds its execution timeout |
+| The caller is freed with a timeout error; a task already running keeps its worker until it returns | a thread-pool call exceeds its execution timeout |
 | The call fails immediately with a "compartment not found" error listing the registered compartments | the call names a custom compartment that was never registered — sync or async alike |
-| The rejection counter and last-rejection time advance | every rejection, per compartment |
+| The status surface's rejection count and last-rejection time advance | every rejection of a sync caller, per compartment |
 | A compartment is flagged as running hot | its utilization crosses 80% in the status summary |
 | Thread-pool compartments stop accepting work, then drain | the service shuts down gracefully |
 
 The live state of every compartment — type, capacity, active, waiting, total rejected, last
 rejection time, utilization — is served by the admin server's read-only `/bulkheads` endpoint
 and shown in the Web Console's **Bulkheads** panel; the status summary flags every compartment
-above 80% utilization so the hot spots surface first. The same state is also exported as
-Prometheus metrics: Baldur starts the metrics publisher automatically when the app boots — on
-Django, Flask, FastAPI, or a plain-Python service alike — and refreshes the gauges on a fixed
-interval. It is on by default; the on/off switch and the refresh interval are tunable settings.
+above 80% utilization so the hot spots surface first. With the optional Prometheus dependency
+installed, the same state is also exported as Prometheus metrics: Baldur starts the metrics
+publisher automatically when the app boots — on Django, Flask, FastAPI, or a plain-Python service
+alike — and refreshes the gauges on a fixed interval. It is on by default; the on/off switch and
+the refresh interval are tunable settings.
 On graceful shutdown, thread-pool compartments stop accepting new work when the drain begins,
 and their in-flight tasks are waited on before the process exits.
 
 ## Configuration
 
-A compartment's capacity is set **where the compartment is created, in code** — not through
-environment variables. The four built-in compartments ship with the production-safe defaults in
-the table above; a compartment you register yourself takes the capacity you give it (10
-concurrent if you don't say). Each call site then just names its compartment and, optionally,
-sets a wait timeout.
-
-The tuning settings behind the built-in defaults are advanced / internal: they are not
-part of the public operator-tunable environment-variable allowlist yet.
+A compartment you register yourself gets its capacity **where you create it, in code** (10
+concurrent if you don't say). The four built-in compartments ship with the production-safe
+defaults in the table above; the tuning settings behind those defaults are advanced / internal
+and not part of the public operator-tunable environment-variable allowlist yet. Each call site
+then just names its compartment and, optionally, sets a timeout.
 
 The compartments, the `/bulkheads` status surface, and the console panel are available on every
 install. With PRO active, the `external_api` built-in (and any compartment requesting
 `thread_pool` isolation) is backed by a real worker pool with execution-timeout containment and
-graceful shutdown drain; without PRO, the same compartments run as semaphore isolation.
+graceful shutdown drain for its sync callers; without PRO, the same compartments run as
+semaphore isolation.
 
 ## See also
 

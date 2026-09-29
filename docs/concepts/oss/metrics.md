@@ -35,8 +35,9 @@ Baldur's Metrics feature removes both problems:
 
 - **Visibility for free.** The resilience events you care about are recorded the moment they
   happen, with no instrumentation code on your side.
-- **Cardinality stays bounded.** The Cardinality Guard normalizes and caps labels so the number of
-  time series stays flat no matter how your traffic or your attackers behave.
+- **Cardinality stays bounded.** The Cardinality Guard labels requests by route rather than by raw
+  path and caps domain labels, so the series count follows what your code declares, not what your
+  traffic sends (one Django exception is spelled out below).
 - **No impossible readings.** Counts that should never go negative (like "items currently pending")
   are clamped at zero, so a restart can't surface a `-1` on your dashboard.
 
@@ -44,47 +45,55 @@ Baldur's Metrics feature removes both problems:
 
 **Metrics are recorded automatically.** When a circuit breaker changes state, a retry runs out of
 attempts, a dead-letter item is created or resolved, or a replay finishes, Baldur updates the
-matching metric for you. You write no recording code — the numbers appear because the self-healing
+matching metric for you. You write no recording code: the numbers appear because the self-healing
 layer is doing its job.
 
 **Your monitoring system scrapes them in the standard format.** Baldur exposes its metrics as a
 Prometheus text-exposition page (served byte-exact for scrapers) plus a JSON view of the
-control-API metrics. The page mounts through your web framework's normal URL routing, and is also
-available on Baldur's built-in admin console for deployments that run without a web framework. You
-point your existing Prometheus server at it — nothing Baldur-specific to learn on the scraper side.
+control-API metrics. Baldur's built-in admin server serves the page at `/prometheus` whichever
+framework you run, and without one. It listens on port 9090 and on localhost only by default, so a
+Prometheus server on another host or pod cannot reach it until you open the admin server up; the
+[admin server settings](../../reference/env-vars.md#admin-server) cover the port and the key that a
+non-localhost bind requires. On Django, Baldur's REST URLs (the `[django-api]` extra) also serve the
+page at `prometheus/` under wherever you include them. Flask and FastAPI apps get no route of their
+own. Either way you point your existing Prometheus server at it, with nothing Baldur-specific to
+learn on the scraper side.
 
 **You can instrument your own functions too.** Two decorators cover the common cases:
 
 | Decorator | What it records |
 |-----------|-----------------|
-| `@track_counter` | Counts how often a function runs (optionally only on success, or only on failure) |
+| `@track_counter` | Counts calls that return; pass `on_failure=True` to count calls that raise as well, and add `on_success=False` to count only those |
 | `@track_execution_time` | Records how long a function takes, as a histogram |
 
-**The Cardinality Guard keeps the series count flat.** This is the part that makes the metrics safe
-to leave on in production:
+**The Cardinality Guard keeps traffic-driven labels bounded.** This is the part that makes the
+metrics safe to leave on in production:
 
 | What you observe | When it happens |
 |------------------|-----------------|
-| `/api/users/123` and `/api/users/456` collapse to a single `/api/users/{id}` series | URL paths are normalized so per-ID values don't each spawn a new time series (UUIDs collapse the same way) |
-| Unrecognized paths collapse to one `UNMATCHED_ROUTE` series | A scanner hitting thousands of random URLs can't inflate cardinality — only real, routable paths are tracked |
-| A flood of new "domains" collapses to a single fallback label | Domain labels are capped (50 by default); anything past the cap is recorded under one shared label instead of unbounded new series |
-| The oldest tracked endpoint quietly drops off | The number of distinct endpoints is capped (500 by default) and evicted oldest-first, so the series count has a hard ceiling |
-| Odd characters in a label become `_`, long values are truncated | Label values are sanitized so they stay valid and bounded for Prometheus |
+| `/api/users/123` and `/api/users/456` land on one series labelled with their route, such as `/api/users/<int:pk>/` | HTTP request metrics are labelled with the route your framework matched, not the raw path, so per-ID values (UUIDs included) don't each spawn a new time series |
+| Unrouted paths collapse to one `UNMATCHED_ROUTE` series | A scanner hitting thousands of random URLs can't inflate cardinality: the endpoint label takes one value per registered route, plus this one. On Django, paths under `/health`, `/ready`, `/metrics` and `/favicon.ico` are the exception and keep their raw path |
+| New domain names past the cap share one `OTHER_DOMAIN` label | Domain labels (the per-service name the retry and dead-letter metrics are filed under) are capped at 50 by default, Baldur's own built-in domains included; names past the cap are recorded under that one label instead of unbounded new series |
+| Odd characters in a domain name become `_`, and a name that still isn't a valid identifier lands on `OTHER_DOMAIN` | Domain names are lowercased and sanitized (`Pay-API.v2` is recorded as `pay_api_v2`); one longer than 64 characters or starting with a digit is refused and shares the `OTHER_DOMAIN` label |
 | A "pending" gauge shows `0`, never a negative number | Gauges that should never go below zero are clamped, so a restart can't surface an impossible reading |
+
+The guard does not rewrite the `name` you pass to `protect()`. The circuit-breaker series and the
+per-call `protect()` series carry that name verbatim, one series per distinct name, so build names
+from fixed strings such as `"payments"`, never from an order or user ID.
 
 **It degrades safely when Prometheus isn't installed.** Metric collection rides on an optional
 dependency. If it isn't installed, recording calls quietly become no-ops and the scrape endpoint
-returns a `503` — your application keeps running exactly as before. Metrics are an observability
+returns a `503`; your application keeps running exactly as before. Metrics are an observability
 layer, never a thing that can take your app down.
 
-- **A metric only carries data when its subsystem runs.** The circuit-breaker, retry,
-  dead-letter-queue, replay, and cardinality-guard metrics are recorded out of the box on OSS;
-  series that report on PRO subsystems (adaptive throttle, emergency mode, canary rollouts) start
-  carrying data once the PRO package is installed and those services run.
+**A metric only carries data when its subsystem runs.** The circuit-breaker, retry,
+dead-letter-queue, replay and HTTP request metrics are recorded out of the box on OSS; series that
+report on PRO subsystems (adaptive throttle, emergency mode, canary rollouts) start carrying data
+once the PRO package is installed and those services run.
 
 ## Configuration
 
-Metrics works out of the box and is on by default — the resilience events start being recorded as
+Metrics works out of the box and is on by default: the resilience events start being recorded as
 soon as Baldur is initialized. The one thing you add is the optional Prometheus dependency, so the
 text-exposition endpoint has something to render:
 
@@ -94,10 +103,16 @@ pip install "baldur-framework[prometheus]"
 
 (The quotes matter in `zsh`/`fish`, which would otherwise treat the brackets as a glob.)
 
-There are no metrics variables in the operator-tunable allowlist — the prefix, backend, and
-Cardinality Guard limits ship with production-safe defaults and are treated as advanced settings for
-now, so there is nothing you need to set for the common case. The complete operator-tunable list
-lives in the [environment variables reference](../../reference/env-vars.md).
+The Metrics feature itself has no variables in the operator-tunable allowlist. Baldur's own metric
+names always start with `baldur_`, and the export backend and Cardinality Guard limits ship with
+production-safe defaults, so there is nothing you need to set for the common case.
+
+Two admin-server variables decide where the scrape page is reachable. `BALDUR_ADMIN_PORT` (default
+`9090`) moves it, and `BALDUR_ADMIN_ENABLED=false` removes it, which leaves a Flask, FastAPI or
+framework-free app with no scrape page at all. Prometheus itself also defaults to port 9090, so on a
+host that runs both, move one of them: Baldur does not start its admin server on a port that is
+already taken, and your app runs on without the page. The complete operator-tunable list lives in
+the [environment variables reference](../../reference/env-vars.md).
 
 ## See also
 
