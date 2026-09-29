@@ -2266,3 +2266,184 @@ class TestAsyncComposerUnretriedCaptureBehavior:
         assert async_composer.capture_unretried_failures("asummarize") is (
             async_composer
         )
+
+
+# =============================================================================
+# Behavior — 799 D1: fallback_trigger names the error the fallback answered
+# =============================================================================
+
+# A timeout that fires long before the held function would finish, and one
+# that never fires before the function raises on its own.
+_TIMEOUT_FIRES_S = 0.05
+_TIMEOUT_IDLE_S = 5.0
+# Upper bound on how long a held function waits for its release.
+_HOLD_S = 5.0
+
+_TRIGGER_CASES = [
+    ("plain_failure", PolicyOutcome.FAILURE),
+    ("wall_clock_timeout", PolicyOutcome.TIMEOUT),
+    ("open_breaker", PolicyOutcome.REJECTED),
+    ("own_builtin_timeout", PolicyOutcome.FAILURE),
+]
+_TRIGGER_IDS = [case for case, _ in _TRIGGER_CASES]
+
+
+class TestComposerFallbackTriggerBehavior:
+    """799 D1: the ``SUCCESS_WITH_FALLBACK`` result records which class of
+    error the fallback answered as ``metadata["fallback_trigger"]`` — the
+    classifier's value for the absorbed exception — so the idempotency hook can
+    hold a timed-out call's key and release any other. A builtin
+    ``TimeoutError`` the function raised itself passes the timeout stage
+    unmodified and is a plain failure, not a timeout."""
+
+    @pytest.fixture
+    def release(self):
+        """Event a held function waits on; set at teardown so the abandoned
+        timeout-executor thread ends."""
+        event = threading.Event()
+        yield event
+        event.set()
+
+    @staticmethod
+    def _sync_chain(case: str, release: threading.Event):
+        """(inner stage or None, protected function) for one answered error."""
+        from baldur.resilience.policies.timeout import TimeoutPolicy
+
+        return {
+            "plain_failure": (None, _throwing(RuntimeError("charge declined"))),
+            "wall_clock_timeout": (
+                TimeoutPolicy(_TIMEOUT_FIRES_S),
+                lambda: release.wait(timeout=_HOLD_S),
+            ),
+            "open_breaker": (_CircuitOpenPolicy(), lambda: "unreached"),
+            "own_builtin_timeout": (
+                TimeoutPolicy(_TIMEOUT_IDLE_S),
+                _throwing(TimeoutError("upstream read timed out")),
+            ),
+        }[case]
+
+    @staticmethod
+    def _async_chain(case: str):
+        """Async twin of :meth:`_sync_chain`."""
+        from baldur.resilience.policies.timeout import AsyncTimeoutPolicy
+
+        async def _fails() -> str:
+            raise RuntimeError("charge declined")
+
+        async def _held() -> str:
+            await asyncio.Event().wait()  # only the timeout's cancel ends it
+            return "unreached"
+
+        async def _unreached() -> str:
+            return "unreached"
+
+        async def _own_timeout() -> str:
+            raise TimeoutError("upstream read timed out")
+
+        return {
+            "plain_failure": (None, _fails),
+            "wall_clock_timeout": (AsyncTimeoutPolicy(_TIMEOUT_FIRES_S), _held),
+            "open_breaker": (_AsyncCircuitOpenPolicy(), _unreached),
+            "own_builtin_timeout": (AsyncTimeoutPolicy(_TIMEOUT_IDLE_S), _own_timeout),
+        }[case]
+
+    @pytest.mark.parametrize(
+        ("case", "expected_trigger"), _TRIGGER_CASES, ids=_TRIGGER_IDS
+    )
+    def test_fallback_trigger_records_answered_error_class(
+        self, composer, release, case, expected_trigger
+    ):
+        from baldur.resilience.policies.fallback import FallbackPolicy
+
+        # Given — the fallback outermost, the stage that produces the error
+        # inside it.
+        stage, func = self._sync_chain(case, release)
+        composer.add(FallbackPolicy(default_value="degraded"))
+        if stage is not None:
+            composer.add(stage)
+
+        # When
+        result = composer.execute(func)
+
+        # Then
+        assert result.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
+        assert result.metadata["fallback_trigger"] == expected_trigger.value
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("case", "expected_trigger"), _TRIGGER_CASES, ids=_TRIGGER_IDS
+    )
+    async def test_async_fallback_trigger_records_answered_error_class(
+        self, async_composer, case, expected_trigger
+    ):
+        from baldur.resilience.policies.fallback import AsyncFallbackPolicy
+
+        # Given
+        stage, func = self._async_chain(case)
+        async_composer.add(AsyncFallbackPolicy(default_value="degraded"))
+        if stage is not None:
+            async_composer.add(stage)
+
+        # When
+        result = await async_composer.execute(func)
+
+        # Then
+        assert result.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
+        assert result.metadata["fallback_trigger"] == expected_trigger.value
+
+    def test_fallback_trigger_absent_when_function_returns(self, composer):
+        from baldur.resilience.policies.fallback import FallbackPolicy
+
+        composer.add(FallbackPolicy(default_value="degraded"))
+
+        result = composer.execute(lambda: "charged")
+
+        assert result.outcome == PolicyOutcome.SUCCESS
+        assert "fallback_trigger" not in result.metadata
+
+    @pytest.mark.asyncio
+    async def test_async_fallback_trigger_absent_when_function_returns(
+        self, async_composer
+    ):
+        from baldur.resilience.policies.fallback import AsyncFallbackPolicy
+
+        async def _charges() -> str:
+            return "charged"
+
+        async_composer.add(AsyncFallbackPolicy(default_value="degraded"))
+
+        result = await async_composer.execute(_charges)
+
+        assert result.outcome == PolicyOutcome.SUCCESS
+        assert "fallback_trigger" not in result.metadata
+
+    def test_fallback_trigger_answer_logs_fallback_applied_once(self, composer):
+        """The shared result builder logs the degraded answer exactly once."""
+        from baldur.resilience.policies.fallback import FallbackPolicy
+
+        composer.add(FallbackPolicy(default_value="degraded"))
+
+        with capture_logs() as cap_logs:
+            composer.execute(_throwing(RuntimeError("charge declined")))
+
+        applied = [e for e in cap_logs if e["event"] == "policy_chain.fallback_applied"]
+        assert len(applied) == 1
+        assert applied[0]["error_type"] == "RuntimeError"
+
+    @pytest.mark.asyncio
+    async def test_async_fallback_trigger_answer_logs_fallback_applied_once(
+        self, async_composer
+    ):
+        from baldur.resilience.policies.fallback import AsyncFallbackPolicy
+
+        async def _fails() -> str:
+            raise RuntimeError("charge declined")
+
+        async_composer.add(AsyncFallbackPolicy(default_value="degraded"))
+
+        with capture_logs() as cap_logs:
+            await async_composer.execute(_fails)
+
+        applied = [e for e in cap_logs if e["event"] == "policy_chain.fallback_applied"]
+        assert len(applied) == 1
+        assert applied[0]["error_type"] == "RuntimeError"

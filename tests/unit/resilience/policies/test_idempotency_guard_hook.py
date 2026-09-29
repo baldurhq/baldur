@@ -11,6 +11,10 @@ Covers:
 - 595 D4 window threading — ``execution_ttl`` → ``check_and_acquire(ttl=)``,
   memory ``ttl`` → ``context.extra["_idempotency_ttl"]`` → hook ``mark_*``;
   fail-open cache error stores neither threading key
+- 799 D1 fallback-answer mark rule, shared by the sync and async hooks —
+  completed on plain success and on a timeout-answered fallback, failed
+  (re-claimable) on a failure- or refusal-answered fallback; a mark fault on
+  the release branch logs ``idempotency.mark_failed_failed``
 """
 
 from datetime import timedelta
@@ -19,10 +23,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 from structlog.testing import capture_logs
 
-from baldur.interfaces.resilience_policy import PolicyResult
+from baldur.interfaces.resilience_policy import PolicyOutcome, PolicyResult
 from baldur.resilience.policies.idempotency import (
+    AsyncIdempotencyHook,
     IdempotencyGuard,
     IdempotencyHook,
+    _ensure_async_policy_gate,
     _ensure_policy_gate,
     _reset_policy_gate,
 )
@@ -854,6 +860,248 @@ class TestIdempotencyHookLogBehavior:
         assert len(events) == 1
         assert events[0]["fail_open"] is True
         assert events[0]["key"] == "k"
+
+
+# =============================================================================
+# IdempotencyHook / AsyncIdempotencyHook — 799 D1 fallback-answer mark rule
+# (§8.8 State transition, §8.12 Branch outcome, §8.5 Dependency interaction)
+# =============================================================================
+
+
+def _fallback_answer_result(outcome, trigger):
+    """A pipeline result as the composer hands it to the hook's success path.
+
+    ``trigger=None`` leaves ``fallback_trigger`` out of the metadata — the
+    composer never produces that for a fallback answer, but the hook must still
+    treat it as "the function did not complete".
+    """
+    metadata = {}
+    if outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK:
+        metadata = {"fallback_used": True, "original_error": "charge declined"}
+        if trigger is not None:
+            metadata["fallback_trigger"] = trigger.value
+    return PolicyResult(value="answer", outcome=outcome, metadata=metadata)
+
+
+# Rows: (outcome, fallback_trigger, expected record status after on_success).
+_FALLBACK_ANSWER_ROWS = [
+    (PolicyOutcome.SUCCESS, None, "completed"),
+    (PolicyOutcome.SUCCESS_WITH_FALLBACK, PolicyOutcome.FAILURE, "failed"),
+    (PolicyOutcome.SUCCESS_WITH_FALLBACK, PolicyOutcome.REJECTED, "failed"),
+    (PolicyOutcome.SUCCESS_WITH_FALLBACK, PolicyOutcome.TIMEOUT, "completed"),
+    (PolicyOutcome.SUCCESS_WITH_FALLBACK, None, "failed"),
+]
+_FALLBACK_ANSWER_IDS = [
+    "plain_success_completes",
+    "failure_answer_releases",
+    "rejected_answer_releases",
+    "timeout_answer_completes",
+    "no_trigger_answer_releases",
+]
+
+
+class TestIdempotencyHookFallbackAnswerBehavior:
+    """799 D1: both hooks mark the key by one rule. Only the function's own
+    return, or a fallback that answered a timeout (the timed-out work may still
+    run), keeps the key completed; a fallback that answered a failure or a
+    refusal leaves it failed, so the next call on the key re-claims it.
+
+    Runs over the real in-process gate so the effect is the stored record and
+    the next acquire, not a mocked call."""
+
+    _KEY = "fallback-answer-key"
+
+    @pytest.fixture(autouse=True)
+    def _iso(self, policy_gate_isolation):
+        return
+
+    @pytest.mark.parametrize(
+        ("outcome", "trigger", "expected_status"),
+        _FALLBACK_ANSWER_ROWS,
+        ids=_FALLBACK_ANSWER_IDS,
+    )
+    def test_on_success_fallback_answer_marks_key_by_trigger(
+        self, outcome, trigger, expected_status, make_context
+    ):
+        from baldur.core.idempotency_gate import IdempotencyDecision
+
+        # Given — this call holds the key (record ``executing``).
+        gate = _ensure_policy_gate()
+        assert (
+            gate.check_and_acquire(self._KEY).decision == IdempotencyDecision.CONTINUE
+        )
+        ctx = make_context(extra={"_idempotency_key": self._KEY})
+
+        # When
+        IdempotencyHook().on_success(
+            "composer", _fallback_answer_result(outcome, trigger), context=ctx
+        )
+
+        # Then — the record, and what the next call on the key gets.
+        assert gate._cache.get(self._KEY)["status"] == expected_status
+        repeat = gate.check_and_acquire(self._KEY)
+        if expected_status == "failed":
+            assert repeat.decision == IdempotencyDecision.CONTINUE
+            assert repeat.retry_count == 1
+        else:
+            assert repeat.decision == IdempotencyDecision.SKIP
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("outcome", "trigger", "expected_status"),
+        _FALLBACK_ANSWER_ROWS,
+        ids=_FALLBACK_ANSWER_IDS,
+    )
+    async def test_async_on_success_fallback_answer_marks_key_by_trigger(
+        self, outcome, trigger, expected_status, make_context
+    ):
+        from baldur.core.idempotency_gate import IdempotencyDecision
+
+        # Given — this call holds the key on the async gate.
+        gate = _ensure_async_policy_gate()
+        acquired = await gate.check_and_acquire(self._KEY)
+        assert acquired.decision == IdempotencyDecision.CONTINUE
+        ctx = make_context(extra={"_idempotency_key": self._KEY})
+
+        # When
+        await AsyncIdempotencyHook().on_success(
+            "composer", _fallback_answer_result(outcome, trigger), context=ctx
+        )
+
+        # Then
+        record = await gate._cache.aget(self._KEY)
+        assert record["status"] == expected_status
+        repeat = await gate.check_and_acquire(self._KEY)
+        if expected_status == "failed":
+            assert repeat.decision == IdempotencyDecision.CONTINUE
+            assert repeat.retry_count == 1
+        else:
+            assert repeat.decision == IdempotencyDecision.SKIP
+
+    def test_fallback_answer_release_forwards_error_retry_count_and_ttl(
+        self, make_context
+    ):
+        """The release marks with the answered error and the guard-threaded
+        retry count and memory window — the same arguments ``on_failure``
+        forwards — and never marks the key completed."""
+        from baldur.core.idempotency_gate import IdempotencyGate
+
+        gate = MagicMock(spec=IdempotencyGate)
+        mem_ttl = timedelta(hours=2)
+        ctx = make_context(
+            extra={
+                "_idempotency_key": "my_key",
+                "_idempotency_retry_count": 2,
+                "_idempotency_ttl": mem_ttl,
+            }
+        )
+        result = _fallback_answer_result(
+            PolicyOutcome.SUCCESS_WITH_FALLBACK, PolicyOutcome.FAILURE
+        )
+
+        with patch(
+            "baldur.resilience.policies.idempotency._ensure_policy_gate",
+            return_value=gate,
+        ):
+            IdempotencyHook().on_success("composer", result, context=ctx)
+
+        gate.mark_failed.assert_called_once_with(
+            "my_key", error="charge declined", retry_count=2, ttl=mem_ttl
+        )
+        gate.mark_completed.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_async_fallback_answer_release_forwards_error_retry_count_and_ttl(
+        self, make_context
+    ):
+        """Async twin of the forwarded-arguments check."""
+        from baldur.core.idempotency_gate import AsyncIdempotencyGate
+
+        gate = MagicMock(spec=AsyncIdempotencyGate)
+        mem_ttl = timedelta(hours=2)
+        ctx = make_context(
+            extra={
+                "_idempotency_key": "my_key",
+                "_idempotency_retry_count": 2,
+                "_idempotency_ttl": mem_ttl,
+            }
+        )
+        result = _fallback_answer_result(
+            PolicyOutcome.SUCCESS_WITH_FALLBACK, PolicyOutcome.REJECTED
+        )
+
+        with patch(
+            "baldur.resilience.policies.idempotency._ensure_async_policy_gate",
+            return_value=gate,
+        ):
+            await AsyncIdempotencyHook().on_success("composer", result, context=ctx)
+
+        gate.mark_failed.assert_awaited_once_with(
+            "my_key", error="charge declined", retry_count=2, ttl=mem_ttl
+        )
+        gate.mark_completed.assert_not_called()
+
+
+class TestIdempotencyHookFallbackAnswerLogBehavior:
+    """799 D1: a mark fault on the release branch is swallowed (the fallback's
+    answer is already served) and logged under the op that was attempted —
+    ``idempotency.mark_failed_failed``, never ``mark_completed_failed``."""
+
+    @staticmethod
+    def _release_result():
+        return _fallback_answer_result(
+            PolicyOutcome.SUCCESS_WITH_FALLBACK, PolicyOutcome.FAILURE
+        )
+
+    def test_fallback_answer_mark_fault_logs_mark_failed_failed(self, make_context):
+        from baldur.core.idempotency_gate import IdempotencyGate
+
+        gate = MagicMock(spec=IdempotencyGate)
+        gate.mark_failed.side_effect = RuntimeError("redis down")
+        ctx = make_context(extra={"_idempotency_key": "k"})
+
+        with (
+            patch(
+                "baldur.resilience.policies.idempotency._ensure_policy_gate",
+                return_value=gate,
+            ),
+            capture_logs() as cap_logs,
+        ):
+            # Must not raise — the fallback's answer has already been served.
+            IdempotencyHook().on_success(
+                "composer", self._release_result(), context=ctx
+            )
+
+        gate.mark_failed.assert_called_once()  # the fault fired
+        events = [e["event"] for e in cap_logs]
+        assert events.count("idempotency.mark_failed_failed") == 1
+        assert "idempotency.mark_completed_failed" not in events
+
+    @pytest.mark.asyncio
+    async def test_async_fallback_answer_mark_fault_logs_mark_failed_failed(
+        self, make_context
+    ):
+        from baldur.core.idempotency_gate import AsyncIdempotencyGate
+
+        gate = MagicMock(spec=AsyncIdempotencyGate)
+        gate.mark_failed.side_effect = RuntimeError("redis down")
+        ctx = make_context(extra={"_idempotency_key": "k"})
+
+        with (
+            patch(
+                "baldur.resilience.policies.idempotency._ensure_async_policy_gate",
+                return_value=gate,
+            ),
+            capture_logs() as cap_logs,
+        ):
+            await AsyncIdempotencyHook().on_success(
+                "composer", self._release_result(), context=ctx
+            )
+
+        gate.mark_failed.assert_awaited_once()  # the fault fired
+        events = [e["event"] for e in cap_logs]
+        assert events.count("idempotency.mark_failed_failed") == 1
+        assert "idempotency.mark_completed_failed" not in events
 
 
 # =============================================================================

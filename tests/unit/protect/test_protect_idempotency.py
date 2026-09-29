@@ -23,15 +23,24 @@ Covers, per the impl-doc Test Assessment:
   threading, wiring-time ``ValueError`` on non-positive values, ignored
   without ``idempotency_key``, and end-to-end guard→gate/hook window delivery
   on the sync and async facades.
+- 799 D1: a fallback that answered a failure releases the key (a genuine
+  repeat runs the function again), a fallback that answered a timeout keeps
+  refusing the repeat; 799 D2: in production the registry's in-process default
+  is refused before the function runs, the escape hatch accepts it, and a call
+  that refused runs on the shared cache once one is wired.
 
 The guard/hook resolve a cache-backed gate via ``resolve_cache_via_registry``.
 ``ProviderRegistry.get_cache`` is patched to raise ``AdapterNotFoundError`` for
 the whole module so resolution deterministically lands on the in-process
 ``_POLICY_FALLBACK_CACHE`` fallback, mirroring the @idempotent decorator tests.
+The production-refusal class overrides that isolation to resolve the
+registry's real in-process default instead.
 """
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -57,6 +66,7 @@ from baldur.protect_facade import (
     _field_key_generator,
     _finalize_value,
     _read_context_field,
+    aprotect,
     aprotect_with_meta,
     aprotected,
     protect,
@@ -629,6 +639,52 @@ class TestResolverMessageFeatureNeutralContract:
         assert "production" in message.lower()
         assert "BALDUR_IDEMPOTENCY_ALLOW_INMEMORY_FALLBACK" in message
 
+    @pytest.mark.parametrize(
+        "registry_state",
+        ["no_adapter", "in_process_default"],
+        ids=["no_adapter", "in_process_default"],
+    )
+    def test_refusal_message_names_every_fix(self, monkeypatch, registry_state):
+        """799 D2: whichever registry state is refused, the message names each
+        fix — ``baldur.init()`` with ``BALDUR_REDIS_URL``, a distributed adapter
+        via ``ProviderRegistry``, the escape hatch — and stays feature-neutral."""
+        from baldur.adapters.cache.memory_adapter import InMemoryCacheAdapter
+        from baldur.runtime import reset_runtime
+        from baldur.services.idempotency._cache_resolver import (
+            resolve_cache_via_registry,
+        )
+        from baldur.settings.idempotency import reset_idempotency_settings
+
+        monkeypatch.setenv("BALDUR_ENVIRONMENT", "production")
+        monkeypatch.setenv("BALDUR_IDEMPOTENCY_ALLOW_INMEMORY_FALLBACK", "false")
+        reset_idempotency_settings()
+        reset_runtime()
+        if registry_state == "no_adapter":
+            registry = patch(
+                "baldur.factory.registry.ProviderRegistry.get_cache",
+                side_effect=AdapterNotFoundError(adapter_type="cache"),
+            )
+        else:
+            registry = patch(
+                "baldur.factory.registry.ProviderRegistry.get_cache",
+                return_value=InMemoryCacheAdapter(key_prefix="default:"),
+            )
+
+        with registry, pytest.raises(ConfigurationError) as exc_info:
+            resolve_cache_via_registry(
+                layer="policy",
+                fallback_cache=InMemoryCacheAdapter(key_prefix="x:"),
+                raise_on_prod_no_toggle=True,
+            )
+
+        message = str(exc_info.value)
+        assert "baldur.init()" in message
+        assert "BALDUR_REDIS_URL" in message
+        assert "ProviderRegistry" in message
+        assert "production" in message.lower()
+        assert "BALDUR_IDEMPOTENCY_ALLOW_INMEMORY_FALLBACK" in message
+        assert "@idempotent" not in message
+
 
 # =============================================================================
 # protect / aprotect — D9 cache-error fail direction (Behavior, §8.1 Boundary)
@@ -1069,3 +1125,382 @@ class TestProtectIdempotencyTtlBehavior:
 
         assert result.success is False
         assert mock_mark.call_args.kwargs["ttl"] is self._MEM_TTL
+
+
+# =============================================================================
+# 799 D1 — a fallback's answer: released after a failure, held after a timeout
+# =============================================================================
+
+# A facade timeout that fires long before a held function would finish.
+_TIMEOUT_FIRES_S = 0.05
+# Upper bound on any wait for a held function to enter or be released.
+_HOLD_S = 5.0
+
+# The facade's own retry / breaker / DLQ stay off so the only stages are the
+# ones under test.
+_BARE = {"circuit_breaker": False, "retry": False, "dlq": False}
+
+
+class TestProtectFallbackAnswerBehavior:
+    """799 D1 end to end: guard → composer → hook → gate over the real
+    in-process cache. When the function raised and the fallback answered, the
+    key is released, so a genuine repeat runs the function again."""
+
+    def test_protect_fallback_answer_releases_key_repeat_runs_function(self):
+        # Given — a charge that fails every time, answered by a fallback.
+        calls = {"n": 0}
+
+        def charge():
+            calls["n"] += 1
+            raise ConnectionError("payment gateway refused")
+
+        def call():
+            return protect(
+                "svc.fa",
+                charge,
+                fallback=lambda: {"status": "unavailable"},
+                idempotency_key="order_id",
+                context=PolicyContext(order_id="o-1"),
+                **_BARE,
+            )
+
+        # When — the customer retries with the same key.
+        first = call()
+        repeat = call()
+
+        # Then — both got the fallback's answer and the charge ran twice.
+        assert first == repeat == {"status": "unavailable"}
+        assert calls["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_aprotect_fallback_answer_releases_key_repeat_runs_function(self):
+        calls = {"n": 0}
+
+        async def charge():
+            calls["n"] += 1
+            raise ConnectionError("payment gateway refused")
+
+        async def unavailable():
+            return {"status": "unavailable"}
+
+        async def call():
+            return await aprotect(
+                "svc.afa",
+                charge,
+                fallback=unavailable,
+                idempotency_key="order_id",
+                context=PolicyContext(order_id="o-1"),
+                **_BARE,
+            )
+
+        first = await call()
+        repeat = await call()
+
+        assert first == repeat == {"status": "unavailable"}
+        assert calls["n"] == 2
+
+
+class TestProtectTimeoutFallbackBehavior:
+    """799 D1 negative: a fallback that answered a timeout keeps the key
+    completed — the timed-out work may still be running, so a same-key repeat
+    is refused with ``SKIP`` instead of running beside it."""
+
+    def test_protect_sync_timeout_fallback_holds_key_while_function_runs(self):
+        # Given — a charge that keeps running past the facade's timeout.
+        calls = {"n": 0}
+        entered = threading.Event()
+        release = threading.Event()
+
+        def charge():
+            calls["n"] += 1
+            entered.set()
+            release.wait(timeout=_HOLD_S)
+            return "charged"
+
+        def call():
+            return protect(
+                "svc.tf",
+                charge,
+                fallback=lambda: "pending",
+                timeout=_TIMEOUT_FIRES_S,
+                idempotency_key="order_id",
+                context=PolicyContext(order_id="o-1"),
+                **_BARE,
+            )
+
+        try:
+            # When — the timeout's fallback answers; the repeat arrives while
+            # the abandoned charge is still held.
+            first = call()
+            assert entered.wait(timeout=_HOLD_S)
+            with pytest.raises(IdempotencyDuplicateError) as exc_info:
+                call()
+        finally:
+            release.set()
+
+        # Then — the repeat was refused and the charge body ran once.
+        assert first == "pending"
+        assert exc_info.value.decision == "SKIP"
+        assert calls["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_aprotect_timeout_fallback_refuses_repeat_with_skip(self):
+        # Given — a charge whose cancellation propagates unchanged.
+        calls = {"n": 0}
+
+        async def charge():
+            calls["n"] += 1
+            await asyncio.Event().wait()  # only the timeout's cancel ends it
+            return "charged"
+
+        async def pending():
+            return "pending"
+
+        async def call():
+            return await aprotect(
+                "svc.atf",
+                charge,
+                fallback=pending,
+                timeout=_TIMEOUT_FIRES_S,
+                idempotency_key="order_id",
+                context=PolicyContext(order_id="o-1"),
+                **_BARE,
+            )
+
+        # When
+        first = await call()
+        with pytest.raises(IdempotencyDuplicateError) as exc_info:
+            await call()
+
+        # Then
+        assert first == "pending"
+        assert exc_info.value.decision == "SKIP"
+        assert calls["n"] == 1
+
+
+# =============================================================================
+# 799 D2 — production refuses the registry's in-process default
+# =============================================================================
+
+
+def _enter_production(monkeypatch) -> None:
+    """Production runtime with the escape hatch off (its default)."""
+    from baldur.runtime import reset_runtime
+    from baldur.settings.idempotency import reset_idempotency_settings
+
+    monkeypatch.setenv("BALDUR_ENVIRONMENT", "production")
+    monkeypatch.setenv("BALDUR_IDEMPOTENCY_ALLOW_INMEMORY_FALLBACK", "false")
+    reset_idempotency_settings()
+    reset_runtime()
+
+
+def _escape_hatch_on():
+    """Accept in-process dedup in production. Patches the cached layered seam
+    rather than the env base, so a present runtime-config manager cannot pin
+    its default over the flag."""
+    from baldur.settings.idempotency import IdempotencySettings
+
+    return patch(
+        "baldur.settings.layered_provider.get_layered_settings_cached",
+        return_value=IdempotencySettings(allow_inmemory_fallback=True),
+    )
+
+
+class TestProtectIdempotencyInProcessDefaultBehavior:
+    """799 D2 end to end: a production process whose registry still holds the
+    in-process default (``init()`` skipped, or failed before wiring the cache)
+    refuses the first guarded call with ``ConfigurationError`` before the
+    function runs, on the sync and the async facade. The escape hatch accepts
+    it. The refusal memoizes nothing, so once a shared cache is wired the same
+    call runs on it."""
+
+    @pytest.fixture
+    def _isolate_protect_idempotency(self):
+        """Overrides the module isolation: ``get_cache`` is NOT patched, so
+        resolution sees the registry's real in-process default."""
+        from baldur.factory.registry import ProviderRegistry
+        from baldur.runtime import reset_runtime
+        from baldur.settings.idempotency import reset_idempotency_settings
+        from baldur.settings.protect import reset_protect_settings
+
+        def _reset() -> None:
+            reset_protect_settings()
+            reset_idempotency_settings()
+            reset_runtime()
+            reset_protect_caches()
+
+        _reset()
+        with ProviderRegistry.cache.snapshot():
+            ProviderRegistry.cache.set_default("memory")
+            yield
+        _reset()
+
+    @staticmethod
+    def _counting_charge(calls):
+        def charge():
+            calls["n"] += 1
+            return "charged"
+
+        return charge
+
+    @staticmethod
+    def _counting_acharge(calls):
+        async def charge():
+            calls["n"] += 1
+            return "charged"
+
+        return charge
+
+    def test_protect_in_process_default_in_production_raises_before_function_runs(
+        self, monkeypatch
+    ):
+        _enter_production(monkeypatch)
+        calls = {"n": 0}
+
+        with pytest.raises(ConfigurationError):
+            protect(
+                "svc.ipd",
+                self._counting_charge(calls),
+                idempotency_key="order_id",
+                context=PolicyContext(order_id="o-1"),
+                **_BARE,
+            )
+
+        assert calls["n"] == 0
+
+    @pytest.mark.asyncio
+    async def test_aprotect_in_process_default_in_production_raises_before_function_runs(
+        self, monkeypatch
+    ):
+        _enter_production(monkeypatch)
+        calls = {"n": 0}
+
+        with pytest.raises(ConfigurationError):
+            await aprotect(
+                "svc.aipd",
+                self._counting_acharge(calls),
+                idempotency_key="order_id",
+                context=PolicyContext(order_id="o-1"),
+                **_BARE,
+            )
+
+        assert calls["n"] == 0
+
+    def test_protect_in_process_default_escape_hatch_on_runs_function(
+        self, monkeypatch
+    ):
+        _enter_production(monkeypatch)
+        calls = {"n": 0}
+
+        with _escape_hatch_on():
+            result = protect(
+                "svc.ipde",
+                self._counting_charge(calls),
+                idempotency_key="order_id",
+                context=PolicyContext(order_id="o-1"),
+                **_BARE,
+            )
+
+        assert result == "charged"
+        assert calls["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_aprotect_in_process_default_escape_hatch_on_runs_function(
+        self, monkeypatch
+    ):
+        _enter_production(monkeypatch)
+        calls = {"n": 0}
+
+        with _escape_hatch_on():
+            result = await aprotect(
+                "svc.aipde",
+                self._counting_acharge(calls),
+                idempotency_key="order_id",
+                context=PolicyContext(order_id="o-1"),
+                **_BARE,
+            )
+
+        assert result == "charged"
+        assert calls["n"] == 1
+
+    def test_protect_after_init_refused_call_runs_on_wired_shared_cache(
+        self, monkeypatch
+    ):
+        from baldur.factory.registry import ProviderRegistry
+        from tests.factories.cache_doubles import DistributedCacheStandIn
+
+        # Given — production, the registry still on its in-process default.
+        _enter_production(monkeypatch)
+        calls = {"n": 0}
+        shared = DistributedCacheStandIn(key_prefix="shared:")
+
+        def call():
+            return protect(
+                "svc.ai",
+                self._counting_charge(calls),
+                idempotency_key="order_id",
+                context=PolicyContext(order_id="o-1"),
+                **_BARE,
+            )
+
+        with pytest.raises(ConfigurationError):
+            call()
+
+        # When — a shared cache is wired, then the same call is made again.
+        with ProviderRegistry.cache.override(shared):
+            result = call()
+
+        # Then — it ran once, and its dedup record lives on the shared cache.
+        assert result == "charged"
+        assert calls["n"] == 1
+        assert shared.get("svc.ai:o-1")["status"] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_aprotect_after_init_refused_call_runs_on_wired_shared_cache(
+        self, monkeypatch
+    ):
+        """The stand-in reports a Redis provider, so the async resolver builds
+        an async Redis adapter for it; that constructor is stubbed with an
+        async in-process store standing in for the same shared server."""
+        from baldur.adapters.cache.async_memory_adapter import (
+            AsyncInMemoryCacheAdapter,
+        )
+        from baldur.factory.registry import ProviderRegistry
+        from baldur.services.idempotency import _cache_resolver as resolver_module
+        from tests.factories.cache_doubles import DistributedCacheStandIn
+
+        # Given
+        _enter_production(monkeypatch)
+        calls = {"n": 0}
+        async_shared = AsyncInMemoryCacheAdapter(key_prefix="shared:")
+
+        async def call():
+            return await aprotect(
+                "svc.aai",
+                self._counting_acharge(calls),
+                idempotency_key="order_id",
+                context=PolicyContext(order_id="o-1"),
+                **_BARE,
+            )
+
+        with pytest.raises(ConfigurationError):
+            await call()
+
+        # When
+        with (
+            ProviderRegistry.cache.override(
+                DistributedCacheStandIn(key_prefix="shared:")
+            ),
+            patch(
+                "baldur.adapters.cache.async_redis_adapter.AsyncRedisCacheAdapter",
+                new=lambda: async_shared,
+            ),
+            patch.object(resolver_module, "_register_async_pool_drain", autospec=True),
+        ):
+            result = await call()
+
+        # Then
+        assert result == "charged"
+        assert calls["n"] == 1
+        record = await async_shared.aget("svc.aai:o-1")
+        assert record["status"] == "completed"

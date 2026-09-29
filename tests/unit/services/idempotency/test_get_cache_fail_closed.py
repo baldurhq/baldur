@@ -13,6 +13,10 @@ Verification techniques (UNIT_TEST_GUIDELINES §8):
   ``(layer, reason)``.
 - §8.9 Concurrency — race-safe convergence under 10 threads × 100 calls.
 - §6.7 Parametrize for the production × adapter × escape_hatch matrix.
+- 799 D2: in production, Baldur's in-process default adapter (bare, or wrapped
+  the way ``ProviderRegistry.get_cache()`` returns it) is refused like a
+  missing adapter, for both the raising and the non-raising caller; outside
+  production it is returned silently.
 """
 
 # NOTE: do NOT add ``from __future__ import annotations`` — the matrix
@@ -158,6 +162,221 @@ class TestServiceCacheOutcomeMatrix:
             assert resolved is registered
         else:
             assert resolved is fallback
+
+
+# =============================================================================
+# TestResolveCacheInProcessDefault — 799 D2 in-process default branch
+# =============================================================================
+
+
+def _in_process_default(wrapped: bool):
+    """Baldur's in-process cache adapter, bare or wrapped the way
+    ``ProviderRegistry.get_cache()`` hands it out."""
+    from baldur.adapters.cache.memory_adapter import InMemoryCacheAdapter
+    from baldur.adapters.cache.metrics_decorator import MetricsAwareCacheAdapter
+
+    adapter = InMemoryCacheAdapter(key_prefix="registry_default:")
+    return MetricsAwareCacheAdapter(adapter) if wrapped else adapter
+
+
+class TestResolveCacheInProcessDefault:
+    """799 D2: the registry returns its in-process default as a success before
+    ``init()`` wires a shared cache. In production that adapter is refused
+    exactly like a missing one — raise for the decorator/facade caller, WARN +
+    counter + the caller's own fallback store for the service caller; the
+    escape hatch accepts the caller's fallback store. Outside production the
+    registry's adapter is the ledger and is returned as-is, silently."""
+
+    @pytest.mark.parametrize("wrapped", [False, True], ids=["bare", "metrics_wrapped"])
+    @pytest.mark.parametrize(
+        ("in_production", "escape_hatch", "raise_on_prod", "expected", "reason"),
+        [
+            (True, False, True, "raises", "no_cache_adapter_registered"),
+            (True, False, False, "fallback", "no_cache_adapter_registered"),
+            (True, True, True, "fallback", "escape_hatch_enabled"),
+            (True, True, False, "fallback", "escape_hatch_enabled"),
+            (False, False, True, "registered", None),
+            (False, False, False, "registered", None),
+            (False, True, True, "registered", None),
+            (False, True, False, "registered", None),
+        ],
+        ids=[
+            "prod_escape_off_raising_caller_raises",
+            "prod_escape_off_service_caller_falls_back",
+            "prod_escape_on_raising_caller_falls_back",
+            "prod_escape_on_service_caller_falls_back",
+            "dev_escape_off_raising_caller_keeps_registry_adapter",
+            "dev_escape_off_service_caller_keeps_registry_adapter",
+            "dev_escape_on_raising_caller_keeps_registry_adapter",
+            "dev_escape_on_service_caller_keeps_registry_adapter",
+        ],
+    )
+    def test_in_process_default_outcome_matrix(
+        self,
+        monkeypatch,
+        reset_idempotency_settings_singleton,
+        reset_runtime_isolation,
+        wrapped,
+        in_production,
+        escape_hatch,
+        raise_on_prod,
+        expected,
+        reason,
+    ):
+        from baldur.core.exceptions import ConfigurationError
+        from baldur.settings.idempotency import IdempotencySettings
+
+        # Given — env drives ``is_production()``; the escape hatch resolves via
+        # the cached layered seam, patched so a present runtime-config manager
+        # cannot pin a default over it.
+        _seed_env(monkeypatch, in_production=in_production, escape_hatch=escape_hatch)
+        registered = _in_process_default(wrapped)
+        fallback = resolver_module._SERVICE_FALLBACK_CACHE
+        layer = "decorator" if raise_on_prod else "service"
+
+        with (
+            patch(
+                "baldur.factory.registry.ProviderRegistry.get_cache",
+                return_value=registered,
+            ),
+            patch(
+                "baldur.settings.layered_provider.get_layered_settings_cached",
+                return_value=IdempotencySettings(allow_inmemory_fallback=escape_hatch),
+            ),
+            patch.object(
+                resolver_module, "_record_fallback_metric", autospec=True
+            ) as record_mock,
+        ):
+            # When
+            if expected == "raises":
+                with pytest.raises(ConfigurationError):
+                    resolve_cache_via_registry(
+                        layer=layer,
+                        fallback_cache=fallback,
+                        raise_on_prod_no_toggle=raise_on_prod,
+                    )
+            else:
+                resolved = resolve_cache_via_registry(
+                    layer=layer,
+                    fallback_cache=fallback,
+                    raise_on_prod_no_toggle=raise_on_prod,
+                )
+
+        # Then — the store handed back, and the counter that makes it visible.
+        if expected == "registered":
+            assert resolved is registered
+        elif expected == "fallback":
+            assert resolved is fallback
+        if reason is None:
+            record_mock.assert_not_called()
+        else:
+            record_mock.assert_called_once_with(layer=layer, reason=reason)
+
+    def test_in_process_default_dev_returns_registry_adapter_without_warning(
+        self,
+        monkeypatch,
+        reset_idempotency_settings_singleton,
+        reset_runtime_isolation,
+        caplog,
+    ):
+        """Development keeps the registry's own in-process adapter as the
+        ledger: no WARNING, no counter."""
+        _seed_env(monkeypatch, in_production=False, escape_hatch=False)
+        registered = _in_process_default(wrapped=True)
+
+        with (
+            patch(
+                "baldur.factory.registry.ProviderRegistry.get_cache",
+                return_value=registered,
+            ),
+            patch.object(
+                resolver_module, "_record_fallback_metric", autospec=True
+            ) as record_mock,
+            caplog.at_level(
+                logging.WARNING,
+                logger="baldur.services.idempotency._cache_resolver",
+            ),
+        ):
+            resolved = resolve_cache_via_registry(
+                layer="service",
+                fallback_cache=resolver_module._SERVICE_FALLBACK_CACHE,
+                raise_on_prod_no_toggle=False,
+            )
+
+        assert resolved is registered
+        assert not [
+            r
+            for r in caplog.records
+            if r.name == "baldur.services.idempotency._cache_resolver"
+            and r.levelno >= logging.WARNING
+        ]
+        record_mock.assert_not_called()
+
+    def test_in_process_default_prod_service_layer_degrades_loudly_without_raising(
+        self,
+        monkeypatch,
+        reset_idempotency_settings_singleton,
+        reset_runtime_isolation,
+        caplog,
+    ):
+        """Production service caller: never raises; returns its own fallback
+        store (not the registry's in-process adapter) and emits the WARNING
+        naming the missing distributed adapter."""
+        _seed_env(monkeypatch, in_production=True, escape_hatch=False)
+        registered = _in_process_default(wrapped=True)
+        fallback = resolver_module._SERVICE_FALLBACK_CACHE
+
+        with (
+            patch(
+                "baldur.factory.registry.ProviderRegistry.get_cache",
+                return_value=registered,
+            ),
+            patch.object(resolver_module, "_record_fallback_metric", autospec=True),
+            caplog.at_level(
+                logging.WARNING,
+                logger="baldur.services.idempotency._cache_resolver",
+            ),
+        ):
+            resolved = resolve_cache_via_registry(
+                layer="service",
+                fallback_cache=fallback,
+                raise_on_prod_no_toggle=False,
+            )
+
+        assert resolved is fallback
+        assert resolved is not registered
+        records = [
+            r
+            for r in caplog.records
+            if r.message == "idempotency.distributed_dedup_unavailable"
+        ]
+        assert len(records) == 1
+        assert records[0].layer == "service"
+        assert records[0].reason == "no_cache_adapter_registered"
+
+    def test_in_process_default_service_get_cache_uses_fallback_store_in_production(
+        self,
+        monkeypatch,
+        reset_idempotency_settings_singleton,
+        reset_runtime_isolation,
+    ):
+        """``IdempotencyService._get_cache()`` over the registry's in-process
+        default in production resolves the service fallback store and does not
+        raise."""
+        from baldur.services.idempotency.service import IdempotencyService
+
+        _seed_env(monkeypatch, in_production=True, escape_hatch=False)
+
+        with (
+            patch(
+                "baldur.factory.registry.ProviderRegistry.get_cache",
+                return_value=_in_process_default(wrapped=True),
+            ),
+            patch.object(resolver_module, "_record_fallback_metric", autospec=True),
+        ):
+            cache = IdempotencyService()._get_cache()
+
+        assert cache is resolver_module._SERVICE_FALLBACK_CACHE
 
 
 # =============================================================================

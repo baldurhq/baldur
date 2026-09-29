@@ -27,6 +27,9 @@ Verification techniques applied:
 - 595 D2: window threading (``execution_ttl`` → ``check_and_acquire``,
   ``ttl`` → ``mark_*``) and clock-controlled window-expiry behavior
   (memory-window expiry, decoupled crash recovery).
+- 799 D2: in production the registry's in-process default is refused before
+  the function runs, the escape hatch accepts it, and a call that refused runs
+  on the shared cache once one is wired (the refusal memoized no gate).
 """
 
 # NOTE: do NOT use ``from __future__ import annotations`` here. The source's
@@ -1483,3 +1486,103 @@ class TestIdempotentWindowExpiryBehavior:
             # Past the 1-minute execution window (memory ttl is 24 h) the key
             # is retryable.
             assert op(oid) == "ok"
+
+
+# =============================================================================
+# 799 D2 — production refuses the registry's in-process default
+# =============================================================================
+
+
+class TestIdempotentInProcessDefaultBehavior:
+    """799 D2 end to end: ``@idempotent`` over the registry's real in-process
+    default (no ``get_cache`` patch) in production — the state of a process
+    that skipped ``init()`` or whose ``init()`` failed before wiring the cache —
+    refuses the first call with ``ConfigurationError`` before the function
+    runs. The escape hatch accepts it; once a shared cache is wired the same
+    function runs on it, because the refusal memoized no gate."""
+
+    @pytest.fixture(autouse=True)
+    def _registry_on_in_process_default(self):
+        from baldur.factory.registry import ProviderRegistry
+
+        with ProviderRegistry.cache.snapshot():
+            ProviderRegistry.cache.set_default("memory")
+            yield
+
+    @staticmethod
+    def _enter_production(monkeypatch) -> None:
+        from baldur.runtime import reset_runtime
+        from baldur.settings.idempotency import reset_idempotency_settings
+
+        monkeypatch.setenv("BALDUR_ENVIRONMENT", "production")
+        monkeypatch.setenv("BALDUR_IDEMPOTENCY_ALLOW_INMEMORY_FALLBACK", "false")
+        reset_idempotency_settings()
+        reset_runtime()
+
+    @staticmethod
+    def _counting_charge(calls):
+        @idempotent(key_args=["order_id"])
+        def charge(order_id: str) -> str:
+            calls["n"] += 1
+            return "charged"
+
+        return charge
+
+    def test_idempotent_in_process_default_in_production_raises_before_function_runs(
+        self, monkeypatch, reset_idempotency_settings_singleton
+    ):
+        from baldur.core.exceptions import ConfigurationError
+
+        self._enter_production(monkeypatch)
+        calls = {"n": 0}
+        charge = self._counting_charge(calls)
+
+        with pytest.raises(ConfigurationError):
+            charge(_unique_key("oid"))
+
+        assert calls["n"] == 0
+
+    def test_idempotent_in_process_default_escape_hatch_on_runs_function(
+        self, monkeypatch, reset_idempotency_settings_singleton
+    ):
+        # The escape hatch resolves via the cached layered seam, patched so a
+        # present runtime-config manager cannot pin its default over it.
+        from baldur.settings.idempotency import IdempotencySettings
+
+        self._enter_production(monkeypatch)
+        calls = {"n": 0}
+        charge = self._counting_charge(calls)
+
+        with patch(
+            "baldur.settings.layered_provider.get_layered_settings_cached",
+            return_value=IdempotencySettings(allow_inmemory_fallback=True),
+        ):
+            result = charge(_unique_key("oid"))
+
+        assert result == "charged"
+        assert calls["n"] == 1
+
+    def test_idempotent_after_init_refused_call_runs_on_wired_shared_cache(
+        self, monkeypatch, reset_idempotency_settings_singleton
+    ):
+        from baldur.core.exceptions import ConfigurationError
+        from baldur.factory.registry import ProviderRegistry
+        from tests.factories.cache_doubles import DistributedCacheStandIn
+
+        # Given — production, the registry still on its in-process default.
+        self._enter_production(monkeypatch)
+        calls = {"n": 0}
+        charge = self._counting_charge(calls)
+        oid = _unique_key("oid")
+        shared = DistributedCacheStandIn(key_prefix="shared:")
+        with pytest.raises(ConfigurationError):
+            charge(oid)
+
+        # When — a shared cache is wired, then the same call is made again.
+        with ProviderRegistry.cache.override(shared):
+            result = charge(oid)
+
+        # Then — it ran once, and its dedup record lives on the shared cache.
+        assert result == "charged"
+        assert calls["n"] == 1
+        assert len(shared.keys()) == 1
