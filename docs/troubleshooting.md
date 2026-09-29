@@ -231,6 +231,21 @@ the guarantee for that call, opt it (or the service) into **fail-open**. A dupli
 `IdempotencyDuplicateError` — catch it and treat it as "this work already happened"; Baldur
 does not replay the original response.
 
+**`ConfigurationError: Baldur idempotency requires a distributed cache adapter in production` on the first guarded call.**
+*Cause:* the process runs with `BALDUR_ENVIRONMENT=production`, but no shared cache is wired,
+so a key checked there would only be deduplicated inside this one process. Baldur refuses the
+call rather than promise cross-worker dedup it cannot give; the function does not run. It
+applies to `@idempotent` and to every `@baldur.protected` / `protect` / `aprotect` call that
+carries `idempotency_key=`. `baldur.init()` wires the shared cache when `BALDUR_REDIS_URL` is
+set, so the usual gaps are a process that never calls `init()` (a cron script or a custom
+worker importing guarded functions), a process whose `init()` failed but that kept running,
+and a guarded call that runs before `init()` does. Earlier releases let such a process fall
+back to per-process dedup instead.
+*Fix:* set `BALDUR_REDIS_URL` and call `baldur.init()` at startup, before the first guarded
+call; the framework adapters do this in their startup path. No restart is needed: the first
+guarded call after the cache is wired goes through. For a single-process job that knowingly
+accepts per-process dedup, set `BALDUR_IDEMPOTENCY_ALLOW_INMEMORY_FALLBACK=true`.
+
 ### Alerts & notifications
 
 **Slack / alerts never arrive.**

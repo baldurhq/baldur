@@ -29,6 +29,7 @@ BALDUR_RETRY_MAX_ELAPSED=30.0  # total wall-clock retry budget (s); unset = no b
 BALDUR_IDEMPOTENCY_ENABLED=true
 BALDUR_IDEMPOTENCY_DEFAULT_CACHE_TTL=60
 BALDUR_IDEMPOTENCY_GATE_MEMORY_TTL_SECONDS=1800
+BALDUR_IDEMPOTENCY_ALLOW_INMEMORY_FALLBACK=false  # production with no shared cache wired (no init(), or init() failed first): true runs @idempotent and idempotency_key= calls on a per-process ledger instead of raising ConfigurationError
 BALDUR_PROTECT_DEFAULT_TIMEOUT_SECONDS=30  # unset (default) = no Baldur-level wall-clock bound on protect(); set to restore a global outer net. Per-call timeout= always wins
 BALDUR_MIDDLEWARE_CB_STATUS_CODES=[500,502,503,504]  # statuses recorded as a breaker failure
 BALDUR_MIDDLEWARE_RATE_LIMIT_CODES=[429]             # statuses treated as a rate-limit answer
