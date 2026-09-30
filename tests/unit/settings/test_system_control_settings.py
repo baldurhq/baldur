@@ -1,18 +1,19 @@
 """
-SystemControlSettings 단위 테스트.
+SystemControlSettings unit tests.
 
-테스트 분류 (UNIT_TEST_GUIDELINES §0):
-- Contract: 설계 문서(339)에 명시된 기본값/제약 계약 검증 (하드코딩)
-- Behavior: backend Literal 검증, Django fallback, Redis URL 3-tier fallback,
-            환경변수 오버라이드, 싱글톤 pair
+Test classification (UNIT_TEST_GUIDELINES §0):
+- Contract: defaults and constraints the design (339) states, and the backend
+  derivation from a named Redis URL (802 D13) — hardcoded
+- Behavior: backend Literal validation, Django fallback, the Redis URL 3-tier
+  fallback, environment overrides, the singleton pair
 
-참조 소스:
-- settings/system_control.py (SystemControlSettings)
+Source under test: settings/system_control.py (SystemControlSettings).
 """
 
 from __future__ import annotations
 
 import pytest
+from django.test import override_settings
 from pydantic import ValidationError
 
 from baldur.settings.system_control import (
@@ -24,52 +25,62 @@ from baldur.settings.system_control import (
 
 @pytest.fixture(autouse=True)
 def _reset_settings():
-    """각 테스트 전후 싱글톤 리셋."""
+    """Reset the singleton before and after each test."""
     reset_system_control_settings()
     yield
     reset_system_control_settings()
 
 
 # =============================================================================
-# Contract Tests — 설계 계약값 검증 (339 §7.1)
+# Contract Tests — design contract values (339 §7.1)
 # =============================================================================
 
 
 class TestSystemControlSettingsDefaultContract:
-    """SystemControlSettings 기본값 설계 계약 검증."""
+    """SystemControlSettings default-value design contract."""
 
     @pytest.fixture(autouse=True)
     def _clean_state_env(self, monkeypatch):
-        """Contract tests verify pure defaults — remove test-environment overrides."""
+        """Contract tests verify pure defaults — remove test-environment overrides.
+
+        The backend is derived from a named Redis URL, so the URL variables
+        this resolver reads go too.
+        """
         monkeypatch.delenv("BALDUR_SYSTEM_CONTROL_BACKEND", raising=False)
+        monkeypatch.delenv("BALDUR_SYSTEM_CONTROL_REDIS_URL", raising=False)
+        monkeypatch.delenv("BALDUR_REDIS_URL", raising=False)
 
     def test_backend_default_file(self):
-        """State backend 기본값: 'file'."""
+        """With no backend set and no Redis URL named, the store is 'file'."""
         assert SystemControlSettings().backend == "file"
 
+    def test_backend_field_has_no_fixed_default(self):
+        """The backend is derived when not set — its declared default is None (D13)."""
+        assert SystemControlSettings.model_fields["backend"].default is None
+
     def test_state_dir_default(self):
-        """State directory 기본값: 'logs/baldur_state'."""
+        """State directory default: 'logs/baldur_state'."""
         s = SystemControlSettings()
         assert s.state_dir == "logs/baldur_state"
         assert s.dir == "logs/baldur_state"
 
     def test_redis_url_default_empty(self):
-        """Redis URL 기본값: 빈 문자열 (fallback 체인 트리거)."""
-        # redis fallback이 실행되므로, env를 차단해야 순수 기본값 검증 가능
+        """Redis URL default: empty string (triggers the fallback chain)."""
+        # The fallback runs, so the value may be filled — without env/Django it
+        # is the RedisSettings.url default.
         s = SystemControlSettings(redis_url="")
-        # fallback이 실행되어 값이 채워질 수 있으나, env/django 없으면 RedisSettings.url 기본값
         assert isinstance(s.redis_url, str)
 
     def test_redis_key_prefix_default(self):
-        """Redis key prefix 기본값: 'baldur:state:'."""
+        """Redis key prefix default: 'baldur:state:'."""
         assert SystemControlSettings().redis_key_prefix == "baldur:state:"
 
     def test_redis_scan_batch_size_default(self):
-        """Redis SCAN batch size 기본값: 100."""
+        """Redis SCAN batch size default: 100."""
         assert SystemControlSettings().redis_scan_batch_size == 100
 
     def test_redis_max_scan_keys_default(self):
-        """Redis max scan keys 기본값: 10000."""
+        """Redis max scan keys default: 10000."""
         assert SystemControlSettings().redis_max_scan_keys == 10000
 
     def test_field_count(self):
@@ -77,122 +88,210 @@ class TestSystemControlSettingsDefaultContract:
         assert len(SystemControlSettings.model_fields) == 6
 
     def test_env_prefix(self):
-        """환경변수 접두사: BALDUR_SYSTEM_CONTROL_."""
+        """Environment variable prefix: BALDUR_SYSTEM_CONTROL_."""
         assert (
             SystemControlSettings.model_config.get("env_prefix")
             == "BALDUR_SYSTEM_CONTROL_"
         )
 
 
+class TestSystemControlSettingsDerivationContract:
+    """Where the switch state lives when no backend is set (D13).
+
+    An explicit backend (env, Django setting or argument) wins; otherwise
+    ``redis`` when a Redis URL this resolver dials is named
+    (``BALDUR_SYSTEM_CONTROL_REDIS_URL``, ``BALDUR_REDIS_URL`` env or Django
+    setting); otherwise ``file``. A Redis named only for another channel does
+    not count.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_redis_env(self, monkeypatch):
+        for name in (
+            "BALDUR_SYSTEM_CONTROL_BACKEND",
+            "BALDUR_SYSTEM_CONTROL_REDIS_URL",
+            "BALDUR_REDIS_URL",
+            "BALDUR_RESILIENT_STORAGE_REDIS_URL",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+    @pytest.mark.parametrize(
+        ("env", "expected_backend", "expected_derived"),
+        [
+            ({}, "file", True),
+            ({"BALDUR_SYSTEM_CONTROL_REDIS_URL": "redis://sc:6379/1"}, "redis", True),
+            ({"BALDUR_REDIS_URL": "redis://shared:6379/0"}, "redis", True),
+            (
+                {"BALDUR_RESILIENT_STORAGE_REDIS_URL": "redis://other:6379/0"},
+                "file",
+                True,
+            ),
+            (
+                {
+                    "BALDUR_SYSTEM_CONTROL_BACKEND": "file",
+                    "BALDUR_REDIS_URL": "redis://shared:6379/0",
+                },
+                "file",
+                False,
+            ),
+            ({"BALDUR_SYSTEM_CONTROL_BACKEND": "memory"}, "memory", False),
+        ],
+        ids=[
+            "nothing_named_file",
+            "own_url_redis",
+            "shared_url_redis",
+            "other_channel_only_file",
+            "explicit_file_wins",
+            "explicit_memory",
+        ],
+    )
+    def test_backend_derivation_from_env(
+        self, monkeypatch, env, expected_backend, expected_derived
+    ):
+        """Each channel's effect on the store the switch state lives in."""
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+
+        settings = SystemControlSettings()
+
+        assert settings.backend == expected_backend
+        assert settings.backend_was_derived is expected_derived
+
+    def test_backend_derivation_from_django_redis_url_setting(self):
+        """A Redis URL named in Django settings derives 'redis'."""
+        with override_settings(BALDUR_REDIS_URL="redis://django:6379/3"):
+            settings = SystemControlSettings()
+
+        assert settings.backend == "redis"
+        assert settings.backend_was_derived is True
+
+    def test_explicit_django_backend_setting_wins_over_a_named_url(self, monkeypatch):
+        """An explicit Django backend is not overridden by the derivation."""
+        monkeypatch.setenv("BALDUR_REDIS_URL", "redis://shared:6379/0")
+
+        with override_settings(BALDUR_SYSTEM_CONTROL_BACKEND="file"):
+            settings = SystemControlSettings()
+
+        assert settings.backend == "file"
+        assert settings.backend_was_derived is False
+
+    def test_explicit_argument_is_not_reported_as_derived(self):
+        """A backend passed in is set, not derived."""
+        settings = SystemControlSettings(backend="redis")
+
+        assert settings.backend == "redis"
+        assert settings.backend_was_derived is False
+
+
 # =============================================================================
-# Boundary Tests — 필드 경계값 검증 (§8.1)
+# Boundary Tests — field boundary values (§8.1)
 # =============================================================================
 
 
 class TestSystemControlSettingsBoundaryContract:
-    """SystemControlSettings 필드 경계값 계약 검증."""
+    """SystemControlSettings field boundary contract."""
 
     def test_redis_scan_batch_size_below_minimum_rejected(self):
-        """redis_scan_batch_size: ge=50 미만 → ValidationError."""
+        """redis_scan_batch_size below ge=50 → ValidationError."""
         with pytest.raises(ValidationError):
             SystemControlSettings(redis_scan_batch_size=49)
 
     def test_redis_scan_batch_size_at_minimum_accepted(self):
-        """redis_scan_batch_size: ge=50 경계값 → 성공."""
+        """redis_scan_batch_size at the ge=50 boundary → accepted."""
         s = SystemControlSettings(redis_scan_batch_size=50)
         assert s.redis_scan_batch_size == 50
 
     def test_redis_scan_batch_size_above_maximum_rejected(self):
-        """redis_scan_batch_size: le=1000 초과 → ValidationError."""
+        """redis_scan_batch_size above le=1000 → ValidationError."""
         with pytest.raises(ValidationError):
             SystemControlSettings(redis_scan_batch_size=1001)
 
     def test_redis_max_scan_keys_below_minimum_rejected(self):
-        """redis_max_scan_keys: ge=100 미만 → ValidationError."""
+        """redis_max_scan_keys below ge=100 → ValidationError."""
         with pytest.raises(ValidationError):
             SystemControlSettings(redis_max_scan_keys=99)
 
     def test_redis_max_scan_keys_above_maximum_rejected(self):
-        """redis_max_scan_keys: le=1_000_000 초과 → ValidationError."""
+        """redis_max_scan_keys above le=1_000_000 → ValidationError."""
         with pytest.raises(ValidationError):
             SystemControlSettings(redis_max_scan_keys=1_000_001)
 
 
 # =============================================================================
-# Behavior Tests — backend 검증, fallback, 환경변수, 싱글톤
+# Behavior Tests — backend validation, fallback, environment, singleton
 # =============================================================================
 
 
 class TestSystemControlSettingsBackendValidationBehavior:
-    """backend Literal 검증 동작."""
+    """backend Literal validation."""
 
     def test_backend_file_accepted(self):
-        """'file' backend 허용."""
+        """'file' backend accepted."""
         s = SystemControlSettings(backend="file")
         assert s.backend == "file"
 
     def test_backend_redis_accepted(self):
-        """'redis' backend 허용."""
+        """'redis' backend accepted."""
         s = SystemControlSettings(backend="redis")
         assert s.backend == "redis"
 
     def test_backend_memory_accepted(self):
-        """'memory' backend 허용."""
+        """'memory' backend accepted."""
         s = SystemControlSettings(backend="memory")
         assert s.backend == "memory"
 
     def test_backend_invalid_value_rejected(self):
-        """유효하지 않은 backend 값 → ValidationError."""
+        """An unknown backend value → ValidationError."""
         with pytest.raises(ValidationError):
             SystemControlSettings(backend="dynamodb")
 
     def test_backend_case_insensitive_normalization(self):
-        """backend 값은 .lower() 정규화된다."""
+        """The backend value is normalized with .lower()."""
         s = SystemControlSettings(backend="Redis")
         assert s.backend == "redis"
 
     def test_backend_uppercase_normalization(self):
-        """대문자 backend 값도 정규화."""
+        """An upper-case backend value is normalized too."""
         s = SystemControlSettings(backend="FILE")
         assert s.backend == "file"
 
 
 class TestSystemControlSettingsEnvOverrideBehavior:
-    """환경변수 오버라이드 동작 검증."""
+    """Environment variable overrides."""
 
     def test_env_override_backend(self, monkeypatch):
-        """BALDUR_SYSTEM_CONTROL_BACKEND 환경변수로 backend 오버라이드."""
+        """BALDUR_SYSTEM_CONTROL_BACKEND overrides the backend."""
         monkeypatch.setenv("BALDUR_SYSTEM_CONTROL_BACKEND", "memory")
         s = SystemControlSettings()
         assert s.backend == "memory"
 
     def test_env_override_state_dir(self, monkeypatch):
-        """BALDUR_SYSTEM_CONTROL_DIR 환경변수로 dir 오버라이드."""
+        """BALDUR_SYSTEM_CONTROL_DIR overrides dir."""
         monkeypatch.setenv("BALDUR_SYSTEM_CONTROL_DIR", "/custom/path")
         s = SystemControlSettings()
         assert s.dir == "/custom/path"
         assert s.state_dir == "/custom/path"
 
     def test_env_override_redis_url(self, monkeypatch):
-        """BALDUR_SYSTEM_CONTROL_REDIS_URL 환경변수로 redis_url 오버라이드."""
+        """BALDUR_SYSTEM_CONTROL_REDIS_URL overrides redis_url."""
         monkeypatch.setenv("BALDUR_SYSTEM_CONTROL_REDIS_URL", "redis://prod:6379/1")
         s = SystemControlSettings()
         assert s.redis_url == "redis://prod:6379/1"
 
 
 class TestSystemControlSettingsRedisUrlFallbackBehavior:
-    """Redis URL 3-tier fallback 체인 동작 검증."""
+    """Redis URL 3-tier fallback chain."""
 
     def test_legacy_env_var_fallback(self, monkeypatch):
         """Tier 1: BALDUR_REDIS_URL (legacy env) fallback."""
-        # STATE_REDIS_URL 미설정, BALDUR_REDIS_URL만 설정
+        # STATE_REDIS_URL unset, only BALDUR_REDIS_URL set
         monkeypatch.delenv("BALDUR_SYSTEM_CONTROL_REDIS_URL", raising=False)
         monkeypatch.setenv("BALDUR_REDIS_URL", "redis://legacy:6379/2")
         s = SystemControlSettings(redis_url="")
         assert s.redis_url == "redis://legacy:6379/2"
 
     def test_explicit_redis_url_takes_precedence(self, monkeypatch):
-        """명시적 STATE_REDIS_URL이 fallback보다 우선."""
+        """An explicit STATE_REDIS_URL wins over the fallback."""
         monkeypatch.setenv("BALDUR_SYSTEM_CONTROL_REDIS_URL", "redis://explicit:6379/0")
         monkeypatch.setenv("BALDUR_REDIS_URL", "redis://legacy:6379/2")
         s = SystemControlSettings()
@@ -200,16 +299,16 @@ class TestSystemControlSettingsRedisUrlFallbackBehavior:
 
 
 class TestSystemControlSettingsSingletonBehavior:
-    """SystemControlSettings 싱글톤 pair 동작 검증."""
+    """SystemControlSettings singleton pair."""
 
     def test_get_returns_same_instance(self):
-        """get_system_control_settings()는 동일 인스턴스를 반환한다."""
+        """get_system_control_settings() returns the same instance."""
         s1 = get_system_control_settings()
         s2 = get_system_control_settings()
         assert s1 is s2
 
     def test_reset_clears_cached_instance(self):
-        """reset 후 새 인스턴스가 생성된다."""
+        """A new instance is created after reset."""
         s1 = get_system_control_settings()
         reset_system_control_settings()
         s2 = get_system_control_settings()

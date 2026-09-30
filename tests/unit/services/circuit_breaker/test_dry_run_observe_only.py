@@ -9,6 +9,10 @@ predicate (D5) plus the manual-override WARNING (D6):
   skipped (returns None); the 429 tracking (observation) still runs.
 - ``ManualControlMixin.force_open`` / ``force_close`` — stay LIVE by design
   (manual intent), but emit an in-band WARNING under observe-only.
+- An operator's Block (OPEN under a manual pin in force) is refused under
+  observe-only — dry-run or a pulled kill switch — on the breaker policy and
+  the framework-agnostic CB middleware, while every automatic OPEN steps aside
+  (802 D3; the Django preemptive branch is pinned beside its other tests).
 
 Behaviors are computed from source (PolicyOutcome.*, observe-only gate), so
 these are Behavior-class tests.
@@ -16,8 +20,9 @@ these are Behavior-class tests.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
 import structlog
@@ -25,22 +30,29 @@ import structlog
 from baldur.adapters.memory.circuit_breaker import (
     InMemoryCircuitBreakerStateRepository,
 )
+from baldur.api.middleware import circuit_breaker as cb_middleware
 from baldur.core.execution_mode import (
     ExecutionMode,
     clear_execution_mode_override,
     set_execution_mode,
 )
-from baldur.interfaces.resilience_policy import PolicyOutcome
-from baldur.services.circuit_breaker.config import CircuitBreakerConfig
+from baldur.interfaces.repositories import CircuitBreakerStateData
+from baldur.interfaces.resilience_policy import PolicyHook, PolicyOutcome
+from baldur.interfaces.web_framework import HttpMethod, RequestContext
+from baldur.services.circuit_breaker.config import CircuitBreakerConfig, CircuitState
+from baldur.services.circuit_breaker.exceptions import CircuitBreakerOpenError
 from baldur.services.circuit_breaker.manual_control import (
     _warn_if_manual_override_under_dry_run,
+    is_operator_block_in_force,
 )
 from baldur.services.circuit_breaker.policy import CircuitBreakerPolicy
 from baldur.services.circuit_breaker.service import CircuitBreakerService
+from baldur.utils.time import utc_now
 from tests.factories import (
     InMemoryCircuitBreakerRepository,
     InMemoryRateLimitTracker,
     dry_run_active,
+    kill_switch_active,
 )
 
 
@@ -329,3 +341,132 @@ class TestManualOverrideDryRunWarning:
             if e.get("event") == "system_control.manual_override_under_dry_run"
         ]
         assert len(warnings) == 1
+
+
+# =============================================================================
+# D3 (802) — an operator's Block stays in force under observe-only
+# =============================================================================
+
+
+def _row(
+    state: str, *, manual: bool, expires_in_minutes: int | None
+) -> CircuitBreakerStateData:
+    return CircuitBreakerStateData(
+        service_name="payment-api",
+        state=state,
+        opened_at=utc_now(),
+        manually_controlled=manual,
+        manual_override_expires_at=(
+            None
+            if expires_in_minutes is None
+            else utc_now() + timedelta(minutes=expires_in_minutes)
+        ),
+    )
+
+
+def _service_with_row(row: CircuitBreakerStateData) -> CircuitBreakerService:
+    repo = InMemoryCircuitBreakerStateRepository()
+    repo.hydrate_snapshot(row)
+    return CircuitBreakerService(
+        config=CircuitBreakerConfig(enabled=True, recovery_timeout=60),
+        repository=repo,
+    )
+
+
+_OBSERVE_ONLY = pytest.mark.parametrize(
+    "switch", [kill_switch_active, dry_run_active], ids=["kill_switch", "dry_run"]
+)
+
+
+class TestOperatorBlockUnderObserveOnlyBehavior:
+    """A Block is the operator's instruction: refused where automation steps aside."""
+
+    @pytest.mark.parametrize(
+        ("row", "expected"),
+        [
+            (_row(CircuitState.OPEN, manual=True, expires_in_minutes=30), True),
+            (_row(CircuitState.OPEN, manual=True, expires_in_minutes=None), True),
+            (_row(CircuitState.OPEN, manual=True, expires_in_minutes=-1), False),
+            (_row(CircuitState.OPEN, manual=False, expires_in_minutes=None), False),
+            (_row(CircuitState.CLOSED, manual=True, expires_in_minutes=30), False),
+            (_row(CircuitState.HALF_OPEN, manual=True, expires_in_minutes=30), False),
+            (SimpleNamespace(state=CircuitState.OPEN), False),
+        ],
+        ids=[
+            "open_active_pin",
+            "open_pin_without_expiry",
+            "open_expired_pin",
+            "open_automatic",
+            "closed_pin",
+            "half_open_pin",
+            "row_without_pin_fields",
+        ],
+    )
+    def test_is_operator_block_in_force_by_row_shape(self, row, expected):
+        """OPEN under a manual pin still in force, and nothing else."""
+        assert is_operator_block_in_force(row) is expected
+
+    @_OBSERVE_ONLY
+    def test_policy_refuses_an_operator_block_without_running_the_call(self, switch):
+        """The policy's observe-only branch answers REJECTED for a Block."""
+        # Given
+        service = _service_with_row(
+            _row(CircuitState.OPEN, manual=True, expires_in_minutes=30)
+        )
+        hook = create_autospec(PolicyHook, instance=True)
+        policy = CircuitBreakerPolicy(
+            service_name="payment-api", cb_service=service, hooks=[hook]
+        )
+        calls: list[int] = []
+
+        # When
+        with switch():
+            result = policy.execute(lambda: calls.append(1))
+
+        # Then
+        assert result.outcome == PolicyOutcome.REJECTED
+        assert isinstance(result.error, CircuitBreakerOpenError)
+        assert calls == []
+        hook.on_reject.assert_called_once_with("payment-api", "circuit_open")
+
+    @_OBSERVE_ONLY
+    def test_policy_admits_an_automatically_opened_breaker(self, switch):
+        """Negative twin: an automatic OPEN steps aside and the call runs once."""
+        service = _service_with_row(
+            _row(CircuitState.OPEN, manual=False, expires_in_minutes=None)
+        )
+        policy = CircuitBreakerPolicy(service_name="payment-api", cb_service=service)
+
+        with switch():
+            result = policy.execute(lambda: "served")
+
+        assert (result.outcome, result.value) == (PolicyOutcome.SUCCESS, "served")
+
+    @_OBSERVE_ONLY
+    @pytest.mark.parametrize(
+        ("row", "refused"),
+        [
+            (_row(CircuitState.OPEN, manual=True, expires_in_minutes=30), True),
+            (_row(CircuitState.OPEN, manual=True, expires_in_minutes=-1), False),
+            (_row(CircuitState.OPEN, manual=False, expires_in_minutes=None), False),
+        ],
+        ids=["active_pin", "expired_pin", "automatic_open"],
+    )
+    def test_cb_middleware_refuses_only_an_operator_block(self, switch, row, refused):
+        """The framework-agnostic seam sends 503 for a Block, nothing else."""
+        service = _service_with_row(row)
+
+        with (
+            patch.object(cb_middleware, "_try_get_cb_service", return_value=service),
+            switch(),
+        ):
+            response = cb_middleware.check_cb_open(
+                RequestContext(method=HttpMethod.POST, path="/api/pay/"),
+                service_name="payment-api",
+            )
+
+        if refused:
+            assert response.status_code == 503
+            assert response.body["code"] == "CIRCUIT_BREAKER_OPEN"
+        else:
+            assert response is None

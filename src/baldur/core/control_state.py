@@ -587,12 +587,18 @@ def _constant(value: float) -> Callable[[], float]:
 
 
 def _retry_delay(interval: float, consecutive_failures: int) -> float:
-    """Backoff from the key's interval up to the cap (never below the interval)."""
+    """Backoff from the key's interval up to the cap (never below the interval).
+
+    No jitter: symmetric jitter would put a failing store's retry up to its
+    factor below the healthy cadence, polling it more often than a healthy one.
+    Processes already retry on their own phases.
+    """
     from baldur.core.backoff import ExponentialBackoff
 
     return ExponentialBackoff(
         base_delay=interval,
         max_delay=max(_BACKOFF_CAP_SECONDS, interval),
+        jitter=False,
     ).calculate(consecutive_failures)
 
 

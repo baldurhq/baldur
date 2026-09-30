@@ -7,13 +7,18 @@ Verification techniques applied (§8):
   - §8.2 Exception/edge cases — missing reason / missing confirm → 400
   - §8.4 Side effects — manager state transitions (enable/disable/dry_run)
   - §8.5 Dependency interaction — get_system_control mock argument forwarding
+  - §8.12 Branch outcome (802 D9) — committed → 200; held → 503 in this
+    process; not applied / unknown release → 503 ``persisted`` false / null
 """
 
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, create_autospec, patch
 
+import pytest
+
+from baldur.api.handlers import system_control as handlers_module
 from baldur.api.handlers.system_control import (
     dry_run_disable,
     dry_run_enable,
@@ -22,8 +27,20 @@ from baldur.api.handlers.system_control import (
     system_status,
 )
 from baldur.core.exceptions import SystemControlStoreError
+from baldur.core.state_backend import (
+    FileStateBackend,
+    configure_state_backend,
+    reset_state_backend,
+)
 from baldur.interfaces.web_framework import HttpMethod, RequestContext
-from baldur.services.system_control import SystemControlChange
+from baldur.services.system_control import (
+    SYSTEM_CONTROL_REFRESH_INTERVAL_SECONDS,
+    SystemControlChange,
+    SystemControlManager,
+    SystemState,
+    get_system_control,
+)
+from baldur.settings.system_control import reset_system_control_settings
 
 
 def _make_ctx(
@@ -341,3 +358,181 @@ class TestDryRunDisableBehavior:
         manager.disable_dry_run.assert_called_once_with(actor="dan")
         assert resp.status_code == 200
         assert resp.body["success"] is True
+
+
+# =============================================================================
+# 802 D1, D9 — a change reports only the effect that happened
+# =============================================================================
+
+
+def _manager_double() -> SystemControlManager:
+    manager = create_autospec(SystemControlManager, instance=True)
+    manager.get_state.return_value = SystemState(enabled=False)
+    return manager
+
+
+def _call(handler, manager, json_body):
+    with patch(
+        "baldur.api.handlers.system_control.get_system_control",
+        return_value=manager,
+    ):
+        return handler(_make_ctx(method="POST", json_body=json_body))
+
+
+class TestSystemControlHandlersBehavior:
+    """503 whenever the store did not confirm; the fields say what did happen."""
+
+    @pytest.mark.parametrize(
+        ("handler", "method", "json_body"),
+        [
+            (system_enable, "enable", {"reason": "resolved"}),
+            (dry_run_disable, "disable_dry_run", {"confirm": True}),
+        ],
+        ids=["enable", "dry_run_disable"],
+    )
+    def test_release_with_an_unknown_outcome_answers_503_with_persisted_null(
+        self, handler, method, json_body
+    ):
+        """``persisted: null``, ``applies: none`` and the withdrawal fields."""
+        manager = _manager_double()
+        getattr(manager, method).side_effect = SystemControlStoreError(
+            change=method,
+            persisted=None,
+            applies="none",
+            withdrew_held_change=True,
+            may_still_land=True,
+        )
+
+        resp = _call(handler, manager, json_body)
+
+        assert resp.status_code == 503
+        assert resp.body["error"] == "state_store_unavailable"
+        assert (resp.body["persisted"], resp.body["applies"]) == (None, "none")
+        assert resp.body["withdrew_held_change"] is True
+        assert resp.body["may_still_land"] is True
+        assert resp.body["state"]["enabled"] is False
+        manager.get_state.assert_called_once_with(refresh=False)
+
+    @pytest.mark.parametrize(
+        ("handler", "method", "json_body"),
+        [
+            (system_disable, "disable", {"reason": "incident"}),
+            (dry_run_enable, "enable_dry_run", None),
+        ],
+        ids=["disable", "dry_run_enable"],
+    )
+    @pytest.mark.parametrize("persisted", [False, None], ids=["not_applied", "unknown"])
+    def test_held_change_answers_503_in_force_in_this_process_only(
+        self, handler, method, json_body, persisted
+    ):
+        """A held brake is reported as held — never as a fleet-wide success."""
+        manager = _manager_double()
+        getattr(manager, method).return_value = SystemControlChange(
+            state=SystemState(enabled=False, dry_run=True),
+            persisted=persisted,
+            applies="this_process",
+        )
+
+        resp = _call(handler, manager, json_body)
+
+        assert resp.status_code == 503
+        assert resp.body["success"] is False
+        assert resp.body["message"] == handlers_module._HELD_MESSAGE
+        assert (resp.body["persisted"], resp.body["applies"]) == (
+            persisted,
+            "this_process",
+        )
+
+    def test_committed_disable_states_the_step_aside_effect_and_the_reach(self):
+        """The effect text and the reach bound — no claim that everything stopped."""
+        manager = _manager_double()
+        manager.disable.return_value = SystemControlChange(
+            state=SystemState(enabled=False),
+            persisted=True,
+            applies="everywhere",
+        )
+
+        resp = _call(system_disable, manager, {"reason": "incident"})
+
+        assert resp.status_code == 200
+        assert resp.body["effect"] == handlers_module._DISABLED_EFFECT
+        assert (
+            f"{SYSTEM_CONTROL_REFRESH_INTERVAL_SECONDS:g} seconds" in resp.body["reach"]
+        )
+        assert "operations are now stopped" not in str(resp.body)
+
+    def test_disabled_effect_names_what_steps_aside_and_what_stays(self):
+        """The operator-facing sentence of the one stated effect (D1)."""
+        effect = handlers_module._DISABLED_EFFECT
+
+        for steps_aside in ("no retry", "no DLQ capture", "no rate-limit force-open"):
+            assert steps_aside in effect
+        for stays in ("Fallbacks", "timeouts", "idempotency", "Blocks stay in force"):
+            assert stays in effect
+
+    def test_status_spreads_this_process_read_health(self):
+        """The refresh status fields reach the operator verbatim."""
+        manager = create_autospec(SystemControlManager, instance=True)
+        manager.get_state.return_value = SystemState()
+        manager.is_persist_dirty.return_value = False
+        manager.get_backend_info.return_value = {"backend_type": "RedisStateBackend"}
+        manager.get_refresh_status.return_value = {
+            "store_reachable": False,
+            "state_refreshed_at": "2026-09-30T12:00:00+00:00",
+            "state_age_seconds": 42.0,
+            "last_store_error": "ConnectionError: down",
+            "refresher_running": True,
+        }
+
+        with patch(
+            "baldur.api.handlers.system_control.get_system_control",
+            return_value=manager,
+        ):
+            body = system_status(_make_ctx()).body
+
+        assert body["store_reachable"] is False
+        assert body["state_age_seconds"] == 42.0
+        assert body["last_store_error"] == "ConnectionError: down"
+        assert body["refresher_running"] is True
+
+
+class TestSystemControlBackendInfoBehavior:
+    """The status names the store in use — for a file store, its absolute directory."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated_store(self):
+        reset_state_backend()
+        reset_system_control_settings()
+        yield
+        reset_state_backend()
+        reset_system_control_settings()
+
+    def test_status_names_the_resolved_file_store_directory(self, tmp_path):
+        """Two processes started from different directories can see two stores."""
+        configure_state_backend(FileStateBackend(tmp_path / "state"))
+
+        body = system_status(_make_ctx()).body
+
+        assert body["backend"]["backend_type"] == "FileStateBackend"
+        assert body["backend"]["directory"] == str((tmp_path / "state").resolve())
+
+    def test_unbuildable_file_store_still_names_its_directory_and_error(
+        self, tmp_path, monkeypatch
+    ):
+        """An unwritable directory is visible: the variable's value, resolved."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("BALDUR_SYSTEM_CONTROL_BACKEND", "file")
+        monkeypatch.setenv("BALDUR_SYSTEM_CONTROL_DIR", "relative/state")
+        reset_system_control_settings()
+
+        with patch(
+            "baldur.services.system_control.get_state_backend",
+            side_effect=PermissionError("read-only file system"),
+        ):
+            info = get_system_control().get_backend_info()
+
+        assert info == {
+            "backend_type": "file",
+            "error": "PermissionError: read-only file system",
+            "directory": str((tmp_path / "relative" / "state").resolve()),
+        }

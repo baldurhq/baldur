@@ -63,7 +63,7 @@ from tests.factories.data_factory import (
     MockFailedOperationData,
     TestDataFactory,
 )
-from tests.factories.execution_mode_helpers import dry_run_active
+from tests.factories.execution_mode_helpers import dry_run_active, kill_switch_active
 
 # Integration (integration.py)
 from tests.factories.integration import (
@@ -128,6 +128,7 @@ __all__ = [
     "MockDLQEntry",
     # Execution Mode / Dry-run Helpers
     "dry_run_active",
+    "kill_switch_active",
     # Time Helpers
     "freeze_time",
     "mock_sleep",

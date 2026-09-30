@@ -1,9 +1,9 @@
-"""Execution-mode / dry-run test helpers.
+"""Execution-mode test helpers: the dry-run toggle and the kill switch.
 
-Shared helpers for driving Baldur's observe-only (dry-run) signal through the
-**real** D1 bridge — i.e. the System Control runtime toggle resolved by
+Shared helpers for driving Baldur's observe-only signal through the **real**
+resolver — the System Control dry-run toggle and kill switch read by
 ``get_execution_mode()`` — rather than the ``set_execution_mode()`` override,
-which bypasses the toggle entirely.
+which bypasses the toggle entirely (and which the kill switch outranks).
 
 ``dry_run_active()`` is the context manager the per-site observe-only tests use:
 it flips the runtime dry-run toggle on (``enable_dry_run``) with a guaranteed
@@ -64,4 +64,42 @@ def dry_run_active(actor: str = "test") -> Iterator[object]:
         _get_mode_from_env.cache_clear()
 
 
-__all__ = ["dry_run_active"]
+@contextmanager
+def kill_switch_active(actor: str = "test") -> Iterator[object]:
+    """Pull the System Control kill switch for the block.
+
+    Flips the real switch (``get_system_control().disable()``) on the process
+    store, so ``get_execution_mode()`` resolves to observe-only through the
+    ``kill_switch`` rung — above any programmatic override — exactly as it does
+    when an operator pulls the brake. The env cache and any override are
+    cleared first, like ``dry_run_active()``.
+
+    Teardown is guaranteed: the System Control singleton is reset (re-enabling
+    the switch) and any execution-mode override is cleared.
+
+    Yields:
+        The active ``SystemControlManager`` instance.
+    """
+    from baldur.core.execution_mode import (
+        _get_mode_from_env,
+        clear_execution_mode_override,
+    )
+    from baldur.services.system_control import (
+        get_system_control,
+        reset_system_control,
+    )
+
+    clear_execution_mode_override()
+    _get_mode_from_env.cache_clear()
+
+    manager = get_system_control()
+    manager.disable(actor=actor, reason="kill switch under test")
+    try:
+        yield manager
+    finally:
+        reset_system_control()
+        clear_execution_mode_override()
+        _get_mode_from_env.cache_clear()
+
+
+__all__ = ["dry_run_active", "kill_switch_active"]

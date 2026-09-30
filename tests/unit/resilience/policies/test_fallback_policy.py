@@ -1,15 +1,15 @@
 """
-FallbackPolicy / AsyncFallbackPolicy / partition_aware_chain 단위 테스트 (#229).
+FallbackPolicy / AsyncFallbackPolicy / partition_aware_chain unit tests (#229).
 
-테스트 대상:
+Targets:
 - resilience/policies/fallback.py (FallbackPolicy, AsyncFallbackPolicy,
   partition_aware_chain, _FALLBACK_MODE_TO_OUTCOME)
-- resilience/policies/__init__.py (export 검증)
+- resilience/policies/__init__.py (export checks)
 
-UNIT_TEST_GUIDELINES.md 준수:
-- 계약 검증(Contract): 하드코딩 기대값 (name, outcome, executed_policies, 매핑 테이블)
-- 동작 검증(Behavior): 소스 참조 (PolicyOutcome, _FALLBACK_MODE_TO_OUTCOME 등)
-- conftest.py 배치: 1개 파일 전용 fixture → 파일 내부 (§5.1)
+Follows UNIT_TEST_GUIDELINES.md:
+- Contract: hardcoded expectations (name, outcome, executed_policies, mapping table)
+- Behavior: source references (PolicyOutcome, _FALLBACK_MODE_TO_OUTCOME, ...)
+- conftest.py placement: fixtures used by one file stay in the file (§5.1)
 """
 
 from __future__ import annotations
@@ -44,19 +44,19 @@ from baldur.resilience.policies.fallback import (
 )
 
 # =============================================================================
-# Fixtures — 1개 파일 전용이므로 파일 내부 배치 (§5.1)
+# Fixtures — used by this file only, so they live here (§5.1)
 # =============================================================================
 
 
 @pytest.fixture
 def basic_policy():
-    """fallback_fn만 가진 기본 FallbackPolicy."""
+    """A basic FallbackPolicy with only fallback_fn."""
     return FallbackPolicy(fallback_fn=lambda: "fallback_value")
 
 
 @pytest.fixture
 def chain_policy():
-    """fallback_chain + default_value를 가진 FallbackPolicy."""
+    """A FallbackPolicy with fallback_chain + default_value."""
     return FallbackPolicy(
         fallback_chain=[
             lambda: "chain_0",
@@ -68,7 +68,7 @@ def chain_policy():
 
 @pytest.fixture
 def full_policy():
-    """fallback_chain + fallback_fn + default_value 모두 설정된 FallbackPolicy."""
+    """A FallbackPolicy with fallback_chain, fallback_fn and default_value all set."""
     return FallbackPolicy(
         fallback_chain=[lambda: "chain_result"],
         fallback_fn=lambda: "fn_result",
@@ -78,13 +78,13 @@ def full_policy():
 
 @pytest.fixture
 def strategy_policy():
-    """SimpleFallback strategy shim 기반 FallbackPolicy."""
+    """A FallbackPolicy built on the SimpleFallback strategy shim."""
     return FallbackPolicy(strategy=SimpleFallback())
 
 
 @pytest.fixture
 def async_basic_policy():
-    """fallback_fn만 가진 기본 AsyncFallbackPolicy."""
+    """A basic AsyncFallbackPolicy with only fallback_fn."""
 
     async def async_fallback():
         return "async_fallback_value"
@@ -94,7 +94,7 @@ def async_basic_policy():
 
 @pytest.fixture
 def async_chain_policy():
-    """fallback_chain + default_value를 가진 AsyncFallbackPolicy."""
+    """An AsyncFallbackPolicy with fallback_chain + default_value."""
 
     async def chain_0():
         return "async_chain_0"
@@ -109,39 +109,39 @@ def async_chain_policy():
 
 
 # =============================================================================
-# 계약 검증 (Contract) — FallbackPolicy 고정 식별자 및 결과 구조
+# Contract — FallbackPolicy fixed identifiers and result structure
 # =============================================================================
 
 
 class TestFallbackPolicyContract:
-    """FallbackPolicy 고정 식별자 및 결과 구조 계약 검증."""
+    """FallbackPolicy fixed identifiers and result structure contract."""
 
     def test_name_is_fallback(self, basic_policy):
-        """name property는 'fallback'이다."""
+        """The name property is 'fallback'."""
         assert basic_policy.name == "fallback"
 
     def test_success_result_has_fallback_in_executed_policies(self, basic_policy):
-        """성공 결과의 executed_policies에 'fallback'가 포함된다."""
+        """A success result's executed_policies contains 'fallback'."""
         result = basic_policy.execute(lambda: "ok")
         assert "fallback" in result.executed_policies
 
     def test_fallback_result_has_fallback_in_executed_policies(self, basic_policy):
-        """Fallback 결과의 executed_policies에 'fallback'가 포함된다."""
+        """A fallback result's executed_policies contains 'fallback'."""
         result = basic_policy.execute(lambda: (_ for _ in ()).throw(ValueError("fail")))
         assert "fallback" in result.executed_policies
 
     def test_success_outcome_is_success(self, basic_policy):
-        """func 성공 시 outcome은 PolicyOutcome.SUCCESS이다."""
+        """When func succeeds the outcome is PolicyOutcome.SUCCESS."""
         result = basic_policy.execute(lambda: 42)
         assert result.outcome == PolicyOutcome.SUCCESS
 
     def test_success_metadata_fallback_used_false(self, basic_policy):
-        """func 성공 시 metadata['fallback_used']는 False이다."""
+        """When func succeeds metadata['fallback_used'] is False."""
         result = basic_policy.execute(lambda: 42)
         assert result.metadata["fallback_used"] is False
 
     def test_fallback_fn_outcome_is_success_with_fallback(self, basic_policy):
-        """fallback_fn 사용 시 outcome은 PolicyOutcome.SUCCESS_WITH_FALLBACK이다."""
+        """When fallback_fn is used the outcome is PolicyOutcome.SUCCESS_WITH_FALLBACK."""
 
         def failing():
             raise ValueError("fail")
@@ -150,7 +150,7 @@ class TestFallbackPolicyContract:
         assert result.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
 
     def test_fallback_fn_metadata_fallback_used_true(self, basic_policy):
-        """fallback_fn 사용 시 metadata['fallback_used']는 True이다."""
+        """When fallback_fn is used metadata['fallback_used'] is True."""
 
         def failing():
             raise ValueError("fail")
@@ -159,7 +159,7 @@ class TestFallbackPolicyContract:
         assert result.metadata["fallback_used"] is True
 
     def test_fallback_fn_metadata_fallback_source(self, basic_policy):
-        """fallback_fn 사용 시 metadata['fallback_source']는 'fallback_fn'이다."""
+        """When fallback_fn is used metadata['fallback_source'] is 'fallback_fn'."""
 
         def failing():
             raise ValueError("fail")
@@ -168,7 +168,7 @@ class TestFallbackPolicyContract:
         assert result.metadata["fallback_source"] == "fallback_fn"
 
     def test_chain_metadata_fallback_index(self, chain_policy):
-        """fallback_chain 사용 시 metadata['fallback_index']가 설정된다."""
+        """When fallback_chain is used metadata['fallback_index'] is set."""
 
         def failing():
             raise ValueError("fail")
@@ -177,7 +177,7 @@ class TestFallbackPolicyContract:
         assert result.metadata["fallback_index"] == 0
 
     def test_default_value_metadata_fallback_source(self):
-        """default_value 사용 시 metadata['fallback_source']는 'default_value'이다."""
+        """When default_value is used metadata['fallback_source'] is 'default_value'."""
         policy = FallbackPolicy(default_value="default")
 
         def failing():
@@ -187,7 +187,7 @@ class TestFallbackPolicyContract:
         assert result.metadata["fallback_source"] == "default_value"
 
     def test_all_exhausted_metadata(self):
-        """모든 fallback 소진 시 metadata['all_fallbacks_exhausted']는 True이다."""
+        """When every fallback is exhausted metadata['all_fallbacks_exhausted'] is True."""
         policy = FallbackPolicy()
 
         def failing():
@@ -197,7 +197,7 @@ class TestFallbackPolicyContract:
         assert result.metadata["all_fallbacks_exhausted"] is True
 
     def test_all_exhausted_outcome_is_failure(self):
-        """모든 fallback 소진 시 outcome은 PolicyOutcome.FAILURE이다."""
+        """When every fallback is exhausted the outcome is PolicyOutcome.FAILURE."""
         policy = FallbackPolicy()
 
         def failing():
@@ -207,12 +207,12 @@ class TestFallbackPolicyContract:
         assert result.outcome == PolicyOutcome.FAILURE
 
     def test_result_is_policy_result_instance(self, basic_policy):
-        """반환 타입은 PolicyResult이다."""
+        """The return type is PolicyResult."""
         result = basic_policy.execute(lambda: "ok")
         assert isinstance(result, PolicyResult)
 
     def test_original_error_in_metadata(self, basic_policy):
-        """fallback 사용 시 metadata['original_error']에 원본 에러 문자열 포함."""
+        """When a fallback is used metadata['original_error'] carries the original error string."""
 
         def failing():
             raise ValueError("test_error_message")
@@ -222,12 +222,12 @@ class TestFallbackPolicyContract:
 
 
 # =============================================================================
-# 계약 검증 (Contract) — _FALLBACK_MODE_TO_OUTCOME 매핑 테이블
+# Contract — the _FALLBACK_MODE_TO_OUTCOME mapping table
 # =============================================================================
 
 
 class TestFallbackModeToOutcomeMappingContract:
-    """_FALLBACK_MODE_TO_OUTCOME 매핑 테이블 계약 검증."""
+    """_FALLBACK_MODE_TO_OUTCOME mapping table contract."""
 
     def test_fail_fast_maps_to_failure(self):
         """fail_fast → PolicyOutcome.FAILURE."""
@@ -265,33 +265,33 @@ class TestFallbackModeToOutcomeMappingContract:
         assert _FALLBACK_MODE_TO_OUTCOME["hedge"] == PolicyOutcome.SUCCESS_WITH_FALLBACK
 
     def test_mapping_covers_all_fallback_modes(self):
-        """매핑 테이블은 FallbackMode의 모든 멤버를 포함한다."""
+        """The mapping table covers every FallbackMode member."""
         all_mode_values = {mode.value for mode in FallbackMode}
         mapped_keys = set(_FALLBACK_MODE_TO_OUTCOME.keys())
         assert mapped_keys == all_mode_values
 
     def test_mapping_has_exactly_6_entries(self):
-        """매핑 테이블은 정확히 6개 항목을 가진다."""
+        """The mapping table has exactly 6 entries."""
         assert len(_FALLBACK_MODE_TO_OUTCOME) == 6
 
 
 # =============================================================================
-# 계약 검증 (Contract) — AsyncFallbackPolicy 고정 식별자
+# Contract — AsyncFallbackPolicy fixed identifiers
 # =============================================================================
 
 
 class TestAsyncFallbackPolicyContract:
-    """AsyncFallbackPolicy 고정 식별자 및 결과 구조 계약 검증."""
+    """AsyncFallbackPolicy fixed identifiers and result structure contract."""
 
     def test_name_is_fallback(self, async_basic_policy):
-        """name property는 'fallback'이다."""
+        """The name property is 'fallback'."""
         assert async_basic_policy.name == "fallback"
 
     @pytest.mark.asyncio
     async def test_success_result_has_fallback_in_executed_policies(
         self, async_basic_policy
     ):
-        """성공 결과의 executed_policies에 'fallback'가 포함된다."""
+        """A success result's executed_policies contains 'fallback'."""
 
         async def ok():
             return "ok"
@@ -301,7 +301,7 @@ class TestAsyncFallbackPolicyContract:
 
     @pytest.mark.asyncio
     async def test_success_outcome_is_success(self, async_basic_policy):
-        """func 성공 시 outcome은 PolicyOutcome.SUCCESS이다."""
+        """When func succeeds the outcome is PolicyOutcome.SUCCESS."""
 
         async def ok():
             return 42
@@ -311,7 +311,7 @@ class TestAsyncFallbackPolicyContract:
 
     @pytest.mark.asyncio
     async def test_fallback_fn_outcome(self, async_basic_policy):
-        """fallback_fn 사용 시 outcome은 SUCCESS_WITH_FALLBACK이다."""
+        """When fallback_fn is used the outcome is SUCCESS_WITH_FALLBACK."""
 
         async def failing():
             raise ValueError("fail")
@@ -321,7 +321,7 @@ class TestAsyncFallbackPolicyContract:
 
     @pytest.mark.asyncio
     async def test_result_is_policy_result_instance(self, async_basic_policy):
-        """반환 타입은 PolicyResult이다."""
+        """The return type is PolicyResult."""
 
         async def ok():
             return "ok"
@@ -331,39 +331,44 @@ class TestAsyncFallbackPolicyContract:
 
 
 # =============================================================================
-# 계약 검증 (Contract) — 패키지 Export
+# Contract — package exports
 # =============================================================================
 
 
 class TestPoliciesPackageExportContract:
-    """resilience/policies/__init__.py export 계약 검증."""
+    """resilience/policies/__init__.py export contract."""
 
     def test_fallback_policy_exported(self):
-        """FallbackPolicy가 패키지에서 export된다."""
+        """FallbackPolicy is exported from the package."""
         from baldur.resilience.policies import FallbackPolicy as Exported
 
         assert Exported is FallbackPolicy
 
     def test_async_fallback_policy_exported(self):
-        """AsyncFallbackPolicy가 패키지에서 export된다."""
+        """AsyncFallbackPolicy is exported from the package."""
         from baldur.resilience.policies import AsyncFallbackPolicy as Exported
 
         assert Exported is AsyncFallbackPolicy
 
     def test_partition_aware_chain_exported(self):
-        """partition_aware_chain이 패키지에서 export된다."""
+        """partition_aware_chain is exported from the package."""
         from baldur.resilience.policies import partition_aware_chain as Exported
 
         assert Exported is partition_aware_chain
 
     def test_all_contains_exact_count(self):
-        """__all__ contains exactly 35 entries (PRO-backed names not advertised)."""
+        """__all__ contains exactly 34 entries (PRO-backed names not advertised).
+
+        ``KillSwitchGuard`` left the package with 802 D1: a pulled kill switch
+        steps Baldur aside through the execution-mode resolver instead.
+        """
         import baldur.resilience.policies as pkg
 
-        assert len(pkg.__all__) == 35
+        assert len(pkg.__all__) == 34
+        assert "KillSwitchGuard" not in pkg.__all__
 
     def test_all_contains_expected_names(self):
-        """__all__에 FallbackPolicy, AsyncFallbackPolicy, partition_aware_chain이 포함된다."""
+        """__all__ contains FallbackPolicy, AsyncFallbackPolicy and partition_aware_chain."""
         import baldur.resilience.policies as pkg
 
         assert "FallbackPolicy" in pkg.__all__
@@ -372,50 +377,50 @@ class TestPoliciesPackageExportContract:
 
 
 # =============================================================================
-# 동작 검증 (Behavior) — FallbackPolicy execute() 성공 경로
+# Behavior — FallbackPolicy execute() success path
 # =============================================================================
 
 
 class TestFallbackPolicyExecuteSuccessBehavior:
-    """FallbackPolicy.execute() 성공 경로 동작 검증."""
+    """FallbackPolicy.execute() success path behavior."""
 
     def test_func_return_value_preserved(self, basic_policy):
-        """func의 반환값이 PolicyResult.value에 보존된다."""
+        """func's return value is kept in PolicyResult.value."""
         result = basic_policy.execute(lambda: {"key": "value"})
         assert result.value == {"key": "value"}
 
     def test_func_with_args(self, basic_policy):
-        """func에 *args가 전달된다."""
+        """*args reach func."""
         result = basic_policy.execute(lambda x, y: x + y, 3, 7)
         assert result.value == 10
 
     def test_func_with_kwargs(self, basic_policy):
-        """func에 **kwargs가 전달된다."""
+        """**kwargs reach func."""
         result = basic_policy.execute(lambda x=0: x * 2, x=5)
         assert result.value == 10
 
     def test_func_returning_none_is_success(self, basic_policy):
-        """func이 None을 반환해도 SUCCESS이다."""
+        """func returning None is still SUCCESS."""
         result = basic_policy.execute(lambda: None)
         assert result.outcome == PolicyOutcome.SUCCESS
         assert result.value is None
 
     def test_success_property_true_on_success(self, basic_policy):
-        """성공 시 PolicyResult.success property는 True이다."""
+        """On success PolicyResult.success is True."""
         result = basic_policy.execute(lambda: "ok")
         assert result.success is True
 
 
 # =============================================================================
-# 동작 검증 (Behavior) — FallbackPolicy execute() 실패 → fallback 경로
+# Behavior — FallbackPolicy execute() failure → fallback path
 # =============================================================================
 
 
 class TestFallbackPolicyExecuteFailureBehavior:
-    """FallbackPolicy.execute() 실패 경로 동작 검증."""
+    """FallbackPolicy.execute() failure path behavior."""
 
     def test_fallback_fn_called_on_exception(self, basic_policy):
-        """func 예외 시 fallback_fn이 호출된다."""
+        """A func exception calls fallback_fn."""
 
         def failing():
             raise RuntimeError("primary failed")
@@ -424,7 +429,7 @@ class TestFallbackPolicyExecuteFailureBehavior:
         assert result.value == "fallback_value"
 
     def test_fallback_chain_first_success(self, chain_policy):
-        """fallback_chain[0]이 성공하면 즉시 반환된다."""
+        """When fallback_chain[0] succeeds it returns at once."""
 
         def failing():
             raise RuntimeError("fail")
@@ -433,7 +438,7 @@ class TestFallbackPolicyExecuteFailureBehavior:
         assert result.value == "chain_0"
 
     def test_fallback_chain_skips_to_next_on_failure(self):
-        """chain[0] 실패 시 chain[1]이 시도된다."""
+        """When chain[0] fails chain[1] is tried."""
 
         def failing_chain_0():
             raise RuntimeError("chain_0 failed")
@@ -450,7 +455,7 @@ class TestFallbackPolicyExecuteFailureBehavior:
         assert result.metadata["fallback_index"] == 1
 
     def test_chain_exhausted_then_fallback_fn(self):
-        """chain 모두 실패 시 fallback_fn이 시도된다."""
+        """When the whole chain fails fallback_fn is tried."""
 
         def failing_chain():
             raise RuntimeError("chain failed")
@@ -468,7 +473,7 @@ class TestFallbackPolicyExecuteFailureBehavior:
         assert result.metadata["fallback_source"] == "fallback_fn"
 
     def test_chain_and_fn_exhausted_then_default(self):
-        """chain과 fallback_fn 모두 실패 시 default_value가 반환된다."""
+        """When the chain and fallback_fn all fail default_value is returned."""
 
         def failing():
             raise RuntimeError("fail")
@@ -490,7 +495,7 @@ class TestFallbackPolicyExecuteFailureBehavior:
         assert result.metadata["fallback_source"] == "default_value"
 
     def test_all_exhausted_returns_failure_with_original_error(self):
-        """모든 fallback 소진 시 원본 예외가 error에 저장된다."""
+        """When every fallback is exhausted the original exception is kept in error."""
         policy = FallbackPolicy()
 
         error = ValueError("original_fail")
@@ -503,7 +508,7 @@ class TestFallbackPolicyExecuteFailureBehavior:
         assert result.error is error
 
     def test_success_property_true_on_fallback(self, basic_policy):
-        """fallback 성공 시 PolicyResult.success property는 True이다."""
+        """When a fallback succeeds PolicyResult.success is True."""
 
         def failing():
             raise RuntimeError("fail")
@@ -512,7 +517,7 @@ class TestFallbackPolicyExecuteFailureBehavior:
         assert result.success is True
 
     def test_success_property_false_on_all_exhausted(self):
-        """모든 fallback 소진 시 PolicyResult.success는 False이다."""
+        """When every fallback is exhausted PolicyResult.success is False."""
         policy = FallbackPolicy()
 
         def failing():
@@ -522,7 +527,7 @@ class TestFallbackPolicyExecuteFailureBehavior:
         assert result.success is False
 
     def test_default_value_none_not_treated_as_default(self):
-        """default_value가 None이면 default_value 경로를 사용하지 않는다."""
+        """A default_value of None does not take the default_value path."""
         policy = FallbackPolicy(default_value=None)
 
         def failing():
@@ -532,7 +537,7 @@ class TestFallbackPolicyExecuteFailureBehavior:
         assert result.outcome == PolicyOutcome.FAILURE
 
     def test_execution_order_chain_before_fn_before_default(self):
-        """실행 순서: fallback_chain → fallback_fn → default_value."""
+        """Order: fallback_chain → fallback_fn → default_value."""
         call_order = []
 
         def chain_fn():
@@ -558,34 +563,34 @@ class TestFallbackPolicyExecuteFailureBehavior:
 
 
 # =============================================================================
-# 동작 검증 (Behavior) — FallbackPolicy._apply_fallback() Composer 전용
+# Behavior — FallbackPolicy._apply_fallback() (Composer only)
 # =============================================================================
 
 
 class TestFallbackPolicyApplyFallbackBehavior:
-    """FallbackPolicy._apply_fallback() Composer 전용 경로 동작 검증."""
+    """FallbackPolicy._apply_fallback() Composer-only path behavior."""
 
     def test_apply_fallback_uses_chain(self, chain_policy):
-        """_apply_fallback()은 fallback_chain을 시도한다."""
+        """_apply_fallback() tries fallback_chain."""
         result = chain_policy._apply_fallback(original_error=RuntimeError("fail"))
         assert result.value == "chain_0"
         assert result.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
 
     def test_apply_fallback_uses_fn(self, basic_policy):
-        """_apply_fallback()은 fallback_fn을 시도한다."""
+        """_apply_fallback() tries fallback_fn."""
         result = basic_policy._apply_fallback(original_error=RuntimeError("fail"))
         assert result.value == "fallback_value"
         assert result.metadata["fallback_source"] == "fallback_fn"
 
     def test_apply_fallback_uses_default(self):
-        """_apply_fallback()은 default_value를 반환한다."""
+        """_apply_fallback() returns default_value."""
         policy = FallbackPolicy(default_value="default_only")
         result = policy._apply_fallback(original_error=RuntimeError("fail"))
         assert result.value == "default_only"
         assert result.metadata["fallback_source"] == "default_value"
 
     def test_apply_fallback_all_exhausted(self):
-        """_apply_fallback()에서 모든 fallback 소진 시 FAILURE 반환."""
+        """_apply_fallback() returns FAILURE when every fallback is exhausted."""
         policy = FallbackPolicy()
         error = RuntimeError("original")
         result = policy._apply_fallback(original_error=error)
@@ -593,17 +598,17 @@ class TestFallbackPolicyApplyFallbackBehavior:
         assert result.error is error
 
     def test_apply_fallback_does_not_execute_func(self):
-        """_apply_fallback()은 func를 실행하지 않는다 (Composer 중복 실행 방지)."""
+        """_apply_fallback() does not run func (no duplicate run under the Composer)."""
         call_tracker = MagicMock()
         policy = FallbackPolicy(default_value="safe")
 
-        # _apply_fallback은 func를 인자로 받지 않으므로 func 재실행 불가능
+        # _apply_fallback takes no func argument, so it cannot re-run func
         result = policy._apply_fallback(original_error=RuntimeError("fail"))
         call_tracker.assert_not_called()
         assert result.value == "safe"
 
     def test_apply_fallback_with_context(self, basic_policy):
-        """_apply_fallback()은 context를 받아들인다."""
+        """_apply_fallback() accepts context."""
         ctx = PolicyContext(order_id="test-123")
         result = basic_policy._apply_fallback(
             original_error=RuntimeError("fail"),
@@ -613,45 +618,45 @@ class TestFallbackPolicyApplyFallbackBehavior:
 
 
 # =============================================================================
-# 동작 검증 (Behavior) — FallbackPolicy predicate 커스터마이징
+# Behavior — FallbackPolicy predicate customization
 # =============================================================================
 
 
 class TestFallbackPolicyPredicateBehavior:
-    """FallbackPolicy predicate 동작 검증."""
+    """FallbackPolicy predicate behavior."""
 
     def test_default_predicate_activates_on_failure(self):
-        """기본 predicate는 SUCCESS가 아닌 모든 outcome에서 활성화된다."""
+        """The default predicate activates on every outcome except SUCCESS."""
         policy = FallbackPolicy()
         failure_result = PolicyResult(outcome=PolicyOutcome.FAILURE)
         assert policy._predicate(failure_result) is True
 
     def test_default_predicate_not_activates_on_success(self):
-        """기본 predicate는 SUCCESS이면 비활성화된다."""
+        """The default predicate is inactive on SUCCESS."""
         policy = FallbackPolicy()
         success_result = PolicyResult(outcome=PolicyOutcome.SUCCESS)
         assert policy._predicate(success_result) is False
 
     def test_default_predicate_activates_on_rejected(self):
-        """기본 predicate는 REJECTED에서 활성화된다."""
+        """The default predicate activates on REJECTED."""
         policy = FallbackPolicy()
         rejected_result = PolicyResult(outcome=PolicyOutcome.REJECTED)
         assert policy._predicate(rejected_result) is True
 
     def test_default_predicate_activates_on_timeout(self):
-        """기본 predicate는 TIMEOUT에서 활성화된다."""
+        """The default predicate activates on TIMEOUT."""
         policy = FallbackPolicy()
         timeout_result = PolicyResult(outcome=PolicyOutcome.TIMEOUT)
         assert policy._predicate(timeout_result) is True
 
     def test_default_predicate_activates_on_success_with_fallback(self):
-        """기본 predicate는 SUCCESS_WITH_FALLBACK에서 활성화된다 (SUCCESS만 비활성화)."""
+        """The default predicate activates on SUCCESS_WITH_FALLBACK (only SUCCESS is inactive)."""
         policy = FallbackPolicy()
         fallback_result = PolicyResult(outcome=PolicyOutcome.SUCCESS_WITH_FALLBACK)
         assert policy._predicate(fallback_result) is True
 
     def test_custom_predicate_only_rejected(self):
-        """커스텀 predicate: REJECTED일 때만 활성화."""
+        """Custom predicate: active only on REJECTED."""
         policy = FallbackPolicy(
             fallback_fn=lambda: "fallback",
             predicate=lambda r: r.outcome == PolicyOutcome.REJECTED,
@@ -662,7 +667,7 @@ class TestFallbackPolicyPredicateBehavior:
         assert policy._predicate(failure) is False
 
     def test_custom_predicate_multiple_outcomes(self):
-        """커스텀 predicate: FAILURE 및 REJECTED 모두 활성화."""
+        """Custom predicate: active on both FAILURE and REJECTED."""
         policy = FallbackPolicy(
             predicate=lambda r: (
                 r.outcome in (PolicyOutcome.FAILURE, PolicyOutcome.REJECTED)
@@ -674,35 +679,35 @@ class TestFallbackPolicyPredicateBehavior:
 
 
 # =============================================================================
-# 동작 검증 (Behavior) — FallbackPolicy strategy Shim (과도기)
+# Behavior — FallbackPolicy strategy shim (transitional)
 # =============================================================================
 
 
 class TestFallbackPolicyStrategyShimBehavior:
-    """FallbackPolicy strategy Shim 과도기 동작 검증."""
+    """FallbackPolicy strategy shim transitional behavior."""
 
     def test_strategy_shim_simple_fallback_with_fallback_fn(self):
-        """SimpleFallback strategy shim: fallback_fn 경로 동작."""
+        """SimpleFallback strategy shim: the fallback_fn path."""
         strategy = SimpleFallback()
         policy = FallbackPolicy(strategy=strategy)
 
-        # SimpleFallback.execute는 primary 실패 시 fallback_fn이 없으면 FAIL_FAST
-        # strategy shim은 FAIL_FAST 시 네이티브 경로로 fall-through
+        # SimpleFallback.execute is FAIL_FAST when the primary fails and there is no fallback_fn
+        # the strategy shim falls through to the native path on FAIL_FAST
         def failing():
             raise RuntimeError("fail")
 
         result = policy.execute(failing)
-        # SimpleFallback에 fallback_fn, default_value 없으므로 FAIL_FAST → 네이티브 FAILURE
+        # SimpleFallback has no fallback_fn and no default_value, so FAIL_FAST → native FAILURE
         assert result.outcome == PolicyOutcome.FAILURE
 
     def test_strategy_shim_success_is_passed_through(self, strategy_policy):
-        """strategy shim: func 성공 시 strategy 호출 없이 SUCCESS."""
+        """Strategy shim: when func succeeds, SUCCESS without calling the strategy."""
         result = strategy_policy.execute(lambda: "ok")
         assert result.outcome == PolicyOutcome.SUCCESS
         assert result.value == "ok"
 
     def test_strategy_shim_with_native_fallback(self):
-        """strategy FAIL_FAST → 네이티브 fallback_fn으로 fall-through."""
+        """Strategy FAIL_FAST → falls through to the native fallback_fn."""
         strategy = SimpleFallback()
         policy = FallbackPolicy(
             strategy=strategy,
@@ -717,7 +722,7 @@ class TestFallbackPolicyStrategyShimBehavior:
         assert result.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
 
     def test_convert_fallback_result_mode_preserved(self):
-        """_convert_fallback_result: FallbackMode가 metadata에 보존된다."""
+        """_convert_fallback_result: the FallbackMode is kept in metadata."""
         fb_result = FallbackResult(
             value="cached",
             used_fallback=True,
@@ -756,7 +761,7 @@ class TestFallbackPolicyStrategyShimBehavior:
         assert policy_result.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
 
     def test_convert_fallback_result_strategy_shim_flag(self):
-        """_convert_fallback_result: metadata['strategy_shim']은 True이다."""
+        """_convert_fallback_result: metadata['strategy_shim'] is True."""
         fb_result = FallbackResult(
             value="val",
             used_fallback=True,
@@ -779,7 +784,7 @@ class TestFallbackPolicyStrategyShimBehavior:
         assert policy_result.outcome == PolicyOutcome.SUCCESS
 
     def test_convert_fallback_result_original_error_preserved(self):
-        """_convert_fallback_result: original_error가 metadata에 보존된다."""
+        """_convert_fallback_result: original_error is kept in metadata."""
         fb_result = FallbackResult(
             value="val",
             used_fallback=True,
@@ -792,7 +797,7 @@ class TestFallbackPolicyStrategyShimBehavior:
         assert policy_result.metadata["original_error"] == "preserved_error"
 
     def test_convert_fallback_result_failure_has_error(self):
-        """_convert_fallback_result: FAILURE outcome 시 error가 설정된다."""
+        """_convert_fallback_result: a FAILURE outcome sets error."""
         original = RuntimeError("the_error")
         fb_result = FallbackResult(
             value=None,
@@ -804,7 +809,7 @@ class TestFallbackPolicyStrategyShimBehavior:
         assert policy_result.error is original
 
     def test_convert_fallback_result_success_has_no_error(self):
-        """_convert_fallback_result: SUCCESS outcome 시 error는 None이다."""
+        """_convert_fallback_result: a SUCCESS outcome leaves error None."""
         fb_result = FallbackResult(
             value="val",
             used_fallback=True,
@@ -817,16 +822,16 @@ class TestFallbackPolicyStrategyShimBehavior:
 
 
 # =============================================================================
-# 동작 검증 (Behavior) — AsyncFallbackPolicy execute()
+# Behavior — AsyncFallbackPolicy execute()
 # =============================================================================
 
 
 class TestAsyncFallbackPolicyExecuteBehavior:
-    """AsyncFallbackPolicy.execute() 동작 검증."""
+    """AsyncFallbackPolicy.execute() behavior."""
 
     @pytest.mark.asyncio
     async def test_func_return_value_preserved(self, async_basic_policy):
-        """async func의 반환값이 보존된다."""
+        """The async func's return value is kept."""
 
         async def ok():
             return {"key": "async_value"}
@@ -836,7 +841,7 @@ class TestAsyncFallbackPolicyExecuteBehavior:
 
     @pytest.mark.asyncio
     async def test_fallback_fn_on_exception(self, async_basic_policy):
-        """func 예외 시 async fallback_fn이 호출된다."""
+        """A func exception calls the async fallback_fn."""
 
         async def failing():
             raise RuntimeError("async fail")
@@ -847,7 +852,7 @@ class TestAsyncFallbackPolicyExecuteBehavior:
 
     @pytest.mark.asyncio
     async def test_fallback_chain_first_success(self, async_chain_policy):
-        """async fallback_chain[0] 성공 시 즉시 반환."""
+        """When async fallback_chain[0] succeeds it returns at once."""
 
         async def failing():
             raise RuntimeError("fail")
@@ -858,7 +863,7 @@ class TestAsyncFallbackPolicyExecuteBehavior:
 
     @pytest.mark.asyncio
     async def test_fallback_chain_skips_to_next(self):
-        """async chain[0] 실패 시 chain[1] 시도."""
+        """When async chain[0] fails chain[1] is tried."""
 
         async def failing_chain_0():
             raise RuntimeError("chain_0 fail")
@@ -879,7 +884,7 @@ class TestAsyncFallbackPolicyExecuteBehavior:
 
     @pytest.mark.asyncio
     async def test_default_value_on_all_failure(self, async_chain_policy):
-        """async chain 모두 실패 시 default_value 반환."""
+        """When the whole async chain fails default_value is returned."""
 
         async def failing_chain_0():
             raise RuntimeError("fail")
@@ -900,7 +905,7 @@ class TestAsyncFallbackPolicyExecuteBehavior:
 
     @pytest.mark.asyncio
     async def test_all_exhausted_returns_failure(self):
-        """async 모든 fallback 소진 시 FAILURE 반환."""
+        """When every async fallback is exhausted FAILURE is returned."""
         policy = AsyncFallbackPolicy()
 
         async def failing():
@@ -912,7 +917,7 @@ class TestAsyncFallbackPolicyExecuteBehavior:
 
     @pytest.mark.asyncio
     async def test_func_with_args(self, async_basic_policy):
-        """async func에 *args가 전달된다."""
+        """*args reach the async func."""
 
         async def add(x, y):
             return x + y
@@ -922,7 +927,7 @@ class TestAsyncFallbackPolicyExecuteBehavior:
 
     @pytest.mark.asyncio
     async def test_func_with_kwargs(self, async_basic_policy):
-        """async func에 **kwargs가 전달된다."""
+        """**kwargs reach the async func."""
 
         async def mul(x=0):
             return x * 2
@@ -932,7 +937,7 @@ class TestAsyncFallbackPolicyExecuteBehavior:
 
     @pytest.mark.asyncio
     async def test_success_metadata_fallback_used_false(self, async_basic_policy):
-        """async 성공 시 metadata['fallback_used']는 False이다."""
+        """On async success metadata['fallback_used'] is False."""
 
         async def ok():
             return "ok"
@@ -942,16 +947,16 @@ class TestAsyncFallbackPolicyExecuteBehavior:
 
 
 # =============================================================================
-# 동작 검증 (Behavior) — AsyncFallbackPolicy._apply_fallback()
+# Behavior — AsyncFallbackPolicy._apply_fallback()
 # =============================================================================
 
 
 class TestAsyncFallbackPolicyApplyFallbackBehavior:
-    """AsyncFallbackPolicy._apply_fallback() 동작 검증."""
+    """AsyncFallbackPolicy._apply_fallback() behavior."""
 
     @pytest.mark.asyncio
     async def test_apply_fallback_uses_chain(self, async_chain_policy):
-        """async _apply_fallback은 chain을 시도한다."""
+        """Async _apply_fallback tries the chain."""
         result = await async_chain_policy._apply_fallback(
             original_error=RuntimeError("fail")
         )
@@ -959,7 +964,7 @@ class TestAsyncFallbackPolicyApplyFallbackBehavior:
 
     @pytest.mark.asyncio
     async def test_apply_fallback_uses_fn(self, async_basic_policy):
-        """async _apply_fallback은 fallback_fn을 시도한다."""
+        """Async _apply_fallback tries fallback_fn."""
         result = await async_basic_policy._apply_fallback(
             original_error=RuntimeError("fail")
         )
@@ -967,14 +972,14 @@ class TestAsyncFallbackPolicyApplyFallbackBehavior:
 
     @pytest.mark.asyncio
     async def test_apply_fallback_uses_default(self):
-        """async _apply_fallback은 default_value를 반환한다."""
+        """Async _apply_fallback returns default_value."""
         policy = AsyncFallbackPolicy(default_value="default_only")
         result = await policy._apply_fallback(original_error=RuntimeError("fail"))
         assert result.value == "default_only"
 
     @pytest.mark.asyncio
     async def test_apply_fallback_all_exhausted(self):
-        """async _apply_fallback 모든 fallback 소진 시 FAILURE."""
+        """Async _apply_fallback returns FAILURE when every fallback is exhausted."""
         policy = AsyncFallbackPolicy()
         error = RuntimeError("original")
         result = await policy._apply_fallback(original_error=error)
@@ -983,25 +988,25 @@ class TestAsyncFallbackPolicyApplyFallbackBehavior:
 
 
 # =============================================================================
-# 동작 검증 (Behavior) — AsyncFallbackPolicy predicate
+# Behavior — AsyncFallbackPolicy predicate
 # =============================================================================
 
 
 class TestAsyncFallbackPolicyPredicateBehavior:
-    """AsyncFallbackPolicy predicate 동작 검증."""
+    """AsyncFallbackPolicy predicate behavior."""
 
     def test_default_predicate_activates_on_failure(self):
-        """비동기 기본 predicate는 FAILURE에서 활성화된다."""
+        """The async default predicate activates on FAILURE."""
         policy = AsyncFallbackPolicy()
         assert policy._predicate(PolicyResult(outcome=PolicyOutcome.FAILURE)) is True
 
     def test_default_predicate_not_activates_on_success(self):
-        """비동기 기본 predicate는 SUCCESS에서 비활성화된다."""
+        """The async default predicate is inactive on SUCCESS."""
         policy = AsyncFallbackPolicy()
         assert policy._predicate(PolicyResult(outcome=PolicyOutcome.SUCCESS)) is False
 
     def test_custom_predicate_applied(self):
-        """비동기 커스텀 predicate가 적용된다."""
+        """An async custom predicate is applied."""
         policy = AsyncFallbackPolicy(
             predicate=lambda r: r.outcome == PolicyOutcome.TIMEOUT,
         )
@@ -1010,13 +1015,13 @@ class TestAsyncFallbackPolicyPredicateBehavior:
 
 
 # =============================================================================
-# 동작 검증 (Behavior) — partition_aware_chain
+# Behavior — partition_aware_chain
 # =============================================================================
 
 
 @dataclass
 class MockPartitionState:
-    """PartitionState 호환 mock. 실행 시 최신 상태 반영."""
+    """PartitionState-compatible double; reflects the latest state at call time."""
 
     db_available: bool = True
     cache_available: bool = True
@@ -1024,10 +1029,10 @@ class MockPartitionState:
 
 
 class TestPartitionAwareChainBehavior:
-    """partition_aware_chain 헬퍼 동작 검증."""
+    """partition_aware_chain helper behavior."""
 
     def test_returns_two_callables_when_both_fns(self):
-        """cache_fn과 db_fn 모두 제공 시 2개 callable 반환."""
+        """With both cache_fn and db_fn, two callables are returned."""
         state = MockPartitionState()
         chain = partition_aware_chain(
             state_provider=lambda: state,
@@ -1037,7 +1042,7 @@ class TestPartitionAwareChainBehavior:
         assert len(chain) == 2
 
     def test_returns_one_callable_cache_only(self):
-        """cache_fn만 제공 시 1개 callable 반환."""
+        """With cache_fn only, one callable is returned."""
         state = MockPartitionState()
         chain = partition_aware_chain(
             state_provider=lambda: state,
@@ -1046,7 +1051,7 @@ class TestPartitionAwareChainBehavior:
         assert len(chain) == 1
 
     def test_returns_one_callable_db_only(self):
-        """db_fn만 제공 시 1개 callable 반환."""
+        """With db_fn only, one callable is returned."""
         state = MockPartitionState()
         chain = partition_aware_chain(
             state_provider=lambda: state,
@@ -1055,13 +1060,13 @@ class TestPartitionAwareChainBehavior:
         assert len(chain) == 1
 
     def test_returns_empty_when_no_fns(self):
-        """cache_fn, db_fn 모두 미제공 시 빈 리스트 반환."""
+        """With neither cache_fn nor db_fn, an empty list is returned."""
         state = MockPartitionState()
         chain = partition_aware_chain(state_provider=lambda: state)
         assert chain == []
 
     def test_cache_fn_called_when_available(self):
-        """cache_available=True이면 cache_fn이 호출된다."""
+        """cache_available=True calls cache_fn."""
         state = MockPartitionState(cache_available=True)
         chain = partition_aware_chain(
             state_provider=lambda: state,
@@ -1070,7 +1075,7 @@ class TestPartitionAwareChainBehavior:
         assert chain[0]() == "cached_data"
 
     def test_cache_fn_raises_when_unavailable(self):
-        """cache_available=False이면 RuntimeError가 발생한다."""
+        """cache_available=False raises RuntimeError."""
         state = MockPartitionState(cache_available=False)
         chain = partition_aware_chain(
             state_provider=lambda: state,
@@ -1080,17 +1085,17 @@ class TestPartitionAwareChainBehavior:
             chain[0]()
 
     def test_db_fn_called_when_available(self):
-        """db_available=True이면 db_fn이 호출된다."""
+        """db_available=True calls db_fn."""
         state = MockPartitionState(db_available=True)
         chain = partition_aware_chain(
             state_provider=lambda: state,
             db_fn=lambda: "db_data",
         )
-        # db_fn은 cache_fn이 없을 때 index 0
+        # db_fn is index 0 when there is no cache_fn
         assert chain[0]() == "db_data"
 
     def test_db_fn_raises_when_unavailable(self):
-        """db_available=False이면 RuntimeError가 발생한다."""
+        """db_available=False raises RuntimeError."""
         state = MockPartitionState(db_available=False)
         chain = partition_aware_chain(
             state_provider=lambda: state,
@@ -1100,33 +1105,33 @@ class TestPartitionAwareChainBehavior:
             chain[0]()
 
     def test_state_provider_called_at_execution_time(self):
-        """state_provider는 chain 함수 실행 시점에 호출된다 (Stale State 방지)."""
+        """state_provider is called when the chain function runs (no stale state)."""
         state = MockPartitionState(cache_available=True)
         chain = partition_aware_chain(
             state_provider=lambda: state,
             cache_fn=lambda: "cached",
         )
-        # chain 생성 후 상태 변경
+        # State changes after the chain is built
         state.cache_available = False
         with pytest.raises(RuntimeError, match="Cache unavailable"):
             chain[0]()
 
     def test_state_provider_dynamic_recovery(self):
-        """상태가 복구되면 fallback 함수도 성공한다."""
+        """Once the state recovers the fallback function succeeds too."""
         state = MockPartitionState(cache_available=False)
         chain = partition_aware_chain(
             state_provider=lambda: state,
             cache_fn=lambda: "recovered",
         )
-        # 실패 확인
+        # Confirm the failure
         with pytest.raises(RuntimeError):
             chain[0]()
-        # 상태 복구
+        # Recover the state
         state.cache_available = True
         assert chain[0]() == "recovered"
 
     def test_chain_order_cache_before_db(self):
-        """chain 순서: cache가 db 앞에 온다."""
+        """Chain order: cache comes before db."""
         state = MockPartitionState(cache_available=True, db_available=True)
         chain = partition_aware_chain(
             state_provider=lambda: state,
@@ -1137,7 +1142,7 @@ class TestPartitionAwareChainBehavior:
         assert chain[1]() == "db_result"
 
     def test_integration_with_fallback_policy(self):
-        """partition_aware_chain을 FallbackPolicy와 통합 사용."""
+        """partition_aware_chain used together with FallbackPolicy."""
         state = MockPartitionState(cache_available=False, db_available=True)
         policy = FallbackPolicy(
             fallback_chain=partition_aware_chain(
@@ -1152,12 +1157,12 @@ class TestPartitionAwareChainBehavior:
             raise RuntimeError("primary fail")
 
         result = policy.execute(failing)
-        # cache 불가 → db 사용
+        # cache unavailable → db used
         assert result.value == "db"
         assert result.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
 
     def test_integration_all_unavailable_falls_to_default(self):
-        """cache/db 모두 불가 시 default_value로 fallback."""
+        """With cache and db both unavailable, falls back to default_value."""
         state = MockPartitionState(cache_available=False, db_available=False)
         policy = FallbackPolicy(
             fallback_chain=partition_aware_chain(
@@ -1176,25 +1181,25 @@ class TestPartitionAwareChainBehavior:
 
 
 # =============================================================================
-# 동작 검증 (Behavior) — FallbackPolicy 예외 처리 컨트랙트
+# Behavior — FallbackPolicy exception-handling contract
 # =============================================================================
 
 
 class TestFallbackPolicyExceptionHandlingBehavior:
-    """FallbackPolicy 예외 흡수 동작 검증."""
+    """FallbackPolicy exception absorption behavior."""
 
     def test_execute_never_raises(self, basic_policy):
-        """execute()는 모든 예외를 흡수하여 PolicyResult로 반환한다."""
+        """execute() absorbs every exception and returns a PolicyResult."""
 
         def failing():
             raise RuntimeError("should be absorbed")
 
         result = basic_policy.execute(failing)
-        # 예외가 흡수되고 PolicyResult가 반환됨
+        # The exception is absorbed and a PolicyResult is returned
         assert isinstance(result, PolicyResult)
 
     def test_execute_absorbs_various_exceptions(self):
-        """execute()는 다양한 예외 타입을 흡수한다."""
+        """execute() absorbs many exception types."""
         policy = FallbackPolicy(default_value="safe")
         exceptions = [ValueError, TypeError, IOError, KeyError, AttributeError]
 
@@ -1208,22 +1213,22 @@ class TestFallbackPolicyExceptionHandlingBehavior:
             assert result.value == "safe"
 
     def test_apply_fallback_never_raises(self):
-        """_apply_fallback()은 예외를 던지지 않는다."""
+        """_apply_fallback() never raises."""
         policy = FallbackPolicy()
         result = policy._apply_fallback(original_error=RuntimeError("test"))
         assert isinstance(result, PolicyResult)
 
 
 # =============================================================================
-# 동작 검증 (Behavior) — FallbackPolicy 엣지 케이스
+# Behavior — FallbackPolicy edge cases
 # =============================================================================
 
 
 class TestFallbackPolicyEdgeCaseBehavior:
-    """FallbackPolicy 엣지 케이스 동작 검증."""
+    """FallbackPolicy edge-case behavior."""
 
     def test_empty_fallback_chain(self):
-        """빈 fallback_chain은 건너뛴다."""
+        """An empty fallback_chain is skipped."""
         policy = FallbackPolicy(
             fallback_chain=[],
             fallback_fn=lambda: "fn_result",
@@ -1236,7 +1241,7 @@ class TestFallbackPolicyEdgeCaseBehavior:
         assert result.value == "fn_result"
 
     def test_none_strategy_uses_native_path(self):
-        """strategy=None이면 네이티브 경로를 사용한다."""
+        """strategy=None uses the native path."""
         policy = FallbackPolicy(
             strategy=None,
             fallback_fn=lambda: "native",
@@ -1250,13 +1255,13 @@ class TestFallbackPolicyEdgeCaseBehavior:
         assert "strategy_shim" not in result.metadata
 
     def test_context_parameter_accepted(self, basic_policy):
-        """execute()는 context 파라미터를 받아들인다."""
+        """execute() accepts the context parameter."""
         ctx = PolicyContext(order_id="ctx-123")
         result = basic_policy.execute(lambda: "ok", context=ctx)
         assert result.outcome == PolicyOutcome.SUCCESS
 
     def test_default_value_zero_is_valid(self):
-        """default_value=0은 유효한 default_value이다 (None이 아님)."""
+        """default_value=0 is a valid default_value (not None)."""
         policy = FallbackPolicy(default_value=0)
 
         def failing():
@@ -1267,7 +1272,7 @@ class TestFallbackPolicyEdgeCaseBehavior:
         assert result.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
 
     def test_default_value_empty_string_is_valid(self):
-        """default_value=''은 유효한 default_value이다."""
+        """default_value='' is a valid default_value."""
         policy = FallbackPolicy(default_value="")
 
         def failing():
@@ -1278,15 +1283,15 @@ class TestFallbackPolicyEdgeCaseBehavior:
         assert result.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
 
     def test_default_value_false_is_valid(self):
-        """default_value=False는 유효한 default_value이다."""
+        """default_value=False is a valid default_value."""
         policy = FallbackPolicy(default_value=False)
 
         def failing():
             raise RuntimeError("fail")
 
         result = policy.execute(failing)
-        # default_value가 None이 아니므로 (False != None) default 경로 사용
-        # 그러나 코드가 `if self._default_value is not None`를 체크하므로 False는 통과
+        # default_value is not None (False != None), so the default path is used
+        # because the code checks `if self._default_value is not None`, False passes
         assert result.value is False
         assert result.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
 

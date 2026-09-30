@@ -6,13 +6,14 @@ gradual recovery, history, config, levels.
 Verification techniques applied (§8):
   - §8.2 Exception/edge cases — invalid level, NORMAL trigger, missing fields
   - §8.4 Side effects — manager state transitions
-  - §8.5 Dependency interaction — error mapping (RecoveryNotAllowedError → 409)
+  - §8.5 Dependency interaction — error mapping (RecoveryNotAllowedError → 409,
+    SystemControlStoreError → 503 with ``persisted`` false / null)
 """
 
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
 
@@ -27,6 +28,7 @@ from baldur.api.handlers.emergency import (
     gradual_recovery_start,
     gradual_recovery_stop,
 )
+from baldur.core.exceptions import SystemControlStoreError
 from baldur.interfaces.web_framework import HttpMethod, RequestContext
 
 # Every test in this module exercises the PRO emergency-mode manager (function-body
@@ -475,3 +477,122 @@ class TestEmergencyConfigBehavior:
         assert resp.body["error"] == "invalid_config"
         assert "stabilization_period_seconds" in resp.body["message"]
         manager.set_recovery_gate_config.assert_not_called()
+
+
+# =============================================================================
+# 802 D9 — an emergency change the store did not confirm answers 503
+# =============================================================================
+
+
+def _manager_double(**state_fields):
+    from baldur_pro.services.emergency_mode import GracefulDegradationManager
+    from baldur_pro.services.emergency_mode.models import EmergencyState
+
+    manager = create_autospec(GracefulDegradationManager, instance=True)
+    state = EmergencyState(**state_fields)
+    manager.get_state.return_value = state
+    manager.activate_manual.return_value = state
+    manager.start_gradual_recovery.return_value = state
+    manager.stop_gradual_recovery.return_value = state
+    return manager
+
+
+def _call(handler, manager, json_body=None, method="POST"):
+    with patch(
+        "baldur_pro.services.emergency_mode.get_emergency_manager",
+        return_value=manager,
+    ):
+        return handler(_make_ctx(method=method, json_body=json_body))
+
+
+_CHANGES = [
+    (emergency_trigger, "activate_manual", {"level": "LEVEL_2", "reason": "spike"}),
+    (emergency_release, "deactivate", {"reason": "recovered", "force": True}),
+    (gradual_recovery_start, "start_gradual_recovery", {"target_level": "NORMAL"}),
+    (gradual_recovery_stop, "stop_gradual_recovery", {"reason": "hold"}),
+]
+_CHANGE_IDS = ["trigger", "release", "recovery_start", "recovery_stop"]
+
+
+class TestEmergencyHandlersBehavior:
+    """Every emergency change says whether the store holds it."""
+
+    @pytest.mark.parametrize(
+        ("handler", "method", "json_body"), _CHANGES, ids=_CHANGE_IDS
+    )
+    @pytest.mark.parametrize("persisted", [False, None], ids=["not_applied", "unknown"])
+    def test_unconfirmed_change_answers_503_in_force_nowhere(
+        self, handler, method, json_body, persisted
+    ):
+        """``persisted`` false / null, ``applies: none``, HTTP 503."""
+        EmergencyLevel = _get_level_enum()
+        manager = _manager_double(level=EmergencyLevel.LEVEL_3, is_active=True)
+        getattr(manager, method).side_effect = SystemControlStoreError(
+            change=method, persisted=persisted, applies="none"
+        )
+
+        resp = _call(handler, manager, json_body)
+
+        assert resp.status_code == 503
+        assert resp.body["error"] == "state_store_unavailable"
+        assert (resp.body["persisted"], resp.body["applies"]) == (persisted, "none")
+
+    @pytest.mark.parametrize(
+        ("handler", "method", "json_body"), _CHANGES, ids=_CHANGE_IDS
+    )
+    def test_committed_change_answers_200_with_persisted_true(
+        self, handler, method, json_body
+    ):
+        """A change the store confirmed says so."""
+        EmergencyLevel = _get_level_enum()
+        manager = _manager_double(level=EmergencyLevel.LEVEL_2, is_active=True)
+
+        resp = _call(handler, manager, json_body)
+
+        assert resp.status_code == 200
+        assert resp.body["persisted"] is True
+        getattr(manager, method).assert_called_once()
+
+    def test_status_carries_this_process_read_health(self):
+        """The level's read health reaches the operator."""
+        manager = _manager_double()
+        manager.get_refresh_status.return_value = {
+            "store_reachable": False,
+            "state_refreshed_at": None,
+            "state_age_seconds": None,
+            "last_store_error": "ConnectionError: down",
+            "refresher_running": True,
+        }
+
+        body = _call(emergency_status, manager, method="GET").body
+
+        assert body["store_reachable"] is False
+        assert body["last_store_error"] == "ConnectionError: down"
+        assert body["refresher_running"] is True
+
+    def test_status_from_a_manager_without_read_health_omits_the_fields(self):
+        """An older PRO manager (no ``get_refresh_status``) still answers."""
+        manager = create_autospec(_LegacyEmergencyManager, instance=True)
+        manager.get_state.return_value = _manager_double().get_state.return_value
+
+        body = _call(emergency_status, manager, method="GET").body
+
+        assert "store_reachable" not in body
+        assert body["level"] == _get_level_enum().NORMAL.value
+
+    def test_status_whose_read_health_raises_omits_the_fields(self):
+        """A failing health read never fails the status request."""
+        manager = _manager_double()
+        manager.get_refresh_status.side_effect = RuntimeError("refresher broken")
+
+        resp = _call(emergency_status, manager, method="GET")
+
+        assert resp.status_code == 200
+        assert "store_reachable" not in resp.body
+
+
+class _LegacyEmergencyManager:
+    """The status surface of a PRO manager from before read health existed."""
+
+    def get_state(self):  # pragma: no cover - interface only
+        raise NotImplementedError

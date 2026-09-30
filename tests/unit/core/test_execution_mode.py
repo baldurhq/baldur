@@ -2,12 +2,19 @@
 Tests for Execution Mode and Action Executor.
 
 Verifies that Shadow/Evaluation mode correctly prevents action execution
-while still logging decisions.
+while still logging decisions, and that the kill switch resolves to
+observe-only above every other rung without per-call logging (802 D2, D4).
 """
 
+import json
+from contextlib import nullcontext
 from datetime import datetime
 from unittest.mock import Mock, patch
 
+import pytest
+import structlog
+
+from baldur import protect_facade
 from baldur.core.action_executor import (
     Action,
     ActionExecutor,
@@ -16,10 +23,19 @@ from baldur.core.action_executor import (
 )
 from baldur.core.execution_mode import (
     ExecutionMode,
+    _get_mode_from_env,
     clear_execution_mode_override,
     get_execution_mode,
+    intervention_suppressed,
+    resolve_execution_mode,
     set_execution_mode,
 )
+from baldur.interfaces.resilience_policy import PolicyOutcome, PolicyResult
+from baldur.models.dlq import DLQEntryResult
+from baldur.resilience.policies.composer import _trace_structural_control
+from baldur.services.retry_handler.models import RetryPolicyConfig
+from baldur.settings.protect import reset_protect_settings
+from tests.factories import dry_run_active, kill_switch_active
 
 
 class TestExecutionMode:
@@ -288,3 +304,171 @@ class TestActionExecutor:
         assert result.executed is False
         assert result.mode == "shadow"
         execute_fn.assert_not_called()
+
+
+# =============================================================================
+# Kill switch — the resolver's first rung, and quiet suppression (802 D2, D4)
+# =============================================================================
+
+_SUPPRESSED_EVENT = "execution_mode.intervention_suppressed"
+_STRUCTURAL_EVENT = "execution_mode.structural_control_enforced"
+
+
+def _suppression_records(logs: list[dict]) -> list[dict]:
+    """The per-call records an observe-only suppression can write."""
+    records = []
+    for entry in logs:
+        event = entry.get("event")
+        if event in (_SUPPRESSED_EVENT, _STRUCTURAL_EVENT):
+            records.append(entry)
+        elif isinstance(event, str) and event.startswith("{"):
+            try:
+                records.append(json.loads(event))
+            except ValueError:
+                continue
+    return records
+
+
+def _switches(enabled: bool, dry_run: bool):
+    return patch(
+        "baldur.core.execution_mode._read_switches", return_value=(enabled, dry_run)
+    )
+
+
+class TestExecutionModeKillSwitchBehavior:
+    """A pulled kill switch is observe-only everywhere dry-run is, without logs."""
+
+    def teardown_method(self):
+        clear_execution_mode_override()
+        _get_mode_from_env.cache_clear()
+        reset_protect_settings()
+
+    @pytest.mark.parametrize(
+        "override",
+        [None, ExecutionMode.active(), ExecutionMode.evaluation()],
+        ids=["no_override", "override_active", "override_evaluation"],
+    )
+    @pytest.mark.parametrize("dry_run", [False, True], ids=["live", "dry_run"])
+    def test_kill_switch_rung_resolves_shadow_above_every_other_rung(
+        self, override, dry_run
+    ):
+        """A code hook cannot defeat the operator's brake."""
+        if override is not None:
+            set_execution_mode(override)
+
+        with _switches(enabled=False, dry_run=dry_run):
+            mode, source = resolve_execution_mode()
+
+        assert source == "kill_switch"
+        assert mode == ExecutionMode.shadow()
+
+    def test_kill_switch_rung_overrides_an_evaluation_env_posture(self, monkeypatch):
+        """The switch reports shadow even where the env posture is evaluation."""
+        monkeypatch.setenv("BALDUR_EXECUTION_MODE", "evaluation")
+        _get_mode_from_env.cache_clear()
+
+        with _switches(enabled=False, dry_run=False):
+            mode, source = resolve_execution_mode()
+
+        assert (mode, source) == (ExecutionMode.shadow(), "kill_switch")
+
+    def test_enabled_kill_switch_falls_through_to_the_override(self):
+        """Negative twin: with the switch up, the override rung decides."""
+        set_execution_mode(ExecutionMode.active())
+
+        with _switches(enabled=True, dry_run=True):
+            mode, source = resolve_execution_mode()
+
+        assert (mode.should_execute, source) == (True, "override")
+
+    def test_kill_switch_pulled_for_real_reports_shadow_until_released(self):
+        """``get_execution_mode()`` follows the real switch, then recovers."""
+        with kill_switch_active():
+            during = (get_execution_mode(), resolve_execution_mode()[1])
+        after = resolve_execution_mode()
+
+        assert during == (ExecutionMode.shadow(), "kill_switch")
+        assert after[0].should_execute is True
+        assert after[1] == "env"
+
+    def test_intervention_suppressed_under_kill_switch_is_true_and_silent(self):
+        """No decision record and no would-have line per call under the brake."""
+        with kill_switch_active(), structlog.testing.capture_logs() as logs:
+            suppressed = intervention_suppressed("payment-api", "retry", attempt=1)
+
+        assert suppressed is True
+        assert _suppression_records(logs) == []
+
+    def test_intervention_suppressed_under_dry_run_still_writes_both_records(self):
+        """Dry-run keeps its would-have timeline: the record and the INFO line."""
+        with dry_run_active(), structlog.testing.capture_logs() as logs:
+            suppressed = intervention_suppressed("payment-api", "retry", attempt=1)
+
+        assert suppressed is True
+        events = [r.get("event") for r in _suppression_records(logs)]
+        assert events.count(_SUPPRESSED_EVENT) == 1
+        assert len(events) == 2
+
+    @pytest.mark.parametrize(
+        ("switch", "expected_traces"),
+        [(kill_switch_active, 0), (dry_run_active, 1), (nullcontext, 0)],
+        ids=["kill_switch", "dry_run_suppressed_trace", "active"],
+    )
+    def test_structural_control_trace_is_quiet_under_kill_switch(
+        self, switch, expected_traces
+    ):
+        """A live structural refusal is traced for dry-run only."""
+        refused = PolicyResult(outcome=PolicyOutcome.REJECTED)
+
+        with switch(), structlog.testing.capture_logs() as logs:
+            _trace_structural_control("payment_bulkhead", refused)
+
+        assert [log["event"] for log in logs].count(_STRUCTURAL_EVENT) == (
+            expected_traces
+        )
+
+    @pytest.mark.parametrize(
+        ("switch", "records_expected"),
+        [(kill_switch_active, False), (dry_run_active, True)],
+        ids=["kill_switch", "dry_run_suppressed"],
+    )
+    def test_protected_call_writes_suppression_records_only_under_dry_run(
+        self, switch, records_expected
+    ):
+        """A failing protected call under the brake writes no per-call record."""
+        # Given
+        calls: list[int] = []
+
+        def fn() -> str:
+            calls.append(1)
+            raise ConnectionError("downstream refused")
+
+        # When
+        with (
+            switch(),
+            patch(
+                "baldur.services.retry_handler.sinks.store_to_dlq",
+                autospec=True,
+                return_value=DLQEntryResult.created("dlq-1"),
+            ),
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(ConnectionError),
+        ):
+            protect_facade.protect(
+                "svc.kill_switch_logs",
+                fn,
+                retry=RetryPolicyConfig(
+                    max_attempts=3,
+                    backoff_base=0,
+                    backoff_max=0,
+                    jitter_percent=0,
+                    domain="svc.kill_switch_logs",
+                ),
+                circuit_breaker=False,
+                dlq=True,
+                timeout=None,
+            )
+
+        # Then: one attempt either way; records only for dry-run
+        assert calls == [1]
+        assert bool(_suppression_records(logs)) is records_expected

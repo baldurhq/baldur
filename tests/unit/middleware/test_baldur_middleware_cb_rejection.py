@@ -15,10 +15,14 @@ Verification techniques applied:
   Block record nothing (the last through the service's own pin check)
 - Error path: a raising service leaves the response unchanged
 - Dependency interaction: the recorded call carries the row's name and the row
+- Branch outcome (802 D3): under observe-only an operator's Block on the
+  request domain's row is refused without a DLQ entry, while an automatic
+  OPEN falls through; the withheld store is on dry-run's timeline only
 """
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 from unittest.mock import MagicMock, Mock
 
@@ -36,7 +40,7 @@ from baldur.interfaces.repositories import (
 from baldur.services.circuit_breaker.config import CircuitBreakerConfig
 from baldur.services.circuit_breaker.service import CircuitBreakerService
 from baldur.utils.time import utc_now
-from tests.factories import dry_run_active
+from tests.factories import dry_run_active, kill_switch_active
 
 DB_DOMAIN = BaldurMiddleware.CB_DATABASE_DOMAIN
 
@@ -254,3 +258,109 @@ class TestMiddlewareRefusalEvidenceBehavior:
         mw._record_cb_rejection(FakeRequest())
 
         service.record_rejection.assert_not_called()
+
+
+_OBSERVE_ONLY = pytest.mark.parametrize(
+    "switch", [kill_switch_active, dry_run_active], ids=["kill_switch", "dry_run"]
+)
+
+
+def _pin(repo, name: str, *, expires_in_minutes: int = 10) -> None:
+    _open_row(
+        repo,
+        name,
+        manually_controlled=True,
+        manual_override_expires_at=utc_now() + timedelta(minutes=expires_in_minutes),
+    )
+
+
+class TestOperatorBlockPreemptiveUnderObserveOnlyBehavior:
+    """The preemptive branch refuses an operator's Block under observe-only (802 D3).
+
+    Asked of the request domain's own row — the database row, checked first by
+    the refusal, carries no domain pin — and refused without parking the
+    request: the DLQ capture is an automatic intervention.
+    """
+
+    @_OBSERVE_ONLY
+    def test_domain_block_is_refused_without_a_dlq_entry(
+        self, switch, cb_service, repo
+    ):
+        """503 naming the operator's Block; nothing stored, nothing claimed stored."""
+        # Given
+        repo.get_or_create(DB_DOMAIN)
+        mw = _preemptive_middleware(cb_service)
+        _pin(repo, mw._infer_domain("/api/orders/"))
+
+        # When
+        with switch():
+            response = mw(FakeRequest(path="/api/orders/"))
+
+        # Then
+        body = json.loads(response.content)
+        assert response.status_code == 503
+        assert body["code"] == "CIRCUIT_BREAKER_OPEN"
+        assert (body["dlq_stored"], body["dlq_id"]) == (False, None)
+        mw._store_to_dlq.assert_not_called()
+
+    @_OBSERVE_ONLY
+    def test_domain_block_is_found_behind_an_open_database_row(
+        self, switch, cb_service, repo
+    ):
+        """The database row refuses first; the pin is read from the domain's row."""
+        _open_row(repo, DB_DOMAIN)
+        mw = _preemptive_middleware(cb_service)
+        _pin(repo, mw._infer_domain("/api/orders/"))
+
+        with switch():
+            response = mw(FakeRequest(path="/api/orders/"))
+
+        assert response.status_code == 503
+        mw._store_to_dlq.assert_not_called()
+
+    @_OBSERVE_ONLY
+    def test_automatically_opened_domain_row_falls_through(
+        self, switch, cb_service, repo
+    ):
+        """Negative twin: an automatic OPEN steps aside and the request is served."""
+        repo.get_or_create(DB_DOMAIN)
+        mw = _preemptive_middleware(cb_service)
+        _open_row(repo, mw._infer_domain("/api/orders/"))
+
+        with switch():
+            response = mw(FakeRequest(path="/api/orders/"))
+
+        assert response.status_code == 200
+        mw._store_to_dlq.assert_not_called()
+
+    def test_withheld_store_is_recorded_under_dry_run(self, cb_service, repo):
+        """Dry-run's would-have timeline names the DLQ store the Block did not take."""
+        repo.get_or_create(DB_DOMAIN)
+        mw = _preemptive_middleware(cb_service)
+        _pin(repo, mw._infer_domain("/api/orders/"))
+
+        with dry_run_active(), capture_logs() as logs:
+            mw(FakeRequest(path="/api/orders/"))
+
+        withheld = [
+            entry
+            for entry in logs
+            if entry.get("event") == "execution_mode.intervention_suppressed"
+        ]
+        assert [entry["action"] for entry in withheld] == ["dlq_store"]
+
+    def test_withheld_store_is_not_logged_per_request_under_kill_switch(
+        self, cb_service, repo
+    ):
+        """Under the brake the suppression is silent (no per-call record)."""
+        repo.get_or_create(DB_DOMAIN)
+        mw = _preemptive_middleware(cb_service)
+        _pin(repo, mw._infer_domain("/api/orders/"))
+
+        with kill_switch_active(), capture_logs() as logs:
+            response = mw(FakeRequest(path="/api/orders/"))
+
+        assert response.status_code == 503
+        assert "execution_mode.intervention_suppressed" not in [
+            entry.get("event") for entry in logs
+        ]
