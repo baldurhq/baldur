@@ -93,6 +93,9 @@ def _change_response(
         "success": persisted,
         "message": message if persisted else _HELD_MESSAGE,
         **extra,
+        # Only a change the store holds reaches the other processes; a held
+        # change is in force in this process alone, as ``applies`` says.
+        **({"reach": _reach_text()} if persisted else {}),
         "state": change.state.to_dict(),
         **change.response_fields(),
         "timestamp": utc_now().isoformat(),
@@ -125,7 +128,7 @@ def system_enable(ctx: RequestContext) -> ResponseContext:
         change = get_system_control().enable(actor=resolve_actor(ctx), reason=reason)
     except SystemControlStoreError as e:
         return _store_error_response(e)
-    return _change_response(change, "Baldur system enabled", reach=_reach_text())
+    return _change_response(change, "Baldur system enabled")
 
 
 def system_disable(ctx: RequestContext) -> ResponseContext:
@@ -146,7 +149,6 @@ def system_disable(ctx: RequestContext) -> ResponseContext:
         change,
         "Baldur system DISABLED (Kill Switch activated)",
         effect=_DISABLED_EFFECT,
-        reach=_reach_text(),
     )
 
 
@@ -157,7 +159,6 @@ def dry_run_enable(ctx: RequestContext) -> ResponseContext:
         change,
         "Dry run mode ENABLED",
         info="Baldur will observe and log but not take actions",
-        reach=_reach_text(),
     )
 
 
@@ -181,5 +182,4 @@ def dry_run_disable(ctx: RequestContext) -> ResponseContext:
         change,
         "Dry run mode DISABLED - Baldur is now LIVE",
         warning="All baldur actions will now be executed for real",
-        reach=_reach_text(),
     )

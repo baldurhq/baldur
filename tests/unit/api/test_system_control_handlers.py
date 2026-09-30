@@ -442,6 +442,34 @@ class TestSystemControlHandlersBehavior:
             persisted,
             "this_process",
         )
+        # The reach sentence promises every process; a held change has one.
+        assert "reach" not in resp.body
+
+    @pytest.mark.parametrize(
+        ("handler", "method", "json_body"),
+        [
+            (system_enable, "enable", {"reason": "resolved"}),
+            (system_disable, "disable", {"reason": "incident"}),
+            (dry_run_enable, "enable_dry_run", None),
+            (dry_run_disable, "disable_dry_run", {"confirm": True}),
+        ],
+        ids=["enable", "disable", "dry_run_enable", "dry_run_disable"],
+    )
+    def test_committed_change_states_the_reach_bound(self, handler, method, json_body):
+        """Every change the store holds says how far it reaches."""
+        manager = _manager_double()
+        getattr(manager, method).return_value = SystemControlChange(
+            state=SystemState(),
+            persisted=True,
+            applies="everywhere",
+        )
+
+        resp = _call(handler, manager, json_body)
+
+        assert resp.status_code == 200
+        assert resp.body["reach"] == (
+            "Every process sharing the state store applies it within about 5 seconds."
+        )
 
     def test_committed_disable_states_the_step_aside_effect_and_the_reach(self):
         """The effect text and the reach bound — no claim that everything stopped."""

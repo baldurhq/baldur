@@ -460,7 +460,7 @@ class PolicyComposer(Generic[T]):
     pipeline, wiring Guard/Hook/Sink to integrate with the infrastructure layer.
 
     Execution order:
-    1. Guard checks (Kill Switch, ErrorBudgetGate, etc.)
+    1. Guard checks (ErrorBudgetGuard, idempotency, etc.)
     2. Policies wrapped in turn (add order = outer→inner execution order)
     3. Hooks invoked (Audit, Metrics, etc.) — observe only the whole-pipeline
        result
