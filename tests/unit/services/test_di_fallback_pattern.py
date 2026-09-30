@@ -437,3 +437,249 @@ class TestReplayServiceDIFallbackBehavior:
             pytest.raises(RuntimeError, match="ProviderRegistry unavailable"),
         ):
             _ = service.repository
+
+
+# =============================================================================
+# C. 801 D4 — the effective policy and the counter, through real settings
+# =============================================================================
+
+
+@pytest.fixture
+def fallback_environment(monkeypatch):
+    """Set the environment and the operator's ``FALLBACK_POLICY`` (None = unset).
+
+    Real settings, not a mocked config: whether the policy counts as set is
+    read from ``model_fields_set``, which only a real settings build fills.
+    """
+    from baldur.runtime import reset_runtime
+    from baldur.settings.root import reset_config
+
+    def _set(*, production: bool, policy: str | None) -> None:
+        monkeypatch.setenv(
+            "BALDUR_ENVIRONMENT", "production" if production else "development"
+        )
+        monkeypatch.delenv("BALDUR_TEST_MODE", raising=False)
+        if policy is None:
+            monkeypatch.delenv("FALLBACK_POLICY", raising=False)
+        else:
+            monkeypatch.setenv("FALLBACK_POLICY", policy)
+        reset_runtime()
+        reset_config()
+
+    yield _set
+
+    reset_runtime()
+    reset_config()
+
+
+class _InMemoryProbeAdapter:
+    """Stand-in in-memory adapter; its name labels the fallback metric."""
+
+
+def _unbuildable():
+    raise ImportError("the adapter's driver is not installed")
+
+
+class TestEffectiveFallbackPolicyBehavior:
+    """Unless the operator set it, production announces a fallback (801 D4)."""
+
+    @pytest.mark.parametrize(
+        ("production", "policy", "effective"),
+        [
+            (True, None, FallbackPolicy.WARN_AND_ALLOW),
+            (False, None, FallbackPolicy.ALLOW),
+            (True, "allow", FallbackPolicy.ALLOW),
+            (False, "warn", FallbackPolicy.WARN_AND_ALLOW),
+            (False, "fail_fast", FallbackPolicy.FAIL_FAST),
+        ],
+        ids=[
+            "production_unset_warns",
+            "development_unset_allows",
+            "production_explicit_allow_wins",
+            "development_explicit_warn_wins",
+            "development_explicit_fail_fast_wins",
+        ],
+    )
+    def test_effective_policy_is_the_operators_else_the_environments(
+        self, fallback_environment, production, policy, effective
+    ):
+        from baldur.core.di_fallback import _effective_fallback_policy
+
+        fallback_environment(production=production, policy=policy)
+
+        assert _effective_fallback_policy() == effective
+
+    def test_an_explicit_allow_in_production_falls_back_silently(
+        self, fallback_environment
+    ):
+        from structlog.testing import capture_logs
+
+        from baldur.core.di_fallback import resolve_with_fallback
+
+        fallback_environment(production=True, policy="allow")
+
+        with capture_logs() as logs:
+            adapter = resolve_with_fallback(
+                _unbuildable, _InMemoryProbeAdapter, "ExplicitAllowService"
+            )
+
+        assert isinstance(adapter, _InMemoryProbeAdapter)
+        assert [e for e in logs if e.get("event") == "service.fallback_adapter"] == []
+
+    def test_a_production_fallback_increments_the_counter_on_the_real_facade(
+        self, fallback_environment
+    ):
+        """G11: the counter used to be looked up as an attribute neither facade
+        has, so it never moved; a mock that had the attribute hid it."""
+        prometheus_client = pytest.importorskip("prometheus_client")
+
+        from baldur.core.di_fallback import resolve_with_fallback
+
+        fallback_environment(production=True, policy=None)
+        labels = {
+            "service": "CounterProbeService",
+            "adapter": _InMemoryProbeAdapter.__name__,
+        }
+        sample = "baldur_di_fallback_total"
+        before = prometheus_client.REGISTRY.get_sample_value(sample, labels) or 0.0
+
+        resolve_with_fallback(_unbuildable, _InMemoryProbeAdapter, labels["service"])
+
+        after = prometheus_client.REGISTRY.get_sample_value(sample, labels)
+        assert after == before + 1
+
+
+def _circuit_breaker_service():
+    from baldur.services.circuit_breaker.service import CircuitBreakerService
+
+    service = CircuitBreakerService.__new__(CircuitBreakerService)
+    service._repository = None
+    service._config = None
+    service._event_bus = None
+    service._sync_callbacks = []
+    return service
+
+
+def _dlq_capture_service():
+    from baldur.services.dlq_capture.service import DLQCaptureService
+
+    service = DLQCaptureService.__new__(DLQCaptureService)
+    service._repository = None
+    return service
+
+
+def _replay_service():
+    from baldur.services.replay_service.service import ReplayService
+
+    service = ReplayService.__new__(ReplayService)
+    service._repository = None
+    service._config = {}
+    service._adaptive_replay = None
+    return service
+
+
+def _security_service():
+    from baldur.services.security.models import SecurityConfig
+    from baldur.services.security.service import SecurityViolationService
+
+    return SecurityViolationService(config=MagicMock(spec=SecurityConfig))
+
+
+def _session_registry():
+    from baldur.services.security.session_registry import UserSessionRegistry
+
+    return UserSessionRegistry()
+
+
+class TestProductionDIFallbackSitesBehavior:
+    """Every lazy store lookup announces a production fallback (801 D4/D5).
+
+    Each site resolves through ``resolve_with_fallback``; with
+    ``FALLBACK_POLICY`` unset in production, a construction error yields the
+    in-memory adapter plus one ``service.fallback_adapter`` WARNING — never a
+    silent in-memory adapter. The security repository and cache and the
+    session registry's cache carried their own silent fallback before.
+    """
+
+    @pytest.mark.parametrize(
+        ("build_site", "attribute", "registry_getter", "fallback_path"),
+        [
+            (
+                _circuit_breaker_service,
+                "repository",
+                "get_circuit_breaker_repo",
+                "baldur.adapters.memory.InMemoryCircuitBreakerStateRepository",
+            ),
+            (
+                _dlq_capture_service,
+                "repository",
+                "get_failed_operation_repo",
+                "baldur.adapters.memory.InMemoryFailedOperationRepository",
+            ),
+            (
+                _replay_service,
+                "repository",
+                "get_failed_operation_repo",
+                "baldur.adapters.memory.InMemoryFailedOperationRepository",
+            ),
+            (
+                _security_service,
+                "repository",
+                "get_security_repo",
+                "baldur.adapters.memory.InMemorySecurityIncidentRepository",
+            ),
+            (
+                _security_service,
+                "cache",
+                "get_cache",
+                "baldur.adapters.cache.memory_adapter.InMemoryCacheAdapter",
+            ),
+            (
+                _session_registry,
+                "cache",
+                "get_cache",
+                "baldur.adapters.cache.memory_adapter.InMemoryCacheAdapter",
+            ),
+        ],
+        ids=[
+            "circuit_breaker_repository",
+            "dlq_capture_repository",
+            "replay_repository",
+            "security_repository",
+            "security_cache",
+            "session_registry_cache",
+        ],
+    )
+    @pytest.mark.parametrize("error", [ImportError, ValueError])
+    def test_a_construction_error_yields_memory_with_one_warning(
+        self,
+        fallback_environment,
+        build_site,
+        attribute,
+        registry_getter,
+        fallback_path,
+        error,
+    ):
+        import importlib
+
+        from structlog.testing import capture_logs
+
+        module_path, _, class_name = fallback_path.rpartition(".")
+        fallback_cls = getattr(importlib.import_module(module_path), class_name)
+        fallback_environment(production=True, policy=None)
+        site = build_site()
+
+        with (
+            patch(
+                f"baldur.factory.ProviderRegistry.{registry_getter}",
+                side_effect=error("backend cannot be constructed"),
+            ),
+            capture_logs() as logs,
+        ):
+            adapter = getattr(site, attribute)
+
+        assert isinstance(adapter, fallback_cls)
+        announced = [e for e in logs if e.get("event") == "service.fallback_adapter"]
+        assert [(e["log_level"], e["service"], e["adapter"]) for e in announced] == [
+            ("warning", type(site).__name__, class_name)
+        ]

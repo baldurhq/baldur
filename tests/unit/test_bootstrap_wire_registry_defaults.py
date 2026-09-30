@@ -33,6 +33,8 @@ Verification techniques (per UNIT_TEST_GUIDELINES §8):
 
 from __future__ import annotations
 
+import sys
+import types
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -1494,6 +1496,51 @@ class TestRegistriesToWireContract:
                 f"{w.registry_attr} is not a GenericProviderRegistry"
             )
 
+    def test_boot_validation_is_flagged_on_every_row_whose_selection_can_fail(self):
+        """801 D6: the three incident stores, the SQL-capable probe rows and the
+        two hybrids construct their selection at boot; the Group A rows (covered
+        by the Redis driver check) and ``pool_info`` (Django-only) do not."""
+        from baldur.bootstrap import _REGISTRIES_TO_WIRE
+
+        flagged = {w.registry_attr for w in _REGISTRIES_TO_WIRE if w.eager_validate}
+
+        assert flagged == {
+            "recovery_session_repo",
+            "security_repo",
+            "postmortem_repo",
+            "database_health",
+            "pg_admin",
+            "event_journal_repo",
+            "failed_op_repo",
+        }
+
+    def test_probe_accepted_backends_are_redis_and_django(self):
+        """801 D6: the two names a probe may select without boot building them."""
+        from baldur.bootstrap import _PROBE_ACCEPTED_BACKENDS
+
+        assert _PROBE_ACCEPTED_BACKENDS == frozenset({"redis", "django"})
+
+    def test_backend_selection_env_vars_are_the_urls_plus_every_override(self):
+        """801 D2 (G12): what production test mode names when it leaves them inert."""
+        from baldur.bootstrap import _BACKEND_SELECTION_ENV_VARS
+
+        assert _BACKEND_SELECTION_ENV_VARS == (
+            "BALDUR_REDIS_URL",
+            "BALDUR_SQL_DSN",
+            "BALDUR_DATABASE_HEALTH_PROVIDER",
+            "BALDUR_PG_ADMIN_PROVIDER",
+            "BALDUR_POOL_INFO_PROVIDER",
+            "BALDUR_EVENT_JOURNAL_BACKEND",
+            "BALDUR_DLQ_BACKEND",
+        )
+
+    def test_sql_unusable_hint_names_the_dsn_variable(self):
+        """801 D6: the refusal for an unbuildable ``sql`` names what to fix."""
+        from baldur.bootstrap import _BACKEND_UNUSABLE_HINTS
+
+        assert "BALDUR_SQL_DSN" in _BACKEND_UNUSABLE_HINTS["sql"]
+        assert "psycopg2-binary" in _BACKEND_UNUSABLE_HINTS["sql"]
+
 
 # =============================================================================
 # 464 — _BackendKind enum contract
@@ -2083,6 +2130,573 @@ class TestEagerBackendValidationBehavior:
 
         assert ProviderRegistry.event_journal_repo.get_default_name() == "sql"
         assert journal_built == []
+
+    # -- 801 D6 — the decision table of _eager_validate_wired_backend --------
+
+    def test_an_unflagged_row_constructs_nothing(self):
+        from baldur import bootstrap
+
+        built: list[str] = []
+        registry = _recording_registry(built, sql=False)
+
+        bootstrap._eager_validate_wired_backend(
+            registry,
+            _validation_row(eager_validate=False),
+            _runtime(is_production=True),
+            ["sql"],
+            operator_chosen=True,
+        )
+
+        assert built == []
+        assert registry.get_default_name() == "sql"
+
+    def test_a_row_with_no_selection_constructs_nothing(self):
+        """Nothing wired means nothing to validate — not an unbuildable default."""
+        from baldur import bootstrap
+        from baldur.factory.base import GenericProviderRegistry
+
+        registry = GenericProviderRegistry("validation_row")
+
+        bootstrap._eager_validate_wired_backend(
+            registry,
+            _validation_row(),
+            _runtime(is_production=True),
+            [],
+            operator_chosen=False,
+        )
+
+        assert registry.get_default_name() is None
+
+    @pytest.mark.parametrize("selected", ["redis", "django"])
+    @pytest.mark.parametrize(
+        "is_production", [True, False], ids=["production", "development"]
+    )
+    def test_a_probe_selected_redis_or_django_is_accepted_without_construction(
+        self, selected, is_production
+    ):
+        """A cluster URL dials in the Redis constructor and a Django repository
+        needs a ready app registry, so a probe's pick of either is not built —
+        not even when building it would fail."""
+        from baldur import bootstrap
+
+        built: list[str] = []
+        registry = _recording_registry(built, **{selected: False}, memory=True)
+
+        bootstrap._eager_validate_wired_backend(
+            registry,
+            _validation_row(),
+            _runtime(is_production=is_production),
+            [selected, "memory"],
+            operator_chosen=False,
+        )
+
+        assert built == []
+        assert registry.get_default_name() == selected
+
+    @pytest.mark.parametrize("selected", ["redis", "django", "sql", "custom"])
+    def test_an_operator_chosen_name_is_constructed_whatever_it_is(self, selected):
+        """A host may register its own provider under ``redis`` or ``django``;
+        a name the operator chose through the override is always built."""
+        from baldur import bootstrap
+
+        built: list[str] = []
+        registry = _recording_registry(built, **{selected: True})
+
+        bootstrap._eager_validate_wired_backend(
+            registry,
+            _validation_row(),
+            _runtime(is_production=True),
+            [],
+            operator_chosen=True,
+        )
+
+        assert built == [selected]
+        assert registry.get_default_name() == selected
+
+    @pytest.mark.parametrize("selected", ["redis", "django", "custom"])
+    def test_an_operator_chosen_unbuildable_name_refuses_production(self, selected):
+        """The refusal names the provider and the override that selected it."""
+        from baldur import bootstrap
+
+        registry = _recording_registry([], **{selected: False})
+
+        with pytest.raises(ConfigurationError) as excinfo:
+            bootstrap._eager_validate_wired_backend(
+                registry,
+                _validation_row(),
+                _runtime(is_production=True),
+                [],
+                operator_chosen=True,
+            )
+
+        message = str(excinfo.value)
+        assert f"Fix the provider registered as {selected!r}" in message
+        assert "BALDUR_TEST_BACKEND" in message
+        assert isinstance(excinfo.value.__cause__, ImportError)
+
+    def test_an_unbuildable_sql_selection_refuses_production_naming_the_dsn(self):
+        from baldur import bootstrap
+
+        registry = _recording_registry([], sql=False, memory=True)
+
+        with pytest.raises(ConfigurationError) as excinfo:
+            bootstrap._eager_validate_wired_backend(
+                registry,
+                _validation_row(),
+                _runtime(is_production=True),
+                ["sql", "memory"],
+                operator_chosen=False,
+            )
+
+        message = str(excinfo.value)
+        assert "ProviderRegistry.validation_row selected backend 'sql'" in message
+        assert "BALDUR_SQL_DSN" in message
+        assert "select another backend via BALDUR_TEST_BACKEND" in message
+
+    @pytest.mark.parametrize("selected", ["sql", "custom"])
+    def test_a_refusal_on_a_row_without_an_override_names_no_placeholder(
+        self, selected
+    ):
+        """The message used to print ``via None`` for rows with no override."""
+        from baldur import bootstrap
+
+        registry = _recording_registry([], **{selected: False})
+
+        with pytest.raises(ConfigurationError) as excinfo:
+            bootstrap._eager_validate_wired_backend(
+                registry,
+                _validation_row(env_override=None),
+                _runtime(is_production=True),
+                [selected],
+                operator_chosen=False,
+            )
+
+        message = str(excinfo.value)
+        assert "None" not in message
+        assert "select another backend via" not in message
+
+    def test_demotion_skips_redis_and_django_and_lands_on_the_first_that_builds(
+        self,
+    ):
+        """Outside production a failed selection falls through the remaining
+        candidates in order, never onto an unconstructed ``redis`` / ``django``
+        (a non-production process would then raise on every lookup)."""
+        from structlog.testing import capture_logs
+
+        from baldur import bootstrap
+
+        built: list[str] = []
+        registry = _recording_registry(
+            built, sql=False, redis=True, django=True, custom=False, memory=True
+        )
+
+        with capture_logs() as logs:
+            bootstrap._eager_validate_wired_backend(
+                registry,
+                _validation_row(),
+                _runtime(is_production=False),
+                ["redis", "sql", "django", "custom", "memory"],
+                operator_chosen=False,
+            )
+
+        assert built == ["sql", "custom", "memory"]
+        assert registry.get_default_name() == "memory"
+        assert [
+            e["backend"]
+            for e in logs
+            if e.get("event") == "baldur.registry_backend_unusable"
+        ] == ["sql", "custom"]
+        assert [
+            (e["requested"], e["backend"])
+            for e in logs
+            if e.get("event") == "baldur.registry_backend_demoted"
+        ] == [("sql", "memory")]
+
+    def test_the_validated_instance_is_the_one_later_lookups_receive(self):
+        """Validation builds through the registry cache, not a throwaway."""
+        from baldur import bootstrap
+
+        built: list[str] = []
+        registry = _recording_registry(built, sql=True)
+
+        bootstrap._eager_validate_wired_backend(
+            registry,
+            _validation_row(),
+            _runtime(is_production=True),
+            ["sql"],
+            operator_chosen=False,
+        )
+        instance = registry.get()
+
+        assert built == ["sql"]
+        assert registry.get() is instance
+
+    # -- 801 D6 — every flagged row, through the wiring step -----------------
+
+    @pytest.mark.parametrize(
+        ("registry_attr", "selector_env"),
+        [
+            ("recovery_session_repo", {}),
+            ("security_repo", {}),
+            ("postmortem_repo", {}),
+            ("database_health", {}),
+            ("pg_admin", {}),
+            ("event_journal_repo", {"BALDUR_EVENT_JOURNAL_BACKEND": "sql"}),
+        ],
+    )
+    def test_every_flagged_row_refuses_production_when_its_sql_cannot_be_built(
+        self,
+        monkeypatch,
+        dlq_wiring_env,
+        isolated_all_wired_registries,
+        registry_attr,
+        selector_env,
+    ):
+        """A selected store that cannot be constructed never becomes process
+        memory in production: the boot is refused, naming the row and the DSN.
+        The journal row prefers Redis in production, so its case selects SQL
+        through its override."""
+        from baldur import bootstrap
+        from baldur.factory.registry import ProviderRegistry
+
+        monkeypatch.setenv("BALDUR_ENVIRONMENT", "production")
+        monkeypatch.setenv("BALDUR_REDIS_URL", "redis://prod:6379/0")
+        monkeypatch.setenv("BALDUR_SQL_DSN", _SQLITE_DSN)
+        for name, value in selector_env.items():
+            monkeypatch.setenv(name, value)
+        bootstrap.reset_init_state()
+        registry = getattr(ProviderRegistry, registry_attr)
+        registry.register("sql", _unusable_backend)
+        registry.clear_instances()
+
+        _stub_redis_settings(monkeypatch, url="redis://prod:6379/0")
+        cm, _configure, _backend = _patch_eager_backend(wal_initialized=True)
+
+        with cm, pytest.raises(ConfigurationError) as excinfo:
+            bootstrap._wire_registry_defaults()
+
+        message = str(excinfo.value)
+        assert f"ProviderRegistry.{registry_attr} selected backend 'sql'" in message
+        assert "BALDUR_SQL_DSN" in message
+
+    # -- 801 D6 (external review E4) — an unparsable PostgreSQL DSN ----------
+
+    def test_an_unparsable_postgres_dsn_refuses_production_without_the_password(
+        self, monkeypatch, dlq_wiring_env, isolated_all_wired_registries
+    ):
+        """libpq echoes the whole DSN in its parse error; the refusal, and every
+        exception it chains to, must carry none of it."""
+        import traceback
+
+        from baldur import bootstrap
+
+        _stub_echoing_psycopg2(monkeypatch)
+        monkeypatch.setenv("BALDUR_ENVIRONMENT", "production")
+        monkeypatch.setenv("BALDUR_REDIS_URL", "redis://prod:6379/0")
+        monkeypatch.setenv("BALDUR_SQL_DSN", _TYPO_DSN)
+        bootstrap.reset_init_state()
+
+        _stub_redis_settings(monkeypatch, url="redis://prod:6379/0")
+        cm, _configure, _backend = _patch_eager_backend(wal_initialized=True)
+
+        with cm, pytest.raises(ConfigurationError) as excinfo:
+            bootstrap._wire_registry_defaults()
+
+        assert "BALDUR_SQL_DSN is not a valid PostgreSQL" in str(excinfo.value)
+        rendered = "".join(traceback.format_exception(excinfo.value))
+        assert _TYPO_DSN_PASSWORD not in rendered
+        # ``from None`` would hide the libpq error from the rendered traceback
+        # yet keep it on ``__context__``; the promise is neither link holds it.
+        assert all(
+            _TYPO_DSN_PASSWORD not in str(link)
+            for link in _exception_chain(excinfo.value)
+        )
+
+    def test_an_unparsable_postgres_dsn_outside_production_demotes_quietly_redacted(
+        self, monkeypatch, dlq_wiring_env, isolated_all_wired_registries
+    ):
+        from structlog.testing import capture_logs
+
+        from baldur import bootstrap
+        from baldur.factory.registry import ProviderRegistry
+
+        _stub_echoing_psycopg2(monkeypatch)
+        monkeypatch.setenv("BALDUR_SQL_DSN", _TYPO_DSN)
+        bootstrap.reset_init_state()
+
+        with capture_logs() as logs:
+            bootstrap._wire_registry_defaults()
+
+        assert ProviderRegistry.security_repo.get_default_name() == "memory"
+        unusable = [
+            e for e in logs if e.get("event") == "baldur.registry_backend_unusable"
+        ]
+        assert unusable, "the unparsable DSN was never reported"
+        assert all("not a valid PostgreSQL" in e["error"] for e in unusable)
+        assert all(_TYPO_DSN_PASSWORD not in repr(e) for e in logs)
+
+
+# 801 D6 — helpers for driving ``_eager_validate_wired_backend`` directly and
+# for the unparsable-DSN cases.
+
+# A scheme typo libpq rejects; the password is what must never surface.
+_TYPO_DSN_PASSWORD = "s3cretpw"
+_TYPO_DSN = f"postgersql://u:{_TYPO_DSN_PASSWORD}@h/db"
+
+
+def _validation_row(
+    *, eager_validate: bool = True, env_override: str | None = "BALDUR_TEST_BACKEND"
+):
+    """A PRIORITY_CHAIN row for driving the validation directly."""
+    from baldur import bootstrap
+
+    return bootstrap._RegistryWiring(
+        bootstrap._BackendKind.PRIORITY_CHAIN,
+        "validation_row",
+        target_name="",
+        env_override=env_override,
+        eager_validate=eager_validate,
+    )
+
+
+def _recording_registry(built: list[str], **constructs: bool):
+    """A fresh registry whose providers record each construction.
+
+    ``False`` makes that provider raise ``ImportError``. Registration follows
+    keyword order, so — as in every real registry — the first name given is
+    the default.
+    """
+    from baldur.factory.base import GenericProviderRegistry
+
+    registry = GenericProviderRegistry("validation_row")
+    for name, ok in constructs.items():
+        registry.register(name, _recording_factory(built, name, ok=ok))
+    return registry
+
+
+def _recording_factory(built: list[str], name: str, *, ok: bool):
+    def _build():
+        built.append(name)
+        if not ok:
+            raise ImportError(f"the {name} driver is not installed")
+        return object()
+
+    return _build
+
+
+def _runtime(*, is_production: bool):
+    from baldur.runtime import BaldurRuntime
+
+    runtime = MagicMock(spec=BaldurRuntime)
+    runtime.is_production = is_production
+    return runtime
+
+
+def _exception_chain(exc: BaseException) -> list[BaseException]:
+    """Every exception reachable through ``__cause__`` and ``__context__``."""
+    seen: list[BaseException] = []
+    pending: list[BaseException | None] = [exc]
+    while pending:
+        link = pending.pop()
+        if link is None or any(link is s for s in seen):
+            continue
+        seen.append(link)
+        pending.extend((link.__cause__, link.__context__))
+    return seen
+
+
+def _stub_echoing_psycopg2(monkeypatch):
+    """Install a ``psycopg2`` whose parse error quotes the DSN, as libpq does.
+
+    ``connect`` fails the test outright: construction must parse, never dial.
+    """
+
+    def _parse_dsn(dsn):
+        raise Exception(f'missing "=" after "{dsn}" in connection info string')
+
+    def _connect(*_args, **_kwargs):
+        raise AssertionError("construction dialed the database")
+
+    stub = types.ModuleType("psycopg2")
+    stub.extensions = types.SimpleNamespace(parse_dsn=_parse_dsn)
+    stub.connect = _connect
+    monkeypatch.setitem(sys.modules, "psycopg2", stub)
+
+
+# =============================================================================
+# 801 D6 (G10) — BALDUR_REDIS_URL with no Redis driver installed
+# =============================================================================
+
+
+class TestRedisDriverMissingBehavior:
+    """The Group A phase checks the driver once when ``BALDUR_REDIS_URL`` is set.
+
+    Production refuses with ``ConfigurationError`` (the class every adapter's
+    startup aborts on) instead of the bare ``ModuleNotFoundError`` the first
+    Redis adapter used to raise. Elsewhere the Redis rows run on memory with one
+    WARNING, and the chain probes count the URL as unset, so no chain selects a
+    Redis adapter nothing can build. The driver is made unimportable with
+    ``sys.modules["redis"] = None``, which fails the import itself.
+    """
+
+    def test_production_refuses_a_redis_url_without_the_driver(
+        self, monkeypatch, dlq_wiring_env, isolated_all_wired_registries
+    ):
+        from baldur import bootstrap
+
+        monkeypatch.setitem(sys.modules, "redis", None)
+        monkeypatch.setenv("BALDUR_ENVIRONMENT", "production")
+        monkeypatch.setenv("BALDUR_REDIS_URL", "redis://prod:6379/0")
+        bootstrap.reset_init_state()
+
+        with pytest.raises(ConfigurationError) as excinfo:
+            bootstrap._wire_registry_defaults()
+
+        message = str(excinfo.value)
+        assert "BALDUR_REDIS_URL" in message
+        assert "pip install baldur-framework[redis]" in message
+
+    def test_elsewhere_the_redis_rows_run_on_memory_with_one_warning(
+        self, monkeypatch, dlq_wiring_env, isolated_all_wired_registries
+    ):
+        from structlog.testing import capture_logs
+
+        from baldur import bootstrap
+        from baldur.factory.registry import ProviderRegistry
+
+        monkeypatch.setitem(sys.modules, "redis", None)
+        monkeypatch.setenv("BALDUR_REDIS_URL", "redis://dev:6379/0")
+        bootstrap.reset_init_state()
+        for attr in GROUP_A_REGISTRY_ATTRS:
+            getattr(ProviderRegistry, attr).set_default("redis")
+        cm, configure_fn, _backend = _patch_eager_backend(wal_initialized=True)
+
+        with cm, capture_logs() as logs:
+            bootstrap._wire_registry_defaults()
+
+        for attr in GROUP_A_REGISTRY_ATTRS:
+            assert getattr(ProviderRegistry, attr).get_default_name() == "memory"
+        assert ProviderRegistry.event_journal_repo.get_default_name() == "memory"
+        assert ProviderRegistry.failed_op_repo.get_default_name() == "memory"
+        configure_fn.assert_not_called()
+        announced = [
+            e for e in logs if e.get("event") == "baldur.redis_driver_unavailable"
+        ]
+        assert [(e["log_level"], e["env_var"]) for e in announced] == [
+            ("warning", "BALDUR_REDIS_URL")
+        ]
+
+    @pytest.mark.parametrize(
+        ("url", "driver_present", "configured"),
+        [
+            ("redis://h:6379/0", True, True),
+            ("redis://h:6379/0", False, False),
+            ("   ", True, False),
+        ],
+        ids=["url_and_driver", "url_without_driver", "blank_url"],
+    )
+    def test_redis_counts_as_configured_only_with_a_url_and_the_driver(
+        self, monkeypatch, url, driver_present, configured
+    ):
+        """The chain probe behind the journal and dead-letter rows."""
+        from baldur import bootstrap
+
+        monkeypatch.setenv("BALDUR_REDIS_URL", url)
+        if not driver_present:
+            monkeypatch.setitem(sys.modules, "redis", None)
+
+        assert bootstrap._redis_url_configured() is configured
+
+
+# =============================================================================
+# 801 D2 (G12) — production test mode names the backends it leaves inert
+# =============================================================================
+
+
+class TestTestModeWiringSkipBehavior:
+    """``BALDUR_TEST_MODE=true`` skips wiring, so every store is process memory.
+
+    In production, with a backend-selecting variable set, that is one WARNING
+    naming the variables — never their values, since a URL can embed
+    credentials. Otherwise it stays a DEBUG line.
+    """
+
+    _SKIPPED = "baldur.registry_wiring_skipped"
+
+    @pytest.fixture
+    def no_selectors(self, monkeypatch):
+        from baldur.bootstrap import _BACKEND_SELECTION_ENV_VARS
+
+        for name in _BACKEND_SELECTION_ENV_VARS:
+            monkeypatch.delenv(name, raising=False)
+
+    def test_production_test_mode_names_the_redis_url_and_never_its_value(
+        self, monkeypatch, no_selectors, isolated_all_wired_registries
+    ):
+        from structlog.testing import capture_logs
+
+        from baldur import bootstrap
+
+        url = "redis://user:pw-s3cret@cache.internal:6379/0"
+        monkeypatch.setenv("BALDUR_TEST_MODE", "true")
+        monkeypatch.setenv("BALDUR_ENVIRONMENT", "production")
+        monkeypatch.setenv("BALDUR_REDIS_URL", url)
+        bootstrap.reset_init_state()
+
+        with capture_logs() as logs:
+            bootstrap._wire_registry_defaults()
+
+        skipped = [e for e in logs if e.get("event") == self._SKIPPED]
+        assert len(skipped) == 1
+        assert skipped[0]["log_level"] == "warning"
+        assert skipped[0]["ignored_env_vars"] == ["BALDUR_REDIS_URL"]
+        assert url not in repr(skipped[0])
+        assert "pw-s3cret" not in repr(skipped[0])
+
+    def test_an_override_variable_is_named_alongside_the_dsn(
+        self, monkeypatch, no_selectors
+    ):
+        from structlog.testing import capture_logs
+
+        from baldur import bootstrap
+
+        monkeypatch.setenv("BALDUR_SQL_DSN", "postgresql://u:p@db/baldur")
+        monkeypatch.setenv("BALDUR_DLQ_BACKEND", "sql")
+
+        with capture_logs() as logs:
+            bootstrap._announce_test_mode_wiring_skip(_runtime(is_production=True))
+
+        skipped = [e for e in logs if e.get("event") == self._SKIPPED]
+        assert [e["ignored_env_vars"] for e in skipped] == [
+            ["BALDUR_SQL_DSN", "BALDUR_DLQ_BACKEND"]
+        ]
+
+    @pytest.mark.parametrize(
+        ("is_production", "redis_url"),
+        [(False, "redis://h:6379/0"), (True, None)],
+        ids=["non_production_with_a_selector", "production_with_nothing_set"],
+    )
+    def test_otherwise_the_skip_stays_a_debug_line(
+        self, monkeypatch, no_selectors, is_production, redis_url
+    ):
+        from structlog.testing import capture_logs
+
+        from baldur import bootstrap
+
+        if redis_url is not None:
+            monkeypatch.setenv("BALDUR_REDIS_URL", redis_url)
+
+        with capture_logs() as logs:
+            bootstrap._announce_test_mode_wiring_skip(
+                _runtime(is_production=is_production)
+            )
+
+        assert [e for e in logs if e.get("event") == self._SKIPPED] == []
+        assert [
+            e["log_level"]
+            for e in logs
+            if e.get("event") == "baldur.wire_registry_defaults_skipped_test_mode"
+        ] == ["debug"]
 
 
 # =============================================================================

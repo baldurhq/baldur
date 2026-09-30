@@ -20,14 +20,17 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from baldur.adapters.resilient.backend import WAL_DIR_ENV_VAR
 from baldur.core.exceptions import ConfigurationError
 from baldur.runtime import BaldurRuntime
 from baldur.settings.redis import RedisSettings
 from baldur.settings.resilient_storage import ResilientStorageSettings
+from tests.factories.writable_dir import log_events
 
 DEFAULT_WAL_DIR = ResilientStorageSettings.model_fields["wal_dir"].default
+_RELOCATED_EVENT = "baldur.resilient_storage_wal_dir_relocated"
 
 
 @pytest.fixture(autouse=True)
@@ -110,24 +113,60 @@ class TestProductionWALBootGateIntegration:
         monkeypatch.delenv(WAL_DIR_ENV_VAR, raising=False)
         deny_dir(Path(DEFAULT_WAL_DIR))
 
-        backend = wire_storage(is_production=True)
+        with capture_logs() as logs:
+            backend = wire_storage(is_production=True)
 
         assert backend._wal_initialized is True
         assert backend._wal_on_fallback_dir is True
         assert backend._wal.wal_dir.is_relative_to(writable_dir_chain.state)
+        relocated = log_events(logs, _RELOCATED_EVENT)
+        assert len(relocated) == 1
+        assert relocated[0]["log_level"] == "warning"
+        assert relocated[0]["env_var"] == WAL_DIR_ENV_VAR
+        assert Path(relocated[0]["configured_dir"]) == Path(DEFAULT_WAL_DIR)
+        assert Path(relocated[0]["wal_dir"]) == backend._wal.wal_dir
 
     def test_unwritable_default_dir_boots_non_production_with_a_live_wal(
         self, writable_dir_chain, deny_dir, wire_storage, monkeypatch
     ):
-        """The behavior change: dev gets a working fallback WAL, not a dead one."""
+        """The behavior change: dev gets a working fallback WAL, not a dead one.
+
+        Outside production the resolver's INFO line is the whole announcement.
+        """
         monkeypatch.delenv(WAL_DIR_ENV_VAR, raising=False)
         deny_dir(Path(DEFAULT_WAL_DIR))
 
-        backend = wire_storage(is_production=False)
+        with capture_logs() as logs:
+            backend = wire_storage(is_production=False)
 
         assert backend._wal_initialized is True
         assert backend._wal_on_fallback_dir is True
         assert backend._wal.wal_dir.is_relative_to(writable_dir_chain.state)
+        assert log_events(logs, _RELOCATED_EVENT) == []
+
+    def test_no_writable_directory_anywhere_refuses_production_boot(
+        self, writable_dir_chain, deny_dir, wire_storage, monkeypatch
+    ):
+        """A read-only root filesystem with no writable mount: the WAL cannot
+        start anywhere, so production refuses and names the variable that
+        points it at a volume (801 D3, Risk R5)."""
+        # Given — the default and every fallback step are unwritable
+        monkeypatch.delenv(WAL_DIR_ENV_VAR, raising=False)
+        deny_dir(Path(DEFAULT_WAL_DIR))
+        for base in (
+            writable_dir_chain.state,
+            writable_dir_chain.var_tmp,
+            writable_dir_chain.temp,
+        ):
+            deny_dir(base)
+
+        # When / Then
+        with pytest.raises(
+            ConfigurationError, match="WAL initialization failed"
+        ) as excinfo:
+            wire_storage(is_production=True)
+
+        assert WAL_DIR_ENV_VAR in str(excinfo.value)
 
     def test_the_env_var_moves_a_relocated_wal_onto_the_chosen_dir(
         self, writable_dir_chain, deny_dir, wire_storage, monkeypatch, tmp_path

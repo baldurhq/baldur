@@ -50,6 +50,26 @@ class TestFallbackPolicyContract:
         settings = BaldurSettings()
         assert settings.fallback_policy == FallbackPolicy.ALLOW
 
+    @pytest.mark.parametrize(
+        ("env_value", "marked_set"),
+        [(None, False), ("allow", True), ("warn", True)],
+        ids=["unset", "explicit_allow", "explicit_warn"],
+    )
+    def test_settings_fallback_policy_is_marked_set_only_when_supplied(
+        self, monkeypatch, env_value, marked_set
+    ):
+        """801 D4 derives production's WARN_AND_ALLOW from this mark: an unset
+        policy must read as unset although its value equals the default, and
+        an explicit ``allow`` must read as the operator's choice."""
+        if env_value is None:
+            monkeypatch.delenv("FALLBACK_POLICY", raising=False)
+        else:
+            monkeypatch.setenv("FALLBACK_POLICY", env_value)
+
+        settings = BaldurSettings()
+
+        assert ("fallback_policy" in settings.model_fields_set) is marked_set
+
 
 # =============================================================================
 # B. Behavior Tests

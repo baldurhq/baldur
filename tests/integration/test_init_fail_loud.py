@@ -22,10 +22,16 @@ Reference:
 
 from __future__ import annotations
 
+import importlib.metadata
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Bound at import, before the suite-wide fixture swaps the module attribute for
+# a fixed ACTIVE verdict, so a case can put the real cached validator back.
+from baldur.core.entitlement import (
+    get_entitlement_status as _real_get_entitlement_status,
+)
 from baldur.core.exceptions import ConfigurationError
 
 
@@ -77,29 +83,35 @@ def patched_eager_backend(tmp_path, monkeypatch):
         }
 
 
-def _scaffold_init_subdeps():
+def _scaffold_init_subdeps(*, run_pro_extensions: bool = False):
     """Patch every other init() sub-step except _wire_registry_defaults.
 
     Returns a context manager that, when entered, isolates the wiring step
     from event-bus / shutdown-handler / scheduler / admin server side
     effects so the integration test sees a clean signal.
+
+    ``run_pro_extensions`` keeps the real hook discovery, for cases that
+    install their own ``baldur.bootstrap_hooks`` entry point.
     """
     from baldur import bootstrap
 
-    return patch.multiple(
-        bootstrap,
-        _validate_startup_config=MagicMock(),
-        _register_default_event_handlers=MagicMock(),
-        _init_bridge_instrumentation=MagicMock(),
-        _register_shutdown_handlers=MagicMock(),
-        _run_pro_extensions=MagicMock(return_value=bootstrap.ExtensionResult()),
-        _apply_audit_default_provider=MagicMock(),
-        _start_audit_pipeline_if_enabled=MagicMock(),
-        _record_env_snapshot=MagicMock(),
-        _start_default_scheduler=MagicMock(),
-        _register_sql_statistics_if_available=MagicMock(),
-        _start_admin_server_if_enabled=MagicMock(),
-    )
+    stubs = {
+        "_validate_startup_config": MagicMock(),
+        "_register_default_event_handlers": MagicMock(),
+        "_init_bridge_instrumentation": MagicMock(),
+        "_register_shutdown_handlers": MagicMock(),
+        "_apply_audit_default_provider": MagicMock(),
+        "_start_audit_pipeline_if_enabled": MagicMock(),
+        "_record_env_snapshot": MagicMock(),
+        "_start_default_scheduler": MagicMock(),
+        "_register_sql_statistics_if_available": MagicMock(),
+        "_start_admin_server_if_enabled": MagicMock(),
+    }
+    if not run_pro_extensions:
+        stubs["_run_pro_extensions"] = MagicMock(
+            return_value=bootstrap.ExtensionResult()
+        )
+    return patch.multiple(bootstrap, **stubs)
 
 
 # =============================================================================
@@ -442,6 +454,335 @@ class TestInitGroupBIntegration:
         assert ProviderRegistry.recovery_session_repo.get_default_name() == "sql"
         assert ProviderRegistry.recovery_session_repo.get_default_name() == "sql"
         assert ProviderRegistry.security_repo.get_default_name() == "sql"
+
+
+# =============================================================================
+# 801 D1/D2 — the production requirements read what the PRO hook settled
+# =============================================================================
+
+
+class _HookEntryPoint:
+    """A ``baldur.bootstrap_hooks`` entry point standing in for PRO's."""
+
+    name = "fake_pro_hook"
+
+    def __init__(self, hook):
+        self._hook = hook
+
+    def load(self):
+        return self._hook
+
+
+def _bootstrap_hooks(*hooks):
+    """``entry_points`` answering the bootstrap-hook group with ``hooks`` only.
+
+    Any other group is answered by the real function, so the installed PRO
+    distribution's own hook never runs in these cases.
+    """
+    real_entry_points = importlib.metadata.entry_points
+
+    def _entry_points(**kwargs):
+        if kwargs.get("group") == "baldur.bootstrap_hooks":
+            return [_HookEntryPoint(hook) for hook in hooks]
+        return real_entry_points(**kwargs)
+
+    return patch("importlib.metadata.entry_points", _entry_points)
+
+
+def _revalidate_entitlement():
+    """What PRO's hook does first: re-validate the licence with ``force=True``."""
+    from baldur.core.entitlement import get_entitlement_status
+
+    get_entitlement_status(force=True)
+
+
+def _turn_audit_on():
+    """What PRO's hook does for an entitled process whose operator left audit
+    unset: switch the audit trail on."""
+    from baldur.settings.audit import set_audit_settings
+
+    set_audit_settings(enabled=True)
+
+
+def _active_entitlement():
+    from baldur.core.entitlement import (
+        EntitlementClaims,
+        EntitlementResult,
+        EntitlementStatus,
+    )
+
+    return EntitlementResult(
+        status=EntitlementStatus.ACTIVE,
+        claims=EntitlementClaims(
+            customer_id="cust_test",
+            org="test-org",
+            tier="PRO",
+            plan="monthly",
+            issued_at="2020-01-01",
+            expires="2999-12-31",
+        ),
+    )
+
+
+class TestInitPostHookRequirementsIntegration:
+    """801 D1/D2 — ``init()`` checks the key and the store after the PRO hook.
+
+    The hook re-validates the licence with ``force=True`` and may turn audit
+    on. A verdict read earlier can be a MISSING cached before the token reached
+    the environment (an import-time read, then a dotenv or Django-settings
+    token). These cases run the real hook discovery with a stand-in hook and
+    the real cached validator, so the requirement is shown to read the verdict
+    and the audit switch the hook left behind — not what was cached before it.
+    """
+
+    @pytest.fixture
+    def production_without_a_store(self, monkeypatch):
+        """prod + Redis set + no SQL, no Django, no licence source, audit unset."""
+        from baldur.core.entitlement import reset_entitlement_status
+        from baldur.settings.audit import reset_audit_settings
+        from baldur.settings.license import reset_entitlement_settings
+        from baldur.settings.secrets import reset_secrets_settings
+
+        monkeypatch.delenv("BALDUR_TEST_MODE", raising=False)
+        monkeypatch.setenv("BALDUR_ENVIRONMENT", "production")
+        monkeypatch.setenv("BALDUR_REDIS_URL", "redis://prod:6379/0")
+        for name in (
+            "BALDUR_SQL_DSN",
+            "DJANGO_SETTINGS_MODULE",
+            "BALDUR_AUDIT_ENABLED",
+            "BALDUR_LICENSE_KEY",
+            "BALDUR_LICENSE_FILE",
+            "BALDUR_SECRETS_AUDIT_SIGNING_KEY",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        # The requirement must be decided by the validator's cache.
+        monkeypatch.setattr(
+            "baldur.core.entitlement.get_entitlement_status",
+            _real_get_entitlement_status,
+        )
+        reset_entitlement_status()
+        reset_entitlement_settings()
+        reset_secrets_settings()
+        reset_audit_settings()
+        yield
+        reset_entitlement_status()
+        reset_entitlement_settings()
+        reset_audit_settings()
+
+    @staticmethod
+    def _prime_a_stale_missing_verdict():
+        """An import-time read taken before any licence reached the process."""
+        from baldur.core.entitlement import EntitlementStatus, is_entitlement_active
+
+        assert _real_get_entitlement_status().status is EntitlementStatus.MISSING
+        assert is_entitlement_active() is False
+
+    @staticmethod
+    def _as_if_pro_were_installed(monkeypatch):
+        """The public CI runs with PRO absent, and the entitlement predicate
+        answers "not entitled" from that alone, before the verdict. The cases
+        that refuse stop right after the hook, so nothing later reads it."""
+        monkeypatch.setattr("baldur.utils.tier.is_pro_installed", lambda: True)
+
+    def test_a_verdict_the_hook_turned_active_requires_the_signing_key(
+        self, production_without_a_store, patched_eager_backend, monkeypatch
+    ):
+        """
+        Purpose:
+            A MISSING cached before the hook must not waive the key once the
+            hook's forced read entitles the process (SC11).
+        Expected:
+            - init() raises ConfigurationError naming the signing-key variable
+        """
+        from baldur import bootstrap
+        from baldur.core import entitlement
+
+        self._as_if_pro_were_installed(monkeypatch)
+        self._prime_a_stale_missing_verdict()
+
+        with (
+            _scaffold_init_subdeps(run_pro_extensions=True),
+            _bootstrap_hooks(_revalidate_entitlement),
+            patch.object(
+                entitlement._EntitlementValidator,
+                "_do_validate",
+                autospec=True,
+                return_value=_active_entitlement(),
+            ),
+            pytest.raises(ConfigurationError) as exc_info,
+        ):
+            bootstrap.init()
+
+        assert "BALDUR_SECRETS_AUDIT_SIGNING_KEY" in str(exc_info.value)
+
+    def test_with_the_key_set_the_same_verdict_requires_a_store(
+        self, production_without_a_store, patched_eager_backend, monkeypatch
+    ):
+        """
+        Purpose:
+            With the key present, the hook's verdict still requires a SQL or
+            Django store rather than leaving the memory wiring in place (SC11).
+        Expected:
+            - init() raises ConfigurationError naming BALDUR_SQL_DSN
+        """
+        from baldur import bootstrap
+        from baldur.core import entitlement
+        from baldur.settings.secrets import reset_secrets_settings
+
+        monkeypatch.setenv("BALDUR_SECRETS_AUDIT_SIGNING_KEY", "audit-signing-key")
+        reset_secrets_settings()
+        self._as_if_pro_were_installed(monkeypatch)
+        self._prime_a_stale_missing_verdict()
+
+        with (
+            _scaffold_init_subdeps(run_pro_extensions=True),
+            _bootstrap_hooks(_revalidate_entitlement),
+            patch.object(
+                entitlement._EntitlementValidator,
+                "_do_validate",
+                autospec=True,
+                return_value=_active_entitlement(),
+            ),
+            pytest.raises(ConfigurationError) as exc_info,
+        ):
+            bootstrap.init()
+
+        assert "Neither BALDUR_SQL_DSN nor Django DATABASES" in str(exc_info.value)
+
+    def test_without_a_forced_read_the_stale_verdict_boots_on_memory(
+        self, production_without_a_store, patched_eager_backend
+    ):
+        """
+        Purpose:
+            Control for the two cases above: with no hook re-validating, the
+            cached MISSING stands, nothing requires the key or a store, and the
+            published OSS block boots.
+        Expected:
+            - init() returns; the incident stores run on memory
+        """
+        from baldur import bootstrap
+        from baldur.factory.registry import ProviderRegistry
+
+        self._prime_a_stale_missing_verdict()
+
+        with _scaffold_init_subdeps(run_pro_extensions=True), _bootstrap_hooks():
+            bootstrap.init()
+
+        for attr in ("recovery_session_repo", "security_repo", "postmortem_repo"):
+            assert getattr(ProviderRegistry, attr).get_default_name() == "memory"
+
+    def test_an_audit_switch_the_hook_turned_on_requires_the_signing_key(
+        self, production_without_a_store, patched_eager_backend, monkeypatch
+    ):
+        """
+        Purpose:
+            The key's condition is read after the hook, so audit turned on by
+            the hook counts, entitlement aside.
+        Expected:
+            - init() raises ConfigurationError naming the signing-key variable
+        """
+        from baldur import bootstrap
+
+        monkeypatch.setattr(
+            "baldur.core.entitlement.is_entitlement_active", lambda: False
+        )
+
+        with (
+            _scaffold_init_subdeps(run_pro_extensions=True),
+            _bootstrap_hooks(_turn_audit_on),
+            pytest.raises(ConfigurationError) as exc_info,
+        ):
+            bootstrap.init()
+
+        assert "BALDUR_SECRETS_AUDIT_SIGNING_KEY" in str(exc_info.value)
+
+
+# =============================================================================
+# 801 D6 — a provider the operator selected must construct, whatever its name
+# =============================================================================
+
+
+class TestInitOperatorSelectedBackendIntegration:
+    """801 D6 (re-queue Q9) — boot accepts a probe's ``redis`` / ``django``
+    unbuilt, but a name chosen through an override is always constructed.
+
+    A host may register its own dead-letter provider under ``django`` and
+    select it with ``BALDUR_DLQ_BACKEND``; skipping construction by name would
+    let an unbuildable one boot and then capture into memory.
+    """
+
+    @pytest.fixture
+    def unbuildable_host_provider(self, monkeypatch):
+        """A host provider registered as ``django`` on the dead-letter registry
+        that cannot be built, plus a production environment that needs
+        nothing else."""
+        from baldur.factory.registry import ProviderRegistry
+        from baldur.settings.audit import reset_audit_settings
+
+        built: list[int] = []
+
+        def _host_provider():
+            built.append(1)
+            raise ImportError("the host's dead-letter store is not installed")
+
+        monkeypatch.delenv("BALDUR_TEST_MODE", raising=False)
+        monkeypatch.setenv("BALDUR_ENVIRONMENT", "production")
+        monkeypatch.setenv("BALDUR_REDIS_URL", "redis://prod:6379/0")
+        monkeypatch.setenv("BALDUR_AUDIT_ENABLED", "false")
+        for name in ("BALDUR_SQL_DSN", "DJANGO_SETTINGS_MODULE", "BALDUR_DLQ_BACKEND"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr(
+            "baldur.core.entitlement.is_entitlement_active", lambda: False
+        )
+        reset_audit_settings()
+
+        with ProviderRegistry.failed_op_repo.snapshot():
+            ProviderRegistry.failed_op_repo.register("django", _host_provider)
+            ProviderRegistry.failed_op_repo.clear_instances()
+            yield built
+        reset_audit_settings()
+
+    def test_an_override_selecting_the_unbuildable_provider_refuses_boot(
+        self, unbuildable_host_provider, patched_eager_backend, monkeypatch
+    ):
+        """
+        Purpose:
+            ``BALDUR_DLQ_BACKEND=django`` names the host's provider, so boot
+            builds it and refuses when it cannot be built (SC5).
+        Expected:
+            - init() raises ConfigurationError naming the row, the provider
+              and the override
+        """
+        from baldur import bootstrap
+
+        monkeypatch.setenv("BALDUR_DLQ_BACKEND", "django")
+
+        with _scaffold_init_subdeps(), pytest.raises(ConfigurationError) as exc_info:
+            bootstrap.init()
+
+        message = str(exc_info.value)
+        assert "ProviderRegistry.failed_op_repo selected backend 'django'" in message
+        assert "BALDUR_DLQ_BACKEND" in message
+        assert unbuildable_host_provider == [1]
+
+    def test_without_the_override_the_chain_never_reaches_the_provider(
+        self, unbuildable_host_provider, patched_eager_backend
+    ):
+        """
+        Purpose:
+            The dead-letter chain is ``redis > sql > memory``; it never probes
+            ``django``, so the unbuildable provider is unreachable (SC5).
+        Expected:
+            - init() returns; the dead-letter store is redis; nothing was built
+        """
+        from baldur import bootstrap
+        from baldur.factory.registry import ProviderRegistry
+
+        with _scaffold_init_subdeps():
+            bootstrap.init()
+
+        assert ProviderRegistry.failed_op_repo.get_default_name() == "redis"
+        assert unbuildable_host_provider == []
 
 
 class TestInitRateLimitFallbackIntegration:

@@ -394,6 +394,138 @@ class TestWireSqlDjangoRegistryBehavior:
         assert recovery_session_registry_isolated.get_default_name() == "django"
 
 
+def _group_b_row():
+    """The ``recovery_session_repo`` wiring row as shipped (validation on)."""
+    from baldur import bootstrap
+
+    return next(
+        w
+        for w in bootstrap._REGISTRIES_TO_WIRE
+        if w.registry_attr == "recovery_session_repo"
+    )
+
+
+def _recording_provider(built: list[str], name: str, *, constructs: bool):
+    """A provider factory that records each construction and may fail it."""
+
+    def _build():
+        built.append(name)
+        if not constructs:
+            raise ImportError(f"baldur.sql: the {name} driver is not installed")
+        return object()
+
+    return _build
+
+
+class TestWireSqlDjangoRegistryValidationBehavior:
+    """801 D6 — the Group B helper constructs a ``sql`` selection at once.
+
+    A ``BALDUR_SQL_DSN`` whose driver is missing (or whose PostgreSQL DSN does
+    not parse) used to pass wiring and fail at the first incident write. The
+    helper now runs boot validation on the row it wired: production refuses,
+    elsewhere the row demotes to ``memory`` with a WARNING. A ``django``
+    selection is accepted unbuilt — its repositories need a ready app registry.
+    """
+
+    def test_sql_selection_is_constructed_once_at_wiring_time(
+        self, recovery_session_registry_isolated, fake_runtime
+    ):
+        from baldur import bootstrap
+
+        built: list[str] = []
+        recovery_session_registry_isolated.register(
+            "sql", _recording_provider(built, "sql", constructs=True)
+        )
+        recovery_session_registry_isolated.clear_instances()
+
+        bootstrap._wire_sql_django_registry(
+            recovery_session_registry_isolated,
+            _group_b_row(),
+            sql_set=True,
+            django_set=False,
+            runtime=fake_runtime(is_production=True),
+        )
+
+        assert built == ["sql"]
+        assert recovery_session_registry_isolated.get_default_name() == "sql"
+
+    def test_unbuildable_sql_selection_refuses_production_naming_the_dsn(
+        self, recovery_session_registry_isolated, fake_runtime
+    ):
+        from baldur import bootstrap
+
+        recovery_session_registry_isolated.register(
+            "sql", _recording_provider([], "sql", constructs=False)
+        )
+        recovery_session_registry_isolated.clear_instances()
+
+        with pytest.raises(ConfigurationError) as excinfo:
+            bootstrap._wire_sql_django_registry(
+                recovery_session_registry_isolated,
+                _group_b_row(),
+                sql_set=True,
+                django_set=False,
+                runtime=fake_runtime(is_production=True),
+            )
+
+        message = str(excinfo.value)
+        assert "ProviderRegistry.recovery_session_repo" in message
+        assert "BALDUR_SQL_DSN" in message
+
+    def test_unbuildable_sql_selection_outside_production_demotes_to_memory(
+        self, recovery_session_registry_isolated, fake_runtime
+    ):
+        from structlog.testing import capture_logs
+
+        from baldur import bootstrap
+
+        recovery_session_registry_isolated.register(
+            "sql", _recording_provider([], "sql", constructs=False)
+        )
+        recovery_session_registry_isolated.clear_instances()
+
+        with capture_logs() as logs:
+            bootstrap._wire_sql_django_registry(
+                recovery_session_registry_isolated,
+                _group_b_row(),
+                sql_set=True,
+                django_set=False,
+                runtime=fake_runtime(is_production=False),
+            )
+
+        assert recovery_session_registry_isolated.get_default_name() == "memory"
+        demoted = [
+            e for e in logs if e.get("event") == "baldur.registry_backend_demoted"
+        ]
+        assert [(e["requested"], e["backend"], e["log_level"]) for e in demoted] == [
+            ("sql", "memory", "warning")
+        ]
+
+    def test_django_selection_is_accepted_without_construction(
+        self, recovery_session_registry_isolated, fake_runtime
+    ):
+        """A Django repository imports its models in ``__init__``, which raises
+        before the app registry is ready — so boot never builds it."""
+        from baldur import bootstrap
+
+        built: list[str] = []
+        recovery_session_registry_isolated.register(
+            "django", _recording_provider(built, "django", constructs=False)
+        )
+        recovery_session_registry_isolated.clear_instances()
+
+        bootstrap._wire_sql_django_registry(
+            recovery_session_registry_isolated,
+            _group_b_row(),
+            sql_set=False,
+            django_set=True,
+            runtime=fake_runtime(is_production=True),
+        )
+
+        assert built == []
+        assert recovery_session_registry_isolated.get_default_name() == "django"
+
+
 # =============================================================================
 # 464 — _django_databases_configured signal probe
 # =============================================================================
