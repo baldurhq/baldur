@@ -306,11 +306,12 @@ def validate_required_secrets(secrets: SecretsSettings | None = None) -> dict:
     # variable and the condition that made it required.
     if production and result["critical"]:
         raise ConfigurationError(
-            "[Security] BALDUR_SECRETS_AUDIT_SIGNING_KEY is required in "
-            "production while the audit trail is on (BALDUR_AUDIT_ENABLED) "
-            "or a PRO entitlement is active: it keys every audit hash-chain "
-            "entry, so an actor without it cannot forge one. Set it to a "
-            "long random secret."
+            "[Security] "
+            "BALDUR_SECRETS_AUDIT_SIGNING_KEY is required in production "
+            "while the audit trail is on (BALDUR_AUDIT_ENABLED) or a PRO "
+            "entitlement is active: it keys every audit hash-chain entry, so "
+            "an actor without it cannot forge one. Set it to a long random "
+            "secret."
         )
 
     return result

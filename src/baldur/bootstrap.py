@@ -1999,8 +1999,9 @@ def _wire_redis_registry(
             else "BALDUR_REDIS_URL"
         )
         raise ConfigurationError(
-            f"{signals} is not set in production for "
-            f"ProviderRegistry.{adapter_type}. The framework cannot "
+            f"{signals} "
+            f"is not set in production for ProviderRegistry.{adapter_type}. "
+            "The framework cannot "
             "silently fall back to per-worker memory storage without "
             "breaking distributed guarantees. Set BALDUR_REDIS_URL=redis://"
             "<host>:<port>/<db>"
