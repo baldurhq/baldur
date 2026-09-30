@@ -5,7 +5,9 @@ Records a snapshot of Baldur related environment variables
 at system startup for audit and forensic analysis.
 
 Features:
-- Automatic masking of sensitive values (SECRET, PASSWORD, TOKEN, KEY, CREDENTIAL)
+- Automatic masking of sensitive values (SECRET, PASSWORD, TOKEN, KEY, CREDENTIAL,
+  webhook URLs, headers) and of any password embedded in a URL value
+  (``BALDUR_SQL_DSN``, ``BALDUR_REDIS_URL``)
 - SHA256 hash for change detection
 - Integration with AuditLogger via log_config_change
 - L1 Local Fallback: Critical log + JSON file if DB fails
@@ -45,7 +47,10 @@ TRACKED_PREFIXES: list[str] = [
     "CHAOS_",
 ]
 
-# Sensitive keywords (masking targets)
+# Sensitive keywords (masking targets). A variable whose name contains one is
+# recorded masked whole. WEBHOOK_URL and HEADERS name values that are
+# credentials without a sensitive word in the name: a Slack webhook URL
+# carries its secret in the path, a headers variable carries Authorization.
 SENSITIVE_KEYWORDS: list[str] = [
     "SECRET",
     "PASSWORD",
@@ -54,7 +59,11 @@ SENSITIVE_KEYWORDS: list[str] = [
     "CREDENTIAL",
     "API_KEY",
     "PRIVATE",
+    "WEBHOOK_URL",
+    "HEADERS",
 ]
+
+_MASKED_VALUE = "***MASKED***"
 
 # Fallback log file path
 FALLBACK_LOG_PATH = "logs/env_snapshot_fallback.jsonl"
@@ -89,11 +98,29 @@ def _get_metrics():
         return None, None
 
 
+def _mask_embedded_password(value: str) -> str:
+    """Mask a password embedded in a URL value (``scheme://user:pass@host``).
+
+    Connection URLs such as ``BALDUR_SQL_DSN`` and ``BALDUR_REDIS_URL`` carry
+    their credentials in the value, not in the name. A value the URL parser
+    rejects is masked whole rather than recorded.
+    """
+    from baldur.adapters.redis.connection_factory import mask_redis_url
+
+    try:
+        return mask_redis_url(value)
+    except ValueError:
+        return _MASKED_VALUE
+
+
 def collect_env_snapshot() -> dict[str, Any]:
     """
     Collect Baldur related environment variables snapshot.
 
-    Sensitive values are automatically masked for security.
+    Sensitive values are automatically masked for security: a variable whose
+    name contains a sensitive keyword is masked whole, and a password embedded
+    in any other value's URL (``postgresql://user:pass@host/db``) is replaced
+    by ``***``.
 
     Returns:
         dict: {
@@ -116,9 +143,9 @@ def collect_env_snapshot() -> dict[str, Any]:
         if any(key.startswith(prefix) for prefix in TRACKED_PREFIXES):
             # Mask sensitive values
             if any(kw in key.upper() for kw in SENSITIVE_KEYWORDS):
-                variables[key] = "***MASKED***"
+                variables[key] = _MASKED_VALUE
             else:
-                variables[key] = value
+                variables[key] = _mask_embedded_password(value)
 
     # Change-detection hash (computed over the masked values)
     sorted_items = sorted(variables.items())

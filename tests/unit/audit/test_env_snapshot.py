@@ -2,8 +2,8 @@
 Tests for Environment Variable Snapshot Audit.
 
 Tests:
-- collect_env_snapshot(): 환경변수 수집
-- log_env_snapshot_to_audit(): Audit 로깅 (primary + fallback)
+- collect_env_snapshot(): environment variable collection
+- log_env_snapshot_to_audit(): audit logging (primary + fallback)
 - Sensitive value masking
 - Hash generation for change detection
 - L1 Fallback (local file)
@@ -18,12 +18,14 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 
 class TestCollectEnvSnapshot:
     """Tests for collect_env_snapshot function."""
 
     def test_collect_tracked_prefixes(self):
-        """Tracked prefix가 있는 환경변수만 수집한다."""
+        """Only environment variables with a tracked prefix are collected."""
         from baldur.audit.env_snapshot import (
             collect_env_snapshot,
         )
@@ -53,7 +55,7 @@ class TestCollectEnvSnapshot:
             assert "DATABASE_URL" not in snapshot["variables"]
 
     def test_sensitive_values_are_masked(self):
-        """민감 키워드가 포함된 변수는 마스킹된다."""
+        """A variable whose name contains a sensitive keyword is masked."""
         from baldur.audit.env_snapshot import collect_env_snapshot
 
         with mock.patch.dict(
@@ -71,7 +73,7 @@ class TestCollectEnvSnapshot:
         ):
             snapshot = collect_env_snapshot()
 
-            # 민감 변수는 마스킹되어야 함
+            # Sensitive variables are masked
             assert snapshot["variables"]["BALDUR_SECRETS_KEY"] == "***MASKED***"
             assert snapshot["variables"]["BALDUR_API_KEY"] == "***MASKED***"
             assert snapshot["variables"]["BALDUR_PASSWORD"] == "***MASKED***"
@@ -79,11 +81,88 @@ class TestCollectEnvSnapshot:
             assert snapshot["variables"]["BALDUR_PRIVATE_KEY"] == "***MASKED***"
             assert snapshot["variables"]["BALDUR_CREDENTIAL"] == "***MASKED***"
 
-            # 비민감 변수는 원본 값 유지
+            # Non-sensitive variables keep their value
             assert snapshot["variables"]["BALDUR_DLQ_ENABLED"] == "true"
 
+    @pytest.mark.parametrize(
+        ("name", "value", "recorded"),
+        [
+            (
+                "BALDUR_SQL_DSN",
+                "postgresql://app:s3cretpw@db.internal:5432/app",
+                "postgresql://app:***@db.internal:5432/app",
+            ),
+            (
+                "BALDUR_REDIS_URL",
+                "redis://:s3cretpw@cache.internal:6379/0",
+                "redis://:***@cache.internal:6379/0",
+            ),
+            (
+                "BALDUR_LEADER_ELECTION_REDIS_URL",
+                "redis+sentinel://:s3cretpw@s1:26379,s2:26379/mymaster",
+                "redis+sentinel://:***@s1:26379,s2:26379/mymaster",
+            ),
+            ("BALDUR_REDIS_URL", "redis://cache.internal:6379/0", None),
+        ],
+        ids=["sql_dsn", "redis_url", "sentinel_url", "url_without_password"],
+    )
+    def test_a_password_embedded_in_a_url_value_is_masked(self, name, value, recorded):
+        """A connection URL carries its credential in the value, not the name.
+
+        The password is replaced and the rest of the URL is kept, so the
+        snapshot still says which host the process was pointed at; a URL
+        without a password is recorded as set.
+        """
+        from baldur.audit.env_snapshot import collect_env_snapshot
+
+        with mock.patch.dict(os.environ, {name: value}, clear=True):
+            snapshot = collect_env_snapshot()
+
+        assert snapshot["variables"][name] == (value if recorded is None else recorded)
+        assert "s3cretpw" not in json.dumps(snapshot)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "BALDUR_CHANNEL_TARGET_SLACK_WEBHOOK_URL",
+            "BALDUR_CHANNEL_TARGET_WEBHOOK_URLS",
+            "BALDUR_CHANNEL_TARGET_WEBHOOK_HEADERS",
+            "BALDUR_PROMETHEUS_HEADERS",
+        ],
+    )
+    def test_webhook_urls_and_headers_are_masked_whole(self, name):
+        """A webhook URL carries its secret in the path and a headers variable
+        carries Authorization; neither has a sensitive word in its name."""
+        from baldur.audit.env_snapshot import collect_env_snapshot
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                name: "https://hooks.example/services/T0/B0/s3cretpath",
+                "BALDUR_HTTP_CLIENT_WEBHOOK_TIMEOUT": "5",
+            },
+            clear=True,
+        ):
+            snapshot = collect_env_snapshot()
+
+        assert snapshot["variables"][name] == "***MASKED***"
+        assert snapshot["variables"]["BALDUR_HTTP_CLIENT_WEBHOOK_TIMEOUT"] == "5"
+
+    def test_a_value_the_url_parser_rejects_is_masked_whole(self):
+        """An unparsable value is withheld rather than recorded unmasked."""
+        from baldur.audit.env_snapshot import collect_env_snapshot
+
+        with mock.patch.dict(
+            os.environ,
+            {"BALDUR_REDIS_URL": "redis://:s3cretpw@[::1:6379/0"},
+            clear=True,
+        ):
+            snapshot = collect_env_snapshot()
+
+        assert snapshot["variables"]["BALDUR_REDIS_URL"] == "***MASKED***"
+
     def test_hash_generation(self):
-        """Hash가 올바르게 생성된다."""
+        """The hash is generated in the expected format."""
         from baldur.audit.env_snapshot import collect_env_snapshot
 
         with mock.patch.dict(
@@ -100,7 +179,7 @@ class TestCollectEnvSnapshot:
             assert len(snapshot["hash"]) == 23  # "sha256:" + 16 chars
 
     def test_hash_changes_with_values(self):
-        """값이 변경되면 Hash도 변경된다."""
+        """A changed value changes the hash."""
         from baldur.audit.env_snapshot import collect_env_snapshot
 
         with mock.patch.dict(
@@ -120,7 +199,7 @@ class TestCollectEnvSnapshot:
         assert snapshot1["hash"] != snapshot2["hash"]
 
     def test_hash_same_for_same_values(self):
-        """같은 값이면 Hash도 동일하다."""
+        """The same values give the same hash."""
         from baldur.audit.env_snapshot import collect_env_snapshot
 
         with mock.patch.dict(
@@ -134,7 +213,7 @@ class TestCollectEnvSnapshot:
         assert snapshot1["hash"] == snapshot2["hash"]
 
     def test_empty_env(self):
-        """Tracked 환경변수가 없으면 빈 결과 반환."""
+        """No tracked environment variable gives an empty result."""
         from baldur.audit.env_snapshot import collect_env_snapshot
 
         with mock.patch.dict(
@@ -153,7 +232,7 @@ class TestLogEnvSnapshotToAudit:
     """Tests for log_env_snapshot_to_audit function."""
 
     def test_logs_to_audit_service(self):
-        """환경변수 스냅샷이 Audit 서비스에 기록된다."""
+        """The environment snapshot is recorded through the audit service."""
         from baldur.audit.env_snapshot import log_env_snapshot_to_audit
 
         with mock.patch.dict(
@@ -175,7 +254,7 @@ class TestLogEnvSnapshotToAudit:
                 mock_log.assert_called_once()
 
     def test_skips_when_no_tracked_vars(self):
-        """Tracked 환경변수가 없으면 로깅하지 않는다."""
+        """Nothing is logged when no tracked environment variable is set."""
         from baldur.audit.env_snapshot import log_env_snapshot_to_audit
 
         with mock.patch.dict(
@@ -192,7 +271,7 @@ class TestLogEnvSnapshotToAudit:
                 mock_log.assert_not_called()
 
     def test_fallback_on_primary_failure(self):
-        """Primary 실패 시 L1 Fallback 활성화."""
+        """A primary failure activates the L1 fallback."""
         from baldur.audit.env_snapshot import log_env_snapshot_to_audit
 
         with mock.patch.dict(
@@ -214,7 +293,7 @@ class TestLogEnvSnapshotToAudit:
                     mock_fallback.assert_called_once()
 
     def test_returns_false_when_all_fail(self):
-        """Primary와 Fallback 모두 실패 시 False 반환."""
+        """Returns False when both the primary and the fallback fail."""
         from baldur.audit.env_snapshot import log_env_snapshot_to_audit
 
         with mock.patch.dict(
@@ -435,23 +514,23 @@ class TestPrometheusMetrics:
     """Tests for Prometheus metrics."""
 
     def test_get_metrics_without_prometheus(self):
-        """prometheus_client 없어도 동작한다."""
+        """Works without prometheus_client."""
         from baldur.audit.env_snapshot import _get_metrics
 
         with mock.patch.dict("sys.modules", {"prometheus_client": None}):
-            # _get_metrics가 None을 반환해야 함
+            # _get_metrics must not fail
             result = _get_metrics()
-            # prometheus_client가 설치되어 있을 수도 없을 수도 있으므로
-            # 결과가 tuple이거나 (None, None)이어야 함
+            # prometheus_client may or may not be installed, so
+            # the result is a tuple, possibly (None, None)
             assert result is not None
 
     def test_metrics_updated_on_success(self):
-        """성공 시 메트릭이 업데이트된다."""
+        """The metrics are updated on success."""
         from baldur.audit.env_snapshot import (
             log_env_snapshot_to_audit,
         )
 
-        # Mock Gauge 생성
+        # Build mock gauges
         mock_recorded = mock.Mock()
         mock_count = mock.Mock()
 
@@ -470,7 +549,7 @@ class TestPrometheusMetrics:
                 ):
                     log_env_snapshot_to_audit()
 
-                    # 메트릭이 설정되었는지 확인
+                    # The metrics were set
                     mock_recorded.set.assert_called_with(1)
                     mock_count.set.assert_called()
 
@@ -479,7 +558,7 @@ class TestEmitCriticalLog:
     """Tests for _emit_critical_log function."""
 
     def test_emits_fallback_status(self):
-        """Fallback 성공 시 FALLBACK 상태 로깅."""
+        """A successful fallback logs the FALLBACK status."""
         from baldur.audit.env_snapshot import _emit_critical_log
 
         snapshot = {
@@ -498,7 +577,7 @@ class TestEmitCriticalLog:
             assert call_kwargs["snapshot"] == "sha256:abc123"
 
     def test_emits_failed_status(self):
-        """모든 실패 시 FAILED 상태 로깅."""
+        """A total failure logs the FAILED status."""
         from baldur.audit.env_snapshot import _emit_critical_log
 
         snapshot = {
@@ -520,7 +599,7 @@ class TestGetEnvSnapshotSummary:
     """Tests for get_env_snapshot_summary function."""
 
     def test_returns_summary(self):
-        """요약 정보를 올바르게 반환한다."""
+        """Returns the summary."""
         from baldur.audit.env_snapshot import (
             TRACKED_PREFIXES,
             get_env_snapshot_summary,

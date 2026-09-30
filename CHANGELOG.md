@@ -26,6 +26,10 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A store falling back to process memory in production now logs a warning.
 - `BALDUR_TEST_MODE=true` in production now warns, naming the backend variables it ignores.
 
+### Security
+
+- The startup env snapshot no longer records URL passwords, webhook URLs or header values.
+
 ### Fixed
 
 - A `dlq=True` call that fails or times out without `retry=` is now parked in the dead-letter queue.
