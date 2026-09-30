@@ -2645,11 +2645,13 @@ def _wire_registry_defaults() -> None:
         )
 
     # Phase 3 — PRIORITY_CHAIN (probe-surface 473 D1 / 515 D6 +
-    # event_journal hybrid 570 D1). No production fail-loud in this phase:
-    # non-Django runtimes legitimately ship without the probe-surface
+    # event_journal hybrid 570 D1). No production refusal for an unmatched
+    # chain: non-Django runtimes legitimately ship without the probe-surface
     # adapters, SQLite-only deployments ship without Postgres, and
     # event_journal's production Redis guarantee is supplied transitively
-    # by the cache row (Phase 1) which already raised if Redis was unset.
+    # by the cache row (Phase 1) which already raised if Redis was unset. A
+    # row flagged eager_validate still refuses production when its selected
+    # backend cannot be constructed (_eager_validate_wired_backend).
     for wiring in _REGISTRIES_TO_WIRE:
         if wiring.backend_kind is not _BackendKind.PRIORITY_CHAIN:
             continue

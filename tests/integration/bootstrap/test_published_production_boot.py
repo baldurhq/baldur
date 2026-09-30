@@ -28,6 +28,10 @@ would make the case pass while the published block is short.
 The Django case writes its own minimal settings module rather than reusing the
 test app's, which sets ``BALDUR_TEST_MODE`` and every secret on import. No
 Redis server is needed: boot completes against a closed port.
+
+Test Categories:
+    A. Boot: each framework's published block boots ``init()`` in production.
+    B. Consistency: the four framework pages publish the same variables.
 """
 
 from __future__ import annotations
@@ -154,28 +158,67 @@ def _boot(case: str, page: str, tmp_path: Path) -> tuple[dict, dict[str, str]]:
     return json.loads(lines[0][len(_RESULT_MARKER) :]), published
 
 
-@pytest.mark.parametrize(
-    ("case", "page"),
-    [
-        ("django", "django"),
-        ("fastapi", "fastapi"),
-        ("flask", "flask"),
-        ("celery", "celery"),
-        ("plain", "fastapi"),
-    ],
-)
-def test_the_published_production_block_boots(case, page, tmp_path):
-    report, published = _boot(case, page, tmp_path)
-
-    assert report["production"] is True, f"{case}: did not boot in production"
-    assert report["test_mode"] is False, f"{case}: booted in test mode"
-    assert report["baldur_env"] == sorted(
-        name for name in published if name.startswith("BALDUR_")
-    ), f"{case}: the child saw BALDUR_* variables the block does not export"
+# =============================================================================
+# A. Boot
+# =============================================================================
 
 
-def test_every_page_publishes_the_same_production_variables():
-    """One requirement written four times must name the same variables."""
-    names = {page: sorted(_published_production_env(page)) for page in _FRAMEWORK_PAGES}
+class TestPublishedProductionBootIntegration:
+    """The published production block is sufficient for a production boot.
 
-    assert len({tuple(v) for v in names.values()}) == 1, names
+    Validates:
+    - ``init()`` returns with exactly the variables each page exports
+    - the child ran in production and not in test mode
+    - the child saw no ``BALDUR_*`` variable the block does not export
+    """
+
+    @pytest.mark.parametrize(
+        ("case", "page"),
+        [
+            ("django", "django"),
+            ("fastapi", "fastapi"),
+            ("flask", "flask"),
+            ("celery", "celery"),
+            ("plain", "fastapi"),
+        ],
+        ids=["django", "fastapi", "flask", "celery", "plain"],
+    )
+    def test_the_published_production_block_boots(self, case, page, tmp_path):
+        """
+        Purpose:
+            A reader who exports only what the page's "Going to production"
+            block lists gets a process that starts, in every framework.
+        Expected:
+            - the child exits 0 after ``init()``
+            - it reports production and not test mode
+            - its ``BALDUR_*`` names equal the block's
+        """
+        report, published = _boot(case, page, tmp_path)
+
+        assert report["production"] is True, f"{case}: did not boot in production"
+        assert report["test_mode"] is False, f"{case}: booted in test mode"
+        assert report["baldur_env"] == sorted(
+            name for name in published if name.startswith("BALDUR_")
+        ), f"{case}: the child saw BALDUR_* variables the block does not export"
+
+
+# =============================================================================
+# B. Consistency
+# =============================================================================
+
+
+class TestPublishedProductionBlocksAgreeIntegration:
+    """The four framework pages state one requirement."""
+
+    def test_every_page_publishes_the_same_production_variables(self):
+        """
+        Purpose:
+            One requirement written four times must not drift page by page.
+        Expected:
+            - every framework page's block exports the same variable names
+        """
+        names = {
+            page: sorted(_published_production_env(page)) for page in _FRAMEWORK_PAGES
+        }
+
+        assert len({tuple(v) for v in names.values()}) == 1, names

@@ -104,11 +104,16 @@ class TestProductionWALBootGateIntegration:
     def test_unwritable_default_dir_boots_production_with_a_live_wal(
         self, writable_dir_chain, deny_dir, wire_storage, monkeypatch
     ):
-        """Case (iii): the default falls back and production boots (801 D3).
-
-        The WAL is initialized and usable on the fallback — the same
-        durability class as the default path — so the gate accepts it and
-        announces it at WARNING instead of refusing.
+        """
+        Purpose:
+            Case (iii): the default falls back and production boots (801 D3).
+            The WAL is initialized and usable on the fallback — the same
+            durability class as the default path — so the gate accepts it and
+            announces it at WARNING instead of refusing.
+        Expected:
+            - the WAL is live on a fallback directory
+            - exactly one relocation WARNING naming the variable, the
+              configured directory and the directory in use
         """
         monkeypatch.delenv(WAL_DIR_ENV_VAR, raising=False)
         deny_dir(Path(DEFAULT_WAL_DIR))
@@ -147,9 +152,14 @@ class TestProductionWALBootGateIntegration:
     def test_no_writable_directory_anywhere_refuses_production_boot(
         self, writable_dir_chain, deny_dir, wire_storage, monkeypatch
     ):
-        """A read-only root filesystem with no writable mount: the WAL cannot
-        start anywhere, so production refuses and names the variable that
-        points it at a volume (801 D3, Risk R5)."""
+        """
+        Purpose:
+            A read-only root filesystem with no writable mount: the WAL cannot
+            start anywhere, so production refuses (801 D3, Risk R5).
+        Expected:
+            - ConfigurationError naming the variable that points the WAL at a
+              volume
+        """
         # Given — the default and every fallback step are unwritable
         monkeypatch.delenv(WAL_DIR_ENV_VAR, raising=False)
         deny_dir(Path(DEFAULT_WAL_DIR))
@@ -171,11 +181,12 @@ class TestProductionWALBootGateIntegration:
     def test_the_env_var_moves_a_relocated_wal_onto_the_chosen_dir(
         self, writable_dir_chain, deny_dir, wire_storage, monkeypatch, tmp_path
     ):
-        """The documented remedy: choosing a writable path explicitly is honored.
-
-        The fallback WARNING names this variable, so it has to actually work
-        — pointing it at any writable path makes the directory operator-chosen
-        and the WAL runs there.
+        """
+        Purpose:
+            The documented remedy: the fallback WARNING names this variable,
+            so choosing a writable path through it has to actually work.
+        Expected:
+            - the WAL runs on the chosen directory, not on a fallback
         """
         # Given — the shipped default is unwritable and the WAL relocates
         monkeypatch.delenv(WAL_DIR_ENV_VAR, raising=False)

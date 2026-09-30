@@ -207,10 +207,23 @@ def _audit_signing_key_required() -> bool:
     active entitlement. Read the entitlement after the PRO bootstrap hook
     has run: the hook re-validates it and turns audit on, so an earlier
     read can see neither.
+
+    An audit switch that cannot be read (an invalid ``BALDUR_AUDIT_*`` value)
+    counts as on: the key's safe direction is "required", and the settings
+    error must not let an entitled process boot and chain without it.
     """
     from baldur.settings.audit import get_audit_settings
 
-    if get_audit_settings().enabled:
+    try:
+        audit_on = get_audit_settings().enabled
+    except Exception as e:
+        logger.warning(
+            "security.audit_switch_read_failed",
+            error=str(e),
+            hint="Treating the audit trail as on, so the signing key is required.",
+        )
+        return True
+    if audit_on:
         return True
 
     from baldur.core.entitlement import is_entitlement_active

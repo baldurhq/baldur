@@ -399,11 +399,15 @@ class TestInitGroupBIntegration:
     def test_production_entitled_without_sql_or_django_raises(
         self, monkeypatch, patched_eager_backend
     ):
-        """prod + entitled + neither SQL/Django → ConfigurationError (801 D2).
-
-        An active PRO entitlement writes postmortems and security incidents
-        to this store, so production requires one; the requirement is
-        checked after the PRO hook, not by wiring.
+        """
+        Purpose:
+            An active PRO entitlement writes postmortems and security
+            incidents to the SQL/Django store, so production requires one;
+            the requirement is checked after the PRO hook, not by wiring
+            (801 D2).
+        Expected:
+            - prod + entitled + neither SQL nor Django: init() raises
+              ConfigurationError naming both signals and the entitlement
         """
         from baldur import bootstrap
 
@@ -420,10 +424,13 @@ class TestInitGroupBIntegration:
     def test_production_not_entitled_without_sql_or_django_boots_on_memory(
         self, monkeypatch, patched_eager_backend
     ):
-        """prod + not entitled + neither SQL/Django → boots, Group B on memory.
-
-        On OSS nothing writes these stores automatically, so the published
-        two-variable production block boots (801 D2).
+        """
+        Purpose:
+            On OSS nothing writes these stores automatically, so the
+            published two-variable production block boots (801 D2).
+        Expected:
+            - prod + not entitled + neither SQL nor Django: init() returns
+            - the three Group B stores are wired to memory
         """
         from baldur import bootstrap
         from baldur.factory.registry import ProviderRegistry

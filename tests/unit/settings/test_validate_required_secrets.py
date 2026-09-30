@@ -145,6 +145,62 @@ class TestValidateRequiredSecretsBehavior:
         assert result["critical"] == []
 
 
+class TestUnreadableAuditSwitchBehavior:
+    """An audit switch that cannot be read never waives the signing key.
+
+    Regression (801 verify): an invalid ``BALDUR_AUDIT_*`` value made
+    ``get_audit_settings()`` raise inside the tier decision; the boot step
+    re-raises only ``ConfigurationError`` and logs anything else, so an entitled
+    production process booted with no key and chained without one.
+    """
+
+    @pytest.fixture
+    def unreadable_audit_switch(self, keyed_chain_inputs, monkeypatch):
+        def _set(*, entitled: bool) -> None:
+            keyed_chain_inputs(production=True, audit_on=False, entitled=entitled)
+            # Below the field's lower bound, so the audit settings cannot build.
+            monkeypatch.setenv("BALDUR_AUDIT_RETENTION_DAYS", "7")
+            from baldur.settings.audit import reset_audit_settings
+
+            reset_audit_settings()
+
+        return _set
+
+    @_ENTITLED
+    def test_production_refuses_an_unset_key_when_the_audit_switch_cannot_be_read(
+        self, unreadable_audit_switch, entitled
+    ):
+        from structlog.testing import capture_logs
+
+        unreadable_audit_switch(entitled=entitled)
+
+        with (
+            capture_logs() as logs,
+            pytest.raises(ConfigurationError, match=_SIGNING_KEY_ENV),
+        ):
+            validate_required_secrets(_secrets(signing_key=""))
+
+        read_failures = [
+            log for log in logs if log["event"] == "security.audit_switch_read_failed"
+        ]
+        assert len(read_failures) == 1
+        assert read_failures[0]["log_level"] == "warning"
+
+    def test_the_boot_step_refuses_instead_of_logging_the_settings_error(
+        self, unreadable_audit_switch, monkeypatch
+    ):
+        """The proximate cause: the boot step swallows every non-ConfigurationError."""
+        from baldur.bootstrap import _validate_critical_secrets
+
+        unreadable_audit_switch(entitled=True)
+        monkeypatch.setattr(
+            "baldur.settings.secrets.get_secrets", lambda: _secrets(signing_key="")
+        )
+
+        with pytest.raises(ConfigurationError, match=_SIGNING_KEY_ENV):
+            _validate_critical_secrets()
+
+
 class TestValidateRequiredSecretsContract:
     """The production refusal text an operator acts on (801 D1)."""
 
