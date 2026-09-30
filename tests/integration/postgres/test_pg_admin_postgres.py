@@ -34,7 +34,8 @@ import pytest
 
 from baldur.adapters.postgres.admin import PgAdmin
 from baldur.adapters.postgres.sessions import dbapi_session_factory
-from tests.integration.conftest import DatabaseTestConfig
+
+from ..conftest import DatabaseTestConfig
 
 pytestmark = pytest.mark.requires_db
 

@@ -25,7 +25,8 @@ import pytest
 
 from baldur.adapters.database.sql_health import SQLDatabaseHealthAdapter
 from baldur.settings.sql import SQLDialect
-from tests.integration.conftest import DatabaseTestConfig
+
+from ..conftest import DatabaseTestConfig
 
 pytestmark = pytest.mark.requires_db
 
