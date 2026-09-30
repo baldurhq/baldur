@@ -79,6 +79,11 @@ class BaldurMiddleware:
     # CB domain name for actual database errors and pool circuit breaker
     CB_DATABASE_DOMAIN = "database"
 
+    # Seconds a 503 answered on the middleware's own refusal paths (open
+    # breaker, database connection error, an operator's Block) tells the
+    # client to wait before retrying.
+    REFUSAL_RETRY_AFTER_SECONDS = 30
+
     def __init__(self, get_response: Callable):
         """Initialize middleware."""
         from baldur.audit import AuditLogger
@@ -260,7 +265,7 @@ class BaldurMiddleware:
                 {
                     "error": "Service temporarily unavailable",
                     "code": "CIRCUIT_BREAKER_OPEN",
-                    "retry_after": 30,
+                    "retry_after": self.REFUSAL_RETRY_AFTER_SECONDS,
                     "dlq_stored": True,
                     "dlq_id": dlq_id,
                     "message": "Request has been queued for automatic retry when service recovers",
@@ -309,7 +314,7 @@ class BaldurMiddleware:
                     {
                         "error": "Service temporarily unavailable",
                         "code": "DB_CONNECTION_ERROR",
-                        "retry_after": 30,
+                        "retry_after": self.REFUSAL_RETRY_AFTER_SECONDS,
                         "dlq_stored": self._is_dlq_eligible(request),
                     },
                     status=503,
@@ -688,7 +693,9 @@ class BaldurMiddleware:
             row = self._cb_service.get_or_create_state(self._infer_domain(request.path))
             return is_operator_block_in_force(row)
         except Exception as e:
-            logger.debug("baldur_middleware.operator_block_check_failed", error=e)
+            # Not DEBUG: a failed check leaves an operator's Block unenforced
+            # under observe-only for this request — a protection bypass.
+            logger.warning("baldur_middleware.operator_block_check_failed", error=e)
             return False
 
     def _refuse_operator_block(self, request: HttpRequest) -> HttpResponse:
@@ -716,7 +723,7 @@ class BaldurMiddleware:
             {
                 "error": "Service temporarily unavailable",
                 "code": "CIRCUIT_BREAKER_OPEN",
-                "retry_after": 30,
+                "retry_after": self.REFUSAL_RETRY_AFTER_SECONDS,
                 "dlq_stored": False,
                 "dlq_id": None,
                 "message": "The service is blocked by an operator",

@@ -20,8 +20,10 @@ Verification techniques applied (§8):
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import json
+import os
 from collections.abc import Callable
 from typing import Any
 from unittest.mock import MagicMock
@@ -530,6 +532,18 @@ class TestSettlePendingChangesBehavior:
 
         assert committed == []
         assert not_applied == [change]
+
+    def test_settle_pending_changes_drops_a_record_inherited_across_fork(self):
+        """A record another pid made is in neither list: its maker decides it."""
+        inherited = dataclasses.replace(
+            self._pending("landed"), origin_pid=os.getpid() + 1
+        )
+
+        committed, not_applied = settle_pending_changes(
+            [inherited], _stamped({"enabled": False}, 2, "landed")
+        )
+
+        assert (committed, not_applied) == ([], [])
 
 
 class TestStoredVersionBehavior:

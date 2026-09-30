@@ -27,6 +27,8 @@ Verification techniques applied (§8):
 
 from __future__ import annotations
 
+import dataclasses
+import os
 from unittest.mock import patch
 
 import pytest
@@ -275,6 +277,15 @@ class TestSystemControlCasBehavior:
         assert first != second
         assert first != "peer"
 
+    def test_go_live_stamps_its_time_so_the_dry_run_group_changes(self, control_env):
+        """``disable_dry_run`` writes ``dry_run_disabled_at``, not only ``dry_run``."""
+        control_env.load(dry_run=True)
+
+        control_env.manager.disable_dry_run(actor=ACTOR)
+
+        assert control_env.stored()["dry_run"] is False
+        assert control_env.stored()["dry_run_disabled_at"] is not None
+
     def test_audit_records_the_stored_state_the_flip_replaced(self, control_env):
         """A stale copy never becomes the audit's old state."""
         # Given: this copy still says disabled; the store was re-enabled by a peer
@@ -340,6 +351,10 @@ class TestSystemControlCasBehavior:
         assert still_disabled is False
         assert control_env.manager.is_enabled() is True
         assert [c.kwargs["action"] for c in audit.call_args_list] == ["enable"]
+        # The audit's new state is what the store holds, not the copy the
+        # deciding pass had not yet replaced.
+        assert audit.call_args.kwargs["old_state"]["enabled"] is False
+        assert audit.call_args.kwargs["new_state"]["enabled"] is True
         assert control_env.kill_switch_events() == [
             (EventType.KILL_SWITCH_DEACTIVATED, "system_control")
         ]
@@ -386,7 +401,11 @@ class TestSystemControlHeldChangeBehavior:
     def test_held_change_whose_values_are_stored_commits_without_writing(
         self, control_env
     ):
-        """The stored group already carries the held values → committed, no write."""
+        """The stored group already carries the held values → committed, no write.
+
+        The values carry the held change's own timestamps, so it landed: its
+        audit runs once, from the state it was based on.
+        """
         # Given: the group the held disable would write is in the store already
         _hold_a_disable(control_env)
         held = control_env.manager._held["enabled"]
@@ -406,7 +425,8 @@ class TestSystemControlHeldChangeBehavior:
         assert control_env.manager.is_persist_dirty() is False
         assert len(control_env.store.cas_calls) == writes_before
         assert control_env.stored()[OCC_WRITER_FIELD] == "hand-copy"
-        audit.assert_not_called()
+        assert [c.kwargs["action"] for c in audit.call_args_list] == ["disable"]
+        assert audit.call_args.kwargs["old_state"]["enabled"] is True
 
     def test_held_change_over_an_unchanged_group_is_written(self, control_env):
         """The stored group still equals the held change's base → write it."""
@@ -482,6 +502,101 @@ class TestSystemControlHeldChangeBehavior:
         assert control_env.manager.is_persist_dirty() is False
         assert len(control_env.store.cas_calls) == writes_before
         assert control_env.stored()["enabled"] is False
+
+    def test_held_disable_that_landed_audits_the_state_it_was_based_on(
+        self, control_env
+    ):
+        """A retry that finds its own token audits the real prior state, not defaults."""
+        # Given: the brake was released at a known time, then a disable landed
+        # with its reply lost and was held
+        enabled_at = "2026-09-01T00:00:00+00:00"
+        control_env.load(enabled=True, enabled_at=enabled_at)
+        _make_landed_unknown(control_env.store)
+        control_env.manager.disable(actor=ACTOR, reason=REASON)
+
+        # When
+        with patch(_AUDIT) as audit:
+            control_env.refresh()
+
+        # Then
+        assert [c.kwargs["action"] for c in audit.call_args_list] == ["disable"]
+        old_state = audit.call_args.kwargs["old_state"]
+        assert (old_state["enabled"], old_state["enabled_at"]) == (True, enabled_at)
+
+    def test_held_disable_that_landed_before_an_unrelated_write_is_still_audited(
+        self, control_env
+    ):
+        """A peer's dry-run write over the landed disable does not erase its audit."""
+        # Given: a disable landed with its reply lost, then a peer toggled dry-run
+        # over it (the stored token is the peer's, the enabled group is ours)
+        control_env.load(enabled=True)
+        _make_landed_unknown(control_env.store)
+        control_env.manager.disable(actor=ACTOR, reason=REASON)
+        landed = dict(control_env.stored())
+        control_env.seed(
+            version=landed[OCC_VERSION_FIELD] + 1,
+            **{
+                **SystemState.from_dict(landed).to_dict(),
+                "dry_run": True,
+                "dry_run_enabled_at": "2026-10-01T00:00:00+00:00",
+            },
+        )
+
+        # When
+        with patch(_AUDIT) as audit:
+            control_env.refresh()
+
+        # Then: committed once, with its audit and the fleet-wide event
+        assert control_env.manager.is_persist_dirty() is False
+        assert [c.kwargs["action"] for c in audit.call_args_list] == ["disable"]
+        assert audit.call_args.kwargs["old_state"]["enabled"] is True
+        assert (
+            EventType.KILL_SWITCH_ACTIVATED,
+            "system_control",
+        ) in control_env.kill_switch_events()
+
+    def test_go_live_elsewhere_after_a_held_dry_run_is_never_undone(self, control_env):
+        """An operator's later go-live served by a peer wins over a held dry-run."""
+        # Given: dry-run on is held here; a peer then goes live — the stored
+        # dry_run value is unchanged, but the go-live stamps its time
+        control_env.load(dry_run=False)
+        _make_not_applied(control_env.store)
+        control_env.manager.enable_dry_run(actor=ACTOR)
+        control_env.store.fail_writes = None
+        control_env.seed(
+            version=2, dry_run=False, dry_run_disabled_at="2026-10-01T01:00:00+00:00"
+        )
+
+        # When
+        control_env.refresh()
+
+        # Then: the held dry-run is dropped, the fleet stays live
+        assert control_env.stored()["dry_run"] is False
+        assert control_env.manager.is_dry_run() is False
+        assert control_env.manager.is_persist_dirty() is False
+
+    def test_held_change_inherited_across_fork_is_dropped_never_retried(
+        self, control_env
+    ):
+        """A fork child holds nothing it did not make: no retry, no brake, no dirty."""
+        # Given: the parent's held disable, as a fork child inherits it
+        _hold_a_disable(control_env)
+        held = control_env.manager._held["enabled"]
+        control_env.manager._held["enabled"] = dataclasses.replace(
+            held, origin_pid=os.getpid() + 1
+        )
+        writes_before = len(control_env.store.cas_calls)
+
+        # When
+        dirty_before_pass = control_env.manager.is_persist_dirty()
+        control_env.refresh()
+
+        # Then: nothing written; the copy follows the store
+        assert dirty_before_pass is False
+        assert len(control_env.store.cas_calls) == writes_before
+        assert control_env.stored()["enabled"] is True
+        assert control_env.manager.is_enabled() is True
+        assert control_env.manager._held == {}
 
     def test_held_change_is_announced_once_then_debug_per_retry_then_info(
         self, control_env

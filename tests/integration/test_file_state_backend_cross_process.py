@@ -16,6 +16,11 @@ against a shared temporary directory:
   one of them commits.
 
 No infrastructure beyond the local filesystem.
+
+Test Categories:
+    A. Concurrent writers (TestFileStateBackendCrossProcessBehavior):
+        - interleaved conditional writes leave the key readable, no lost update
+        - exactly one of two writers based on one version commits
 """
 
 from __future__ import annotations
@@ -89,7 +94,15 @@ class TestFileStateBackendCrossProcessBehavior:
     def test_interleaved_writes_leave_the_key_readable_with_no_lost_update(
         self, store_dir
     ):
-        """200 racing CAS attempts: the stored version is exactly the commit count."""
+        """
+        Purpose:
+            Two processes racing conditional writes of one key keep it readable and lose
+            no committed write.
+        Expected:
+            - neither writer process reports an error
+            - the stored version equals the number of commits
+            - no ``*.partial`` temp is left behind and no ``*.tmp`` file is created
+        """
         # When
         summaries = _run_writers(store_dir, "interleave", _ATTEMPTS_PER_WRITER)
 
@@ -104,7 +117,15 @@ class TestFileStateBackendCrossProcessBehavior:
         assert list(store_dir.glob("*.tmp")) == []
 
     def test_exactly_one_of_two_writers_based_on_one_version_commits(self, store_dir):
-        """Every round has one winner — never two, never none."""
+        """
+        Purpose:
+            Two writers in two processes based on the same version: exactly one commits
+            each round.
+        Expected:
+            - neither writer process reports an error
+            - every round has exactly one winner
+            - the stored version advances by exactly one per round
+        """
         # Given: the key at version 7
         FileStateBackend(store_dir).set(_KEY, {"seed": True, OCC_VERSION_FIELD: 7})
 

@@ -37,7 +37,6 @@ def mock_manager():
     manager = MagicMock()
     manager._recovery_thread = None
     manager.stop_gradual_recovery = MagicMock()
-    manager.stop_gradual_recovery_on_shutdown = MagicMock()
     return manager
 
 

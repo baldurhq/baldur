@@ -25,7 +25,8 @@ Configuration:
 from __future__ import annotations
 
 import dataclasses
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Final
 
@@ -44,7 +45,6 @@ from baldur.core.state_backend import (
     StateBackend,
     VersionedWriteOutcome,
     VersionedWriteResult,
-    carries_writer_token,
     get_state_backend,
     new_writer_token,
     settle_pending_changes,
@@ -105,6 +105,7 @@ class SystemState(SerializableMixin):
     enabled_by: str | None = None
     dry_run_enabled_at: str | None = None
     dry_run_enabled_by: str | None = None
+    dry_run_disabled_at: str | None = None
 
 
 # State key for backend storage
@@ -124,7 +125,10 @@ APPLIES_NONE: Final = "none"
 # on its group only, so an unrelated write (a peer's dry-run toggle) never
 # costs the operator a pulled brake.
 _ENABLED_GROUP: Final = ("enabled", "enabled_at", "disabled_at")
-_DRY_RUN_GROUP: Final = ("dry_run", "dry_run_enabled_at")
+# Each group carries a timestamp that every change of that switch stamps, so a
+# change of the switch always changes the group: a go-live that only rewrote
+# ``dry_run: False`` would be invisible to a held dry-run-on based on it.
+_DRY_RUN_GROUP: Final = ("dry_run", "dry_run_enabled_at", "dry_run_disabled_at")
 
 # The outcome fields every change response carries.
 _RESPONSE_FIELDS: Final = (
@@ -173,7 +177,9 @@ class _HeldChange:
     process lives. Every retry compares the stored group with ``values``
     (already there → committed) and ``base`` (unchanged since the change was
     made → write); anything else means a change this process did not see, which
-    wins.
+    wins. ``base_state`` is the whole state the change was based on — the state
+    a commit replaced when no retry read it. A ``fork()`` child does not
+    inherit the change: it belongs to ``origin_pid``.
     """
 
     action: str
@@ -184,7 +190,9 @@ class _HeldChange:
     token: str
     actor: str
     reason: str
+    base_state: SystemState = field(default_factory=SystemState)
     unknown_attempt: bool = False
+    origin_pid: int = field(default_factory=os.getpid)
 
 
 def _state_from(stored: dict[str, Any] | None) -> SystemState:
@@ -316,7 +324,7 @@ class SystemControlManager(EventEmitterMixin):
         True means this process applies a kill switch or dry-run that other
         processes do not see; it is retried on every refresh pass.
         """
-        return bool(self._held)
+        return bool(self._own_held())
 
     def is_state_known(self) -> bool:
         """Whether this process has read the switch state from the store at least once."""
@@ -426,10 +434,11 @@ class SystemControlManager(EventEmitterMixin):
         Raises:
             SystemControlStoreError: The store did not confirm the change.
         """
+        now = utc_now().isoformat()
         return self._flip(
             action="disable_dry_run",
             group=_DRY_RUN_GROUP,
-            updates={"dry_run": False},
+            updates={"dry_run": False, "dry_run_disabled_at": now},
             actor=actor,
             reason="go_live",
             acts_less=False,
@@ -453,9 +462,15 @@ class SystemControlManager(EventEmitterMixin):
             withdrew = withdrawn is not None
             if result.committed:
                 local_before = self._snapshot
-                self._assign_local(_state_from(result.after))
+                after = _state_from(result.after)
+                self._assign_local(after)
                 self._run_commit_side_effects(
-                    action, _state_from(result.before), local_before, actor, reason
+                    action,
+                    _state_from(result.before),
+                    after,
+                    local_before,
+                    actor,
+                    reason,
                 )
                 return SystemControlChange(
                     self._copy_state(),
@@ -565,6 +580,7 @@ class SystemControlManager(EventEmitterMixin):
             token=result.token,
             actor=actor,
             reason=reason,
+            base_state=base_state,
             unknown_attempt=unknown,
         )
         set_sc_persist_dirty(True)
@@ -586,8 +602,11 @@ class SystemControlManager(EventEmitterMixin):
     def _withdraw_held(self, group: tuple[str, ...]) -> _HeldChange | None:
         """Withdraw this process's held change of ``group``. Caller holds ``_flip_lock``."""
         withdrawn = self._held.pop(group[0], None)
+        if withdrawn is not None and withdrawn.origin_pid != os.getpid():
+            # Inherited across fork: never this process's change to withdraw.
+            withdrawn = None
         if withdrawn is not None:
-            set_sc_persist_dirty(bool(self._held))
+            set_sc_persist_dirty(bool(self._own_held()))
             logger.info(
                 "system_control.held_change_withdrawn",
                 action=withdrawn.action,
@@ -606,16 +625,27 @@ class SystemControlManager(EventEmitterMixin):
             return dataclasses.replace(current, **held.updates).to_dict()
         return Declined("changed_since_held")
 
+    def _own_held(self) -> dict[str, _HeldChange]:
+        """The held changes this process made (a ``fork()`` child made none)."""
+        pid = os.getpid()
+        return {k: h for k, h in self._held.items() if h.origin_pid == pid}
+
     def _retry_held_changes(self, backend: StateBackend) -> dict[str, Any] | None:
         """Retry every held change; returns a fresher stored value when one declined.
 
         Runs inside a refresh pass. ``_flip_lock`` is taken by try-acquire: a
-        flip in progress keeps the held groups as they are for this pass.
+        flip in progress keeps the held groups as they are for this pass. A
+        change inherited across ``fork()`` is dropped here, never retried: it is
+        held only in the process that made it.
         """
         if not self._held or not self._flip_lock.acquire(blocking=False):
             return None
         fresher: dict[str, Any] | None = None
         try:
+            own = self._own_held()
+            if len(own) != len(self._held):
+                self._held = own
+                set_sc_persist_dirty(bool(own))
             for group_name, held in list(self._held.items()):
                 result = update_versioned(
                     backend,
@@ -630,15 +660,26 @@ class SystemControlManager(EventEmitterMixin):
                         "system_control.persist_retry_succeeded", action=held.action
                     )
                     local_before = self._snapshot
-                    self._assign_local(_state_from(result.after))
-                    if carries_writer_token(result.after, held.token):
-                        self._run_commit_side_effects(
-                            held.action,
-                            _state_from(result.before),
-                            local_before,
-                            held.actor,
-                            held.reason,
-                        )
+                    after = _state_from(result.after)
+                    self._assign_local(after)
+                    # The stored group carries this change's values, whose
+                    # timestamps are its own: it landed — through this retry, or
+                    # through an earlier attempt whose reply was lost. Its side
+                    # effects run now, from the state it replaced: the one this
+                    # retry read before writing, else the state it was based on.
+                    before = (
+                        None if result.before is None else _state_from(result.before)
+                    )
+                    if before is None or _group_values(before, held.group) != held.base:
+                        before = held.base_state
+                    self._run_commit_side_effects(
+                        held.action,
+                        before,
+                        after,
+                        local_before,
+                        held.actor,
+                        held.reason,
+                    )
                 elif result.outcome is VersionedWriteOutcome.DECLINED:
                     del self._held[group_name]
                     set_sc_persist_dirty(bool(self._held))
@@ -700,7 +741,11 @@ class SystemControlManager(EventEmitterMixin):
         reason: str,
         stored: dict[str, Any],
     ) -> None:
-        self._run_commit_side_effects(action, before, self._snapshot, actor, reason)
+        # The new state is the one the store holds, not this process's copy:
+        # the pass that decides a pending change assigns its read afterwards.
+        self._run_commit_side_effects(
+            action, before, _state_from(stored), self._snapshot, actor, reason
+        )
 
     # =========================================================================
     # Commit side effects
@@ -710,11 +755,18 @@ class SystemControlManager(EventEmitterMixin):
         self,
         action: str,
         before: SystemState,
+        after: SystemState,
         local_before: SystemState,
         actor: str,
         reason: str,
     ) -> None:
-        """Audit, metrics, log and event of a committed flip, from the state it replaced."""
+        """Audit, metrics, log and event of a committed flip.
+
+        ``before`` is the stored state the flip replaced and ``after`` the
+        stored state it wrote; ``local_before`` is this process's copy before
+        the flip was applied here (it decides whether this process's
+        subscribers still need the transition).
+        """
         record_sc_state_change(action)
         handlers = {
             "enable": self._record_enable,
@@ -722,10 +774,15 @@ class SystemControlManager(EventEmitterMixin):
             "enable_dry_run": self._record_dry_run_enabled,
             "disable_dry_run": self._record_dry_run_disabled,
         }
-        handlers[action](before, local_before, actor, reason)
+        handlers[action](before, after, local_before, actor, reason)
 
     def _record_enable(
-        self, before: SystemState, local_before: SystemState, actor: str, reason: str
+        self,
+        before: SystemState,
+        after: SystemState,
+        local_before: SystemState,
+        actor: str,
+        reason: str,
     ) -> None:
         if not before.enabled and before.disabled_at:
             try:
@@ -744,14 +801,17 @@ class SystemControlManager(EventEmitterMixin):
                 actor=actor,
                 value=reason or "N/A",
             )
-            self._log_audit(
-                "enable", actor, before.to_dict(), self._snapshot.to_dict(), reason
-            )
+            self._log_audit("enable", actor, before.to_dict(), after.to_dict(), reason)
         if not local_before.enabled or not before.enabled:
             self._emit_kill_switch_event(activated=False, actor=actor, reason=reason)
 
     def _record_disable(
-        self, before: SystemState, local_before: SystemState, actor: str, reason: str
+        self,
+        before: SystemState,
+        after: SystemState,
+        local_before: SystemState,
+        actor: str,
+        reason: str,
     ) -> None:
         record_sc_disabled()
         if before.enabled:
@@ -760,14 +820,17 @@ class SystemControlManager(EventEmitterMixin):
                 actor=actor,
                 value=reason or "N/A",
             )
-            self._log_audit(
-                "disable", actor, before.to_dict(), self._snapshot.to_dict(), reason
-            )
+            self._log_audit("disable", actor, before.to_dict(), after.to_dict(), reason)
         if local_before.enabled or before.enabled:
             self._emit_kill_switch_event(activated=True, actor=actor, reason=reason)
 
     def _record_dry_run_enabled(
-        self, before: SystemState, local_before: SystemState, actor: str, reason: str
+        self,
+        before: SystemState,
+        after: SystemState,
+        local_before: SystemState,
+        actor: str,
+        reason: str,
     ) -> None:
         if not before.dry_run:
             logger.info("system_control.dry_run_mode_enabled", actor=actor)
@@ -775,12 +838,17 @@ class SystemControlManager(EventEmitterMixin):
                 "enable_dry_run",
                 actor,
                 before.to_dict(),
-                self._snapshot.to_dict(),
+                after.to_dict(),
                 "dry_run_mode",
             )
 
     def _record_dry_run_disabled(
-        self, before: SystemState, local_before: SystemState, actor: str, reason: str
+        self,
+        before: SystemState,
+        after: SystemState,
+        local_before: SystemState,
+        actor: str,
+        reason: str,
     ) -> None:
         if before.dry_run:
             logger.warning("system_control.dry_run_mode_disabled", actor=actor)
@@ -788,7 +856,7 @@ class SystemControlManager(EventEmitterMixin):
                 "disable_dry_run",
                 actor,
                 before.to_dict(),
-                self._snapshot.to_dict(),
+                after.to_dict(),
                 "go_live",
             )
 
@@ -846,7 +914,7 @@ class SystemControlManager(EventEmitterMixin):
     # =========================================================================
 
     def _overlay_held(self, state: SystemState) -> SystemState:
-        for held in self._held.values():
+        for held in self._own_held().values():
             state = dataclasses.replace(state, **held.updates)
         return state
 

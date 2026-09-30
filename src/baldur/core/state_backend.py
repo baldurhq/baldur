@@ -29,7 +29,7 @@ import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final, Generic, TypeVar
@@ -1017,11 +1017,15 @@ class PendingChange:
         description: What the change was, for its log lines.
         on_committed: Runs the change's side effects once a read shows its
             token, with that read's stored state.
+        origin_pid: The process that made the change. A ``fork()`` child
+            inherits the record but never decides it: the side effects of one
+            change run in one process.
     """
 
     token: str
     description: str
     on_committed: Callable[[dict[str, Any]], None]
+    origin_pid: int = field(default_factory=os.getpid)
 
 
 def settle_pending_changes(
@@ -1030,10 +1034,14 @@ def settle_pending_changes(
     """Split ``pending`` into (committed, not applied) by the stored writer token.
 
     A change that landed and was overwritten before this read reads as not
-    applied: its token is gone, and nothing else identifies it.
+    applied: its token is gone, and nothing else identifies it. A record
+    inherited across ``fork()`` is in neither list — it is dropped, because the
+    process that made the change decides it.
     """
-    committed = [p for p in pending if carries_writer_token(stored, p.token)]
-    not_applied = [p for p in pending if not carries_writer_token(stored, p.token)]
+    pid = os.getpid()
+    own = [p for p in pending if p.origin_pid == pid]
+    committed = [p for p in own if carries_writer_token(stored, p.token)]
+    not_applied = [p for p in own if not carries_writer_token(stored, p.token)]
     return committed, not_applied
 
 

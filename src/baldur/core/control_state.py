@@ -508,7 +508,9 @@ class ControlStateRefresher:
                     if due and not state.stopped:
                         self._run_pass(state, due)
             except Exception as e:
-                logger.warning("control_state.pass_error", error=str(e))
+                # A store failure is recorded per key inside the pass; what
+                # reaches here is unexpected.
+                logger.exception("control_state.pass_error", error=str(e))
             handle = self._handle
             if handle is not None:
                 handle.observe_iteration(time.monotonic() - started_at)

@@ -25,6 +25,18 @@ the reach over the Redis store, and two Redis event-bus cases — a throttle Ful
 Stop another process emits reaches B and is never undone by B's passes, and a
 process started after the flip on the Redis bus still hears the brake from its
 own first pass.
+
+Test Categories:
+    A. Reach over the file store (TestControlStateCrossProcessBehavior):
+        - a running peer: kill switch and dry-run within the bound
+        - a peer that reads itself as a pre-fork master
+        - a peer whose refresher thread died
+        - a peer started after the flip announces the brake locally
+    B. Reach over the Redis store (TestControlStateCrossProcessRedisBehavior):
+        - a running peer within the bound
+    C. The Redis event bus (TestControlStateCrossProcessRedisBusBehavior):
+        - a throttle Full Stop is heard and never undone
+        - a peer started after the flip announces the brake locally
 """
 
 from __future__ import annotations
@@ -153,7 +165,15 @@ class TestControlStateCrossProcessBehavior:
     def test_kill_switch_and_dry_run_reach_a_running_peer_within_the_bound(
         self, shared_file_store
     ):
-        """No restart and no status read in B: the refresher delivers both flips."""
+        """
+        Purpose:
+            A kill-switch flip and a dry-run toggle made in A reach a running B.
+        Expected:
+            - B's refresher thread runs from its first ready report
+            - B's protected calls see the brake and the dry-run toggle within the reach
+              bound, with no restart and no status read in B
+            - B's request thread performs no store read; its refresher does
+        """
         # Given: B serving, switch up
         peer = shared_file_store.start_peer(PEER_STARTUP="load")
         ready = peer.next_event("ready", timeout=_READY_TIMEOUT_SECONDS)
@@ -189,7 +209,16 @@ class TestControlStateCrossProcessBehavior:
     def test_kill_switch_reaches_a_peer_that_reads_itself_as_a_prefork_master(
         self, shared_file_store
     ):
-        """``baldur.init()`` under gunicorn without the hook: no fork-source gate."""
+        """
+        Purpose:
+            A peer that ran ``baldur.init()`` under gunicorn without Baldur's hook reads
+            itself as a pre-fork master and still receives the flip (no fork-source
+            gate).
+        Expected:
+            - B reports itself as a fork source with a running refresher
+            - the brake reaches B within the reach bound
+            - B's request thread performs no store read
+        """
         peer = shared_file_store.start_peer(
             PEER_STARTUP="init", SERVER_SOFTWARE="gunicorn/23.0.0"
         )
@@ -213,7 +242,16 @@ class TestControlStateCrossProcessBehavior:
     def test_kill_switch_reaches_a_peer_whose_refresher_thread_died(
         self, shared_file_store
     ):
-        """The next read restarts a dead refresher; still one thread at a time."""
+        """
+        Purpose:
+            A peer whose refresher thread died gets a new one from its next read, and
+            the flip still reaches it.
+        Expected:
+            - B starts with no running refresher
+            - the brake reaches B within the reach bound
+            - B never runs more than one refresher thread at a time
+            - B's request thread performs no store read
+        """
         peer = shared_file_store.start_peer(PEER_STARTUP="load", PEER_KILL_THREAD="1")
         ready = peer.next_event("ready", timeout=_READY_TIMEOUT_SECONDS)
 
@@ -236,7 +274,16 @@ class TestControlStateCrossProcessBehavior:
     def test_peer_started_after_the_flip_announces_the_brake_to_its_own_subscribers(
         self, shared_file_store
     ):
-        """No event from A reaches B; B's own first pass tells B's subscribers."""
+        """
+        Purpose:
+            A peer started after the brake was pulled tells its own subscribers from its
+            first pass, with no event from A.
+        Expected:
+            - B starts disabled
+            - B's subscribers hear KILL_SWITCH_ACTIVATED from source system_control, and
+              no KILL_SWITCH_DEACTIVATED
+            - B's request thread performs no store read
+        """
         # Given: the brake was pulled before B existed
         shared_file_store.manager.disable(actor="operator-a", reason="incident")
 
@@ -280,7 +327,14 @@ class TestControlStateCrossProcessRedisBehavior:
     def test_kill_switch_reaches_a_running_peer_over_the_redis_store(
         self, shared_redis_store
     ):
-        """A flip written to Redis in A is honored by B within the bound."""
+        """
+        Purpose:
+            A flip written to the Redis store in A reaches B over the same store (multi-
+            host deployments).
+        Expected:
+            - the brake reaches B within the reach bound
+            - B's request thread performs no store read
+        """
         peer = shared_redis_store.start_peer(PEER_STARTUP="load")
         peer.next_event("ready", timeout=_READY_TIMEOUT_SECONDS)
 
@@ -325,7 +379,14 @@ class TestControlStateCrossProcessRedisBusBehavior:
     def test_throttle_full_stop_from_a_peer_is_heard_but_never_undone(
         self, shared_file_store, redis_bus_url
     ):
-        """A Full Stop reaches B over Redis; B's passes announce no DEACTIVATED."""
+        """
+        Purpose:
+            A throttle Full Stop emitted by A on the Redis bus (no switch flip) reaches
+            B and is never undone by B's refresh passes.
+        Expected:
+            - B hears KILL_SWITCH_ACTIVATED from source throttle
+            - B's passes publish no KILL_SWITCH_DEACTIVATED from source system_control
+        """
         # Given: B serving on the Redis bus, switch up
         peer = shared_file_store.start_peer(**_redis_bus_env(redis_bus_url))
         peer.next_event("ready", timeout=_READY_TIMEOUT_SECONDS)
@@ -363,7 +424,15 @@ class TestControlStateCrossProcessRedisBusBehavior:
     def test_peer_started_after_the_flip_announces_the_brake_on_the_redis_bus(
         self, shared_file_store, redis_bus_url
     ):
-        """No event reaches a process started later; its own first pass tells it."""
+        """
+        Purpose:
+            On the Redis bus, a process started after the flip hears the brake from its
+            own first pass, since no event from A reaches it.
+        Expected:
+            - B starts disabled
+            - B's subscribers hear KILL_SWITCH_ACTIVATED from source system_control
+            - B's request thread performs no store read
+        """
         shared_file_store.manager.disable(actor="operator-a", reason="incident")
 
         peer = shared_file_store.start_peer(**_redis_bus_env(redis_bus_url))

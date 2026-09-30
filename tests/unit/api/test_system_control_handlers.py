@@ -178,7 +178,7 @@ class TestSystemEnableBehavior:
 
     def test_enable_the_store_did_not_confirm_answers_503(self):
         """A re-enable that did not reach the store answers 503 with where it applies."""
-        manager = MagicMock()
+        manager = create_autospec(SystemControlManager, instance=True)
         manager.enable.side_effect = SystemControlStoreError(
             change="enable", persisted=False, applies="none", withdrew_held_change=True
         )
@@ -265,7 +265,7 @@ class TestSystemDisableBehavior:
 
     def test_held_disable_answers_503_this_process(self):
         """A kill switch held in this process only answers 503 and says so."""
-        manager = MagicMock()
+        manager = create_autospec(SystemControlManager, instance=True)
         manager.disable.return_value = SystemControlChange(
             state=_mock_state(enabled=False), persisted=False, applies="this_process"
         )

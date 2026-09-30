@@ -177,7 +177,10 @@ _MOCK_CREATION_BUDGETS: dict[str, int] = {
     # identity against the runtime singleton instead.
     # close write-through delegation: -1 — the close-check test's spec-less
     # mirror double became autospec patches of the two mirror methods.
-    "oss": 4313,
+    # control-state handler / shutdown mocks: -3 — the two new REST-outcome
+    # cases autospec the system-control manager, and the shutdown fixture's
+    # redundant spec-less attribute mock went (the fixture's mock supplies it).
+    "oss": 4310,
     "pro": 1800,
     "dormant": 401,
 }
