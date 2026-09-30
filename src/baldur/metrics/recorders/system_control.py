@@ -27,11 +27,12 @@ __all__ = [
     "record_sc_state_change",
     "record_sc_disabled_duration",
     "record_sc_disabled",
+    "set_control_state_refreshed",
 ]
 
 
 class SystemControlMetricRecorder(BaseMetricRecorder):
-    """System Control metric definitions and recording (6 methods).
+    """System Control metric definitions and recording (7 methods).
 
     DD-6: String interface for action labels.
     """
@@ -68,6 +69,12 @@ class SystemControlMetricRecorder(BaseMetricRecorder):
             f"{self.PREFIX}_system_control_disabled_total",
             "Cumulative disable count",
             [],
+        )
+        self._control_state_refreshed = get_or_create_gauge(
+            f"{self.PREFIX}_control_state_refreshed_timestamp_seconds",
+            "Unix time this process last read the control-state key from the "
+            "shared store (a stalled refresher leaves it behind)",
+            ["key"],
         )
 
     def set_enabled(self, enabled: bool) -> None:
@@ -114,6 +121,13 @@ class SystemControlMetricRecorder(BaseMetricRecorder):
             self._disabled_total.inc()
         except Exception as e:
             logger.warning("metrics.record_sc_disabled_failed", error=e)
+
+    def set_control_state_refreshed(self, key: str, timestamp: float) -> None:
+        """Set the last-successful-read timestamp of a control-state key."""
+        try:
+            self._control_state_refreshed.labels(key=key).set(timestamp)
+        except Exception as e:
+            logger.warning("metrics.set_control_state_refreshed_failed", error=e)
 
 
 # --- Module-level convenience functions (DD-7) ---
@@ -162,3 +176,9 @@ def record_sc_disabled() -> None:
     rec = _lazy_recorder()
     if rec:
         rec.record_disabled()
+
+
+def set_control_state_refreshed(key: str, timestamp: float) -> None:
+    rec = _lazy_recorder()
+    if rec:
+        rec.set_control_state_refreshed(key, timestamp)

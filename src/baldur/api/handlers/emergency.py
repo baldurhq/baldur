@@ -14,13 +14,21 @@ Endpoints:
     GET  /emergency/config/             Recovery gate config
     PUT  /emergency/config/             Update config (admin)
     GET  /emergency/levels/             Level definitions
+
+Every change response carries ``persisted``: ``true`` when the state store
+holds it. A change the store did not confirm is in force nowhere and answers
+503 with ``persisted`` ``false`` (not applied) or ``null`` (outcome unknown,
+decided by the next successful read of the store).
 """
 
 from __future__ import annotations
 
+from typing import Any
+
 import structlog
 
 from baldur.api.handlers._common import resolve_actor
+from baldur.core.exceptions import SystemControlStoreError
 from baldur.interfaces.web_framework import RequestContext, ResponseContext
 from baldur.utils.time import utc_now
 
@@ -84,6 +92,34 @@ def _recovery_gate_config_cls():
     return RecoveryGateConfig
 
 
+def _store_error_response(error: SystemControlStoreError) -> ResponseContext:
+    """503 for an emergency change the state store did not confirm."""
+    return ResponseContext.json(
+        {
+            "success": False,
+            "error": "state_store_unavailable",
+            "message": str(error),
+            "persisted": error.persisted,
+            "applies": error.applies,
+            "timestamp": utc_now().isoformat(),
+        },
+        status_code=503,
+    )
+
+
+def _refresh_status(manager: Any) -> dict[str, Any]:
+    """This process's read health of the emergency level (empty for an older PRO)."""
+    getter = getattr(manager, "get_refresh_status", None)
+    if not callable(getter):
+        return {}
+    try:
+        status = getter()
+    except Exception as e:
+        logger.debug("emergency_api.refresh_status_failed", error=str(e))
+        return {}
+    return status if isinstance(status, dict) else {}
+
+
 def emergency_status(ctx: RequestContext) -> ResponseContext:
     """GET /emergency/status/ — current state (viewer+)."""
     EMERGENCY_LEVEL_RULES, EmergencyLevel = _levels()
@@ -114,6 +150,7 @@ def emergency_status(ctx: RequestContext) -> ResponseContext:
                 {"name": level.value, "multipliers": EMERGENCY_LEVEL_RULES[level]}
                 for level in EmergencyLevel
             ],
+            **_refresh_status(manager),
             "timestamp": utc_now().isoformat(),
         }
     )
@@ -167,13 +204,16 @@ def emergency_trigger(ctx: RequestContext) -> ResponseContext:
 
     actor = resolve_actor(ctx)
     manager = _manager()
-    state = manager.activate_manual(
-        level=level,
-        reason=reason,
-        activated_by=actor,
-        duration_minutes=int(duration_minutes) if duration_minutes else None,
-        override_kill_switch=bool(override_kill_switch),
-    )
+    try:
+        state = manager.activate_manual(
+            level=level,
+            reason=reason,
+            activated_by=actor,
+            duration_minutes=int(duration_minutes) if duration_minutes else None,
+            override_kill_switch=bool(override_kill_switch),
+        )
+    except SystemControlStoreError as e:
+        return _store_error_response(e)
 
     logger.warning(
         "emergency_api.emergency_mode_activated",
@@ -190,6 +230,7 @@ def emergency_trigger(ctx: RequestContext) -> ResponseContext:
             "activated_by": actor,
             "expires_at": state.expires_at,
             "tier_multipliers": EMERGENCY_LEVEL_RULES[state.level],
+            "persisted": True,
             "timestamp": utc_now().isoformat(),
         }
     )
@@ -242,6 +283,8 @@ def emergency_release(ctx: RequestContext) -> ResponseContext:
             },
             status_code=409,
         )
+    except SystemControlStoreError as e:
+        return _store_error_response(e)
 
     logger.info(
         "emergency_api.emergency_mode_deactivated",
@@ -256,6 +299,7 @@ def emergency_release(ctx: RequestContext) -> ResponseContext:
             "previous_level": previous_level,
             "deactivated_by": actor,
             "forced": force,
+            "persisted": True,
             "timestamp": utc_now().isoformat(),
         }
     )
@@ -289,6 +333,8 @@ def gradual_recovery_start(ctx: RequestContext) -> ResponseContext:
             initiated_by=actor,
             target_level=target_level,
         )
+    except SystemControlStoreError as e:
+        return _store_error_response(e)
     except EmergencyStateError as e:
         return ResponseContext.json(
             {
@@ -306,6 +352,7 @@ def gradual_recovery_start(ctx: RequestContext) -> ResponseContext:
             "current_level": state.level.value,
             "target_level": target_level.value,
             "initiated_by": actor,
+            "persisted": True,
             "timestamp": utc_now().isoformat(),
         }
     )
@@ -318,7 +365,10 @@ def gradual_recovery_stop(ctx: RequestContext) -> ResponseContext:
     actor = resolve_actor(ctx)
 
     manager = _manager()
-    state = manager.stop_gradual_recovery(stopped_by=actor, reason=reason)
+    try:
+        state = manager.stop_gradual_recovery(stopped_by=actor, reason=reason)
+    except SystemControlStoreError as e:
+        return _store_error_response(e)
 
     return ResponseContext.json(
         {
@@ -326,6 +376,7 @@ def gradual_recovery_stop(ctx: RequestContext) -> ResponseContext:
             "status": "recovery_stopped",
             "current_level": state.level.value,
             "stopped_by": actor,
+            "persisted": True,
             "timestamp": utc_now().isoformat(),
         }
     )

@@ -102,7 +102,6 @@ state_backend_ttl:
   - {file: src/baldur/services/capacity_reservation/event_calendar.py, symbol: EventCalendar._persist, reason: 'pre-existing: receiver heuristic FP - not actually a StateBackend (e.g., metric gauge)', ticket: '506'}
   - {file: src/baldur/services/pending_config.py, symbol: PendingConfigService.create_pending_change, reason: '666 per-key pending storage: transient change keys with explicit lifecycle (apply/cancel delete + cleanup_expired); no fixed TTL because the scheduled delay is operator-variable', ticket: '666'}
   - {file: src/baldur/services/pending_config.py, symbol: PendingConfigService._migrate_legacy_blob, reason: '666 one-time legacy-blob migration: hydrates per-key change entries (same lifecycle as create_pending_change); no fixed TTL', ticket: '666'}
-  - {file: src/baldur/services/system_control.py, symbol: SystemControlManager._save_state, reason: 'pre-existing: receiver heuristic FP - not actually a StateBackend (e.g., metric gauge)', ticket: '506'}
 
 env_factory_bodies:
   - {file: "src/baldur/adapters/airgap/factory.py", reason: "pre-existing: OOS #453 named offender - pending BaldurRuntime migration", ticket: "506"}
@@ -342,7 +341,7 @@ dormant_import_boundary_count: 7
 # reclaimed. Give a new entry an ISO `YYYY-MM-DD` target_remove_by instead of
 # raising this number. Per-repo value: the two baselines are independently
 # scrubbed copies with no auto-sync (G41/G67 precedent).
-dateless_baseline_budget: 248
+dateless_baseline_budget: 247
 
 # G19 — tests/ may not module-level-import baldur_pro / baldur_dormant
 # without a `pytest.importorskip("baldur_pro")` (or "baldur_dormant") call

@@ -25,6 +25,26 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Production refuses a Redis or SQL backend that cannot be built: missing driver, unparsable DSN.
 - A store falling back to process memory in production now logs a warning.
 - `BALDUR_TEST_MODE=true` in production now warns, naming the backend variables it ignores.
+- A pulled kill switch steps retries, breaker trips and DLQ capture aside instead of refusing calls.
+- An operator's breaker Block stays enforced under dry-run and while the kill switch is pulled.
+- A kill-switch or dry-run flip reaches every process sharing the state store within about 5 s.
+- With no backend set, the state store is Redis when a Redis URL is named; file state is not moved.
+- Set `BALDUR_SYSTEM_CONTROL_BACKEND` before a rolling upgrade; restart file-store workers together.
+- A kill switch or dry-run the store cannot confirm is held in that process; the API answers 503.
+- A re-enable the store cannot confirm raises `SystemControlStoreError`; the API answers 503.
+- `enable()`, `disable()` and the dry-run toggles return `SystemControlChange`, not `SystemState`.
+- `get_execution_mode()` reports `shadow` while the kill switch is pulled.
+- The disable response describes what steps aside instead of claiming every operation stopped.
+
+### Added
+
+- `/system/status/` reports store reachability, state age, the refresher and the file-store path.
+- Gauge `baldur_control_state_refreshed_timestamp_seconds{key}`: each process's last store read.
+
+### Removed
+
+- `KillSwitchGuard` (resilience policies and retry handler); presets no longer add one.
+- `ThrottleGovernanceGuard` no longer refuses calls while the kill switch is pulled.
 
 ### Security
 
@@ -38,6 +58,9 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A Django app calling `configure_baldur()` no longer fails to start without prometheus-client.
 - FastAPI and Flask apply the `X-Deadline-Remaining` fast-fail without prometheus-client too.
 - A fallback answering an error no longer marks the idempotency key done (timeouts excepted).
+- A state-store outage no longer slows protected calls or makes `is_baldur_enabled()` raise.
+- Two processes writing the file state store at once no longer corrupt it.
+- A process holding a stale switch state no longer overwrites a newer flip.
 
 ## [1.16.0] - 2026-09-28
 

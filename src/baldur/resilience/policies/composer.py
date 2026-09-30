@@ -46,7 +46,7 @@ from typing import Any, Generic, TypeVar
 import structlog
 
 from baldur.core.exceptions import TimeoutPolicyError
-from baldur.core.execution_mode import get_execution_mode
+from baldur.core.execution_mode import resolve_execution_mode
 from baldur.interfaces.resilience_policy import (
     AsyncFailureSink,
     AsyncPolicyGuard,
@@ -431,11 +431,13 @@ def _trace_structural_control(policy_name: str, result: PolicyResult) -> None:
     logs it so the live block is visible in the trace alongside the suppressed
     interventions instead of a silent gap. Observation only — the control itself
     is unchanged. The non-success outcome is checked first, so the success path
-    never resolves the execution mode.
+    never resolves the execution mode. Quiet while the kill switch is pulled:
+    the trace is dry-run's timeline, not a per-call record under the brake.
     """
     if result.outcome not in (PolicyOutcome.REJECTED, PolicyOutcome.TIMEOUT):
         return
-    if get_execution_mode().should_execute:
+    mode, source = resolve_execution_mode()
+    if mode.should_execute or source == "kill_switch":
         return
     logger.info(
         "execution_mode.structural_control_enforced",

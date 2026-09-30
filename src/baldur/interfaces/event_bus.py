@@ -71,6 +71,8 @@ class EventBusProtocol(Protocol):
 
     def publish(self, event: BaldurEvent) -> int: ...
 
+    def publish_local(self, event: BaldurEvent) -> int: ...
+
     def get_history(
         self,
         event_type: EventType | None = ...,

@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from baldur.api.django.throttle_adapter import LOCAL_THROTTLE_REQUEST_ATTR
-from baldur.core.execution_mode import intervention_suppressed
+from baldur.core.execution_mode import get_execution_mode, intervention_suppressed
 from baldur.dlq.helpers import store_to_dlq
 from baldur.services.retry_handler.rate_limit_detection import (
     failure_status_codes,
@@ -221,11 +221,10 @@ class BaldurMiddleware:
         # =====================================================================
         # Preemptive DLQ storage when CB is OPEN (automatic routing)
         # =====================================================================
-        if (
-            self._is_cb_open(request)
-            and self._is_dlq_eligible(request)
-            and not self._preemptive_intervention_suppressed(request)
-        ):
+        cb_open_dlq_path = self._is_cb_open(request) and self._is_dlq_eligible(request)
+        if cb_open_dlq_path and self._operator_block_under_observe_only(request):
+            return self._refuse_operator_block(request)
+        if cb_open_dlq_path and not self._preemptive_intervention_suppressed(request):
             # This exit never reaches the breaker's admission path, so the
             # refusal is recorded here: a request turned away because a
             # dependency is cut off is a call that did not succeed, and the
@@ -670,6 +669,60 @@ class BaldurMiddleware:
                     self._cb_service.record_success(self.CB_DATABASE_DOMAIN)
         except Exception:
             pass
+
+    def _operator_block_under_observe_only(self, request: HttpRequest) -> bool:
+        """Observe-only, and the request domain's own row is an operator's Block.
+
+        Asked of the domain's row, not the refusing row: the database row is
+        checked first and carries no domain pin. Fail-open on a read error.
+        """
+        try:
+            if get_execution_mode().should_execute:
+                return False
+            if not (self._cb_service and self._cb_service.is_enabled):
+                return False
+            from baldur.services.circuit_breaker.manual_control import (
+                is_operator_block_in_force,
+            )
+
+            row = self._cb_service.get_or_create_state(self._infer_domain(request.path))
+            return is_operator_block_in_force(row)
+        except Exception as e:
+            logger.debug("baldur_middleware.operator_block_check_failed", error=e)
+            return False
+
+    def _refuse_operator_block(self, request: HttpRequest) -> HttpResponse:
+        """Refuse a request an operator's Block covers, without parking it.
+
+        The Block is the operator's instruction and holds under observe-only;
+        the DLQ capture is an automatic intervention and does not — its
+        withheld store is recorded instead.
+        """
+        from django.http import JsonResponse
+
+        domain = self._infer_domain(request.path)
+        intervention_suppressed(
+            service_name=domain,
+            action="dlq_store",
+            error_type="CIRCUIT_BREAKER_OPEN",
+            path=request.path,
+        )
+        logger.warning(
+            "baldur_middleware.operator_block_request_blocked",
+            cb_service_name=domain,
+            request_path=request.path,
+        )
+        return JsonResponse(
+            {
+                "error": "Service temporarily unavailable",
+                "code": "CIRCUIT_BREAKER_OPEN",
+                "retry_after": 30,
+                "dlq_stored": False,
+                "dlq_id": None,
+                "message": "The service is blocked by an operator",
+            },
+            status=503,
+        )
 
     def _preemptive_intervention_suppressed(self, request: HttpRequest) -> bool:
         """Observe-only: report the 503 + store this request would have taken.

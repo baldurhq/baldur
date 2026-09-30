@@ -8,7 +8,7 @@ Supports file, Redis, and memory backends with Django settings fallback
 and Redis URL 3-tier fallback chain for backward compatibility.
 
 Environment Variables:
-    BALDUR_SYSTEM_CONTROL_BACKEND=file
+    BALDUR_SYSTEM_CONTROL_BACKEND=            (unset: redis when a Redis URL is named, else file)
     BALDUR_SYSTEM_CONTROL_DIR=logs/baldur_state
     BALDUR_SYSTEM_CONTROL_REDIS_URL=
     BALDUR_SYSTEM_CONTROL_REDIS_KEY_PREFIX=baldur:state:
@@ -21,7 +21,7 @@ from __future__ import annotations
 import os
 from typing import Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, PrivateAttr, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 from baldur.settings.base import make_settings_config
@@ -40,10 +40,18 @@ class SystemControlSettings(BaseSettings):
     # =========================================================================
     # Backend selection
     # =========================================================================
-    backend: Literal["file", "redis", "memory"] = Field(
-        default="file",
-        description="State backend type: 'file' (single server), 'redis' (multi server), 'memory' (testing).",
+    backend: Literal["file", "redis", "memory"] | None = Field(
+        default=None,
+        description=(
+            "State backend type: 'file' (single server), 'redis' (multi server), "
+            "'memory' (testing). When not set, 'redis' is used if a Redis URL is "
+            "named (BALDUR_SYSTEM_CONTROL_REDIS_URL or BALDUR_REDIS_URL), else "
+            "'file'; after validation it always holds the backend in use."
+        ),
     )
+
+    # Whether ``backend`` was derived rather than set (env or Django setting).
+    _backend_derived: bool = PrivateAttr(default=False)
 
     # =========================================================================
     # File backend
@@ -112,6 +120,29 @@ class SystemControlSettings(BaseSettings):
         except Exception:
             pass
         return data
+
+    @model_validator(mode="after")
+    def _derive_backend(self) -> SystemControlSettings:
+        """Pick the backend when none was set: Redis when a URL this store dials is named.
+
+        Runs before the URL fallback below, so the question is asked of the
+        channels this resolver itself reads — ``BALDUR_SYSTEM_CONTROL_REDIS_URL``,
+        the ``BALDUR_REDIS_URL`` env var or Django setting — and never of the
+        localhost default the fallback fills in. Deliberately narrower than
+        ``redis_explicitly_configured()``: a Redis named only for another
+        channel is not one this store would dial.
+        """
+        if self.backend is not None:
+            return self
+        named = bool(self.redis_url) or bool(os.environ.get("BALDUR_REDIS_URL"))
+        self.backend = "redis" if named else "file"
+        self._backend_derived = True
+        return self
+
+    @property
+    def backend_was_derived(self) -> bool:
+        """Whether ``backend`` was derived from the named Redis URL, not set."""
+        return self._backend_derived
 
     @model_validator(mode="after")
     def _fallback_redis_url(self) -> SystemControlSettings:

@@ -26,10 +26,7 @@ from typing import Any, TypeVar
 from baldur.interfaces.resilience_policy import ResiliencePolicy
 from baldur.resilience.policies.composer import PolicyComposer, compose
 from baldur.resilience.policies.fallback import FallbackPolicy
-from baldur.resilience.policies.guards import (
-    ErrorBudgetGuard,
-    KillSwitchGuard,
-)
+from baldur.resilience.policies.guards import ErrorBudgetGuard
 from baldur.resilience.policies.hooks import AuditHook, MetricsHook
 from baldur.resilience.policies.sinks import DLQSink
 from baldur.services.bulkhead.policy import bulkhead_policy
@@ -193,7 +190,6 @@ def standard_pipeline(
 
     return (
         compose(*policies)
-        .add_guard(KillSwitchGuard())
         .add_guard(ErrorBudgetGuard())
         .add_hook(AuditHook())
         .add_sink(DLQSink())
@@ -318,7 +314,6 @@ def ha_pipeline(
 
     return (
         compose(*policies)
-        .add_guard(KillSwitchGuard())
         .add_guard(ErrorBudgetGuard())
         .add_hook(AuditHook())
         .add_hook(MetricsHook())

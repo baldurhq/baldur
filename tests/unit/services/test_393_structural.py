@@ -88,6 +88,8 @@ class TestSystemControlAllContract:
         from baldur.services import system_control
 
         expected = {
+            "SYSTEM_CONTROL_REFRESH_INTERVAL_SECONDS",
+            "SystemControlChange",
             "SystemState",
             "SystemControlManager",
             "get_system_control",

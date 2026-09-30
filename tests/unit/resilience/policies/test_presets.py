@@ -1,17 +1,17 @@
 """
-standard_pipeline / ha_pipeline / minimal_pipeline / adaptive_pipeline 프리셋 단위 테스트.
+standard_pipeline / ha_pipeline / minimal_pipeline / adaptive_pipeline preset unit tests.
 
-테스트 대상:
+Test targets:
 - resilience/policies/presets.py
 
-UNIT_TEST_GUIDELINES.md 준수:
-- 동작 검증(Behavior): 소스 참조 (PolicyComposer, Guard/Hook/Sink 타입)
-- conftest.py 배치: 1개 파일 전용 fixture → 파일 내부 (§5.1)
+Complies with UNIT_TEST_GUIDELINES.md:
+- Behavior: source references (PolicyComposer, Guard/Hook/Sink types)
+- conftest.py placement: fixtures used by a single file → inside the file (§5.1)
 
 Note:
-  presets.py 내부에서 RetryPolicy, BulkheadPolicy, HedgingPolicy 등을
-  lazy import하므로, 해당 의존성이 사용 가능한 환경에서만 테스트한다.
-  의존성 미설치 시 ImportError로 테스트 skip.
+  presets.py lazily imports RetryPolicy, BulkheadPolicy, HedgingPolicy, etc.,
+  so tests run only in environments where those dependencies are available.
+  If a dependency is not installed, tests are skipped via ImportError.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ import pytest
 from baldur.resilience.policies.composer import PolicyComposer
 from baldur.resilience.policies.fallback import FallbackPolicy
 from baldur.resilience.policies.guards.error_budget import ErrorBudgetGuard
-from baldur.resilience.policies.guards.kill_switch import KillSwitchGuard
 from baldur.resilience.policies.hooks.audit import AuditHook
 from baldur.resilience.policies.hooks.metrics import MetricsHook
 from baldur.resilience.policies.presets import (
@@ -31,15 +30,15 @@ from baldur.resilience.policies.presets import (
 )
 
 # =============================================================================
-# 동작 검증 — standard_pipeline
+# Behavior — standard_pipeline
 # =============================================================================
 
 
 class TestStandardPipelineBehavior:
-    """standard_pipeline() 동작 검증."""
+    """standard_pipeline() behavior."""
 
     def test_returns_policy_composer(self):
-        """standard_pipeline()은 PolicyComposer 인스턴스를 반환한다."""
+        """standard_pipeline() returns a PolicyComposer instance."""
         pipeline = standard_pipeline("test_service")
         assert isinstance(pipeline, PolicyComposer)
 
@@ -50,26 +49,25 @@ class TestStandardPipelineBehavior:
         assert pipeline._policies[0].name == "retry"
         assert pipeline._policies[1].name == "circuit_breaker"
 
-    def test_has_kill_switch_guard(self):
-        """KillSwitchGuard가 _guards에 포함되어 있다."""
+    def test_has_no_kill_switch_guard(self):
+        """No kill-switch guard: the switch steps Baldur aside, never refuses the call."""
         pipeline = standard_pipeline("test_service")
-        guard_types = [type(g) for g in pipeline._guards]
-        assert KillSwitchGuard in guard_types
+        assert "kill_switch" not in [g.name for g in pipeline._guards]
 
     def test_has_error_budget_guard(self):
-        """ErrorBudgetGuard가 _guards에 포함되어 있다."""
+        """ErrorBudgetGuard is included in _guards."""
         pipeline = standard_pipeline("test_service")
         guard_types = [type(g) for g in pipeline._guards]
         assert ErrorBudgetGuard in guard_types
 
     def test_has_audit_hook(self):
-        """AuditHook이 _hooks에 포함되어 있다."""
+        """AuditHook is included in _hooks."""
         pipeline = standard_pipeline("test_service")
         hook_types = [type(h) for h in pipeline._hooks]
         assert AuditHook in hook_types
 
     def test_has_dlq_sink(self):
-        """DLQSink가 _sinks에 포함되어 있다."""
+        """DLQSink is included in _sinks."""
         from baldur.services.retry_handler.sinks import DLQSink
 
         pipeline = standard_pipeline("test_service")
@@ -77,13 +75,13 @@ class TestStandardPipelineBehavior:
         assert DLQSink in sink_types
 
     def test_custom_max_retries(self):
-        """max_retries 파라미터가 RetryPolicy에 전달된다."""
+        """The max_retries parameter is passed to RetryPolicy."""
         pipeline = standard_pipeline("test_service", max_retries=5)
         retry_policy = pipeline._policies[0]
         assert retry_policy._config.max_attempts == 5
 
     def test_custom_domain(self):
-        """domain 파라미터가 RetryPolicy config에 전달된다."""
+        """The domain parameter is passed to the RetryPolicy config."""
         pipeline = standard_pipeline("test_service", domain="payment")
         retry_policy = pipeline._policies[0]
         assert retry_policy._config.domain == "payment"
@@ -138,12 +136,12 @@ class TestStandardPipelineCBInclusionP0_2Behavior:
 
 
 # =============================================================================
-# 동작 검증 — ha_pipeline
+# Behavior — ha_pipeline
 # =============================================================================
 
 
 class TestHaPipelineBehavior:
-    """ha_pipeline() 동작 검증."""
+    """ha_pipeline() behavior."""
 
     @pytest.fixture(autouse=True)
     def _require_pro(self):
@@ -151,7 +149,7 @@ class TestHaPipelineBehavior:
         pytest.importorskip("baldur_pro")
 
     def test_returns_policy_composer(self):
-        """ha_pipeline()은 PolicyComposer 인스턴스를 반환한다."""
+        """ha_pipeline() returns a PolicyComposer instance."""
         pipeline = ha_pipeline(
             "test_service",
             candidates=[lambda: "alt"],
@@ -159,7 +157,7 @@ class TestHaPipelineBehavior:
         assert isinstance(pipeline, PolicyComposer)
 
     def test_has_three_policies(self):
-        """RetryPolicy + BulkheadPolicy + HedgingPolicy 총 3개 Policy가 포함된다."""
+        """A total of 3 policies are included: RetryPolicy + BulkheadPolicy + HedgingPolicy."""
         pipeline = ha_pipeline(
             "test_service",
             candidates=[lambda: "alt"],
@@ -167,7 +165,7 @@ class TestHaPipelineBehavior:
         assert len(pipeline._policies) == 3
 
     def test_policy_order(self):
-        """Policy 순서: Retry(바깥) → Bulkhead → Hedging(안쪽)."""
+        """Policy order: Retry (outermost) → Bulkhead → Hedging (innermost)."""
         pipeline = ha_pipeline(
             "test_service",
             candidates=[lambda: "alt"],
@@ -177,18 +175,17 @@ class TestHaPipelineBehavior:
         assert policy_names[1] == "bulkhead"
         assert policy_names[2] == "hedging"
 
-    def test_has_both_guards(self):
-        """KillSwitchGuard, ErrorBudgetGuard가 모두 포함된다."""
+    def test_has_error_budget_guard_only(self):
+        """ErrorBudgetGuard is the only guard (no kill-switch guard)."""
         pipeline = ha_pipeline(
             "test_service",
             candidates=[lambda: "alt"],
         )
         guard_types = [type(g) for g in pipeline._guards]
-        assert KillSwitchGuard in guard_types
-        assert ErrorBudgetGuard in guard_types
+        assert guard_types == [ErrorBudgetGuard]
 
     def test_has_audit_and_metrics_hooks(self):
-        """AuditHook과 MetricsHook이 포함된다."""
+        """AuditHook and MetricsHook are included."""
         pipeline = ha_pipeline(
             "test_service",
             candidates=[lambda: "alt"],
@@ -198,7 +195,7 @@ class TestHaPipelineBehavior:
         assert MetricsHook in hook_types
 
     def test_has_dlq_sink(self):
-        """DLQSink가 포함된다."""
+        """DLQSink is included."""
         from baldur.services.retry_handler.sinks import DLQSink
 
         pipeline = ha_pipeline(
@@ -209,7 +206,7 @@ class TestHaPipelineBehavior:
         assert DLQSink in sink_types
 
     def test_custom_max_retries(self):
-        """max_retries 파라미터가 RetryPolicy에 전달된다."""
+        """The max_retries parameter is passed to RetryPolicy."""
         pipeline = ha_pipeline(
             "test_service",
             candidates=[lambda: "alt"],
@@ -220,15 +217,15 @@ class TestHaPipelineBehavior:
 
 
 # =============================================================================
-# 동작 검증 — _build_fallback_policy (#234)
+# Behavior — _build_fallback_policy (#234)
 # =============================================================================
 
 
 class TestBuildFallbackPolicyBehavior:
-    """_build_fallback_policy() 동작 검증."""
+    """_build_fallback_policy() behavior."""
 
     def test_all_none_returns_none(self):
-        """모든 파라미터가 None이면 None을 반환한다."""
+        """Returns None if all parameters are None."""
         result = _build_fallback_policy(
             fallback_chain=None,
             fallback_fn=None,
@@ -237,7 +234,7 @@ class TestBuildFallbackPolicyBehavior:
         assert result is None
 
     def test_fallback_default_only(self):
-        """fallback_default만 전달하면 FallbackPolicy를 반환한다."""
+        """Returns a FallbackPolicy if only fallback_default is passed."""
         result = _build_fallback_policy(
             fallback_chain=None,
             fallback_fn=None,
@@ -247,7 +244,7 @@ class TestBuildFallbackPolicyBehavior:
         assert result._default_value == {"status": "degraded"}
 
     def test_fallback_fn_only(self):
-        """fallback_fn만 전달하면 FallbackPolicy를 반환한다."""
+        """Returns a FallbackPolicy if only fallback_fn is passed."""
 
         def fn():
             return "fallback_value"
@@ -261,7 +258,7 @@ class TestBuildFallbackPolicyBehavior:
         assert result._fallback_fn is fn
 
     def test_fallback_chain_only(self):
-        """fallback_chain만 전달하면 FallbackPolicy를 반환한다."""
+        """Returns a FallbackPolicy if only fallback_chain is passed."""
         chain = [lambda: "first", lambda: "second"]
         result = _build_fallback_policy(
             fallback_chain=chain,
@@ -272,7 +269,7 @@ class TestBuildFallbackPolicyBehavior:
         assert result._fallback_chain == chain
 
     def test_all_three_params(self):
-        """3단계 파라미터 모두 전달 시 FallbackPolicy에 모두 적용된다."""
+        """When all 3 tier parameters are passed, all are applied to the FallbackPolicy."""
         chain = [lambda: "chain"]
 
         def fn():
@@ -291,7 +288,7 @@ class TestBuildFallbackPolicyBehavior:
         assert result._default_value == default
 
     def test_returned_policy_name_is_fallback(self):
-        """반환된 FallbackPolicy의 name은 'fallback'이다."""
+        """The returned FallbackPolicy has the name 'fallback'."""
         result = _build_fallback_policy(
             fallback_chain=None,
             fallback_fn=None,
@@ -301,21 +298,21 @@ class TestBuildFallbackPolicyBehavior:
 
 
 # =============================================================================
-# 동작 검증 — standard_pipeline Fallback 통합 (#234)
+# Behavior — standard_pipeline Fallback integration (#234)
 # =============================================================================
 
 
 class TestStandardPipelineFallbackBehavior:
-    """standard_pipeline() Fallback 파라미터 동작 검증 (#234)."""
+    """standard_pipeline() Fallback parameter behavior (#234)."""
 
     def test_no_fallback_params_excludes_fallback_policy(self):
-        """Fallback 파라미터 없으면 FallbackPolicy가 _policies에 포함되지 않는다."""
+        """Without Fallback parameters, no FallbackPolicy is included in _policies."""
         pipeline = standard_pipeline("test_service")
         policy_names = [p.name for p in pipeline._policies]
         assert "fallback" not in policy_names
 
     def test_fallback_default_adds_fallback_policy(self):
-        """fallback_default 전달 시 FallbackPolicy가 _policies에 추가된다."""
+        """Passing fallback_default adds a FallbackPolicy to _policies."""
         pipeline = standard_pipeline(
             "test_service",
             fallback_default={"status": "degraded"},
@@ -324,7 +321,7 @@ class TestStandardPipelineFallbackBehavior:
         assert "fallback" in policy_names
 
     def test_fallback_fn_adds_fallback_policy(self):
-        """fallback_fn 전달 시 FallbackPolicy가 _policies에 추가된다."""
+        """Passing fallback_fn adds a FallbackPolicy to _policies."""
         pipeline = standard_pipeline(
             "test_service",
             fallback_fn=lambda: "backup",
@@ -333,7 +330,7 @@ class TestStandardPipelineFallbackBehavior:
         assert "fallback" in policy_names
 
     def test_fallback_chain_adds_fallback_policy(self):
-        """fallback_chain 전달 시 FallbackPolicy가 _policies에 추가된다."""
+        """Passing fallback_chain adds a FallbackPolicy to _policies."""
         pipeline = standard_pipeline(
             "test_service",
             fallback_chain=[lambda: "first", lambda: "second"],
@@ -390,14 +387,13 @@ class TestStandardPipelineFallbackBehavior:
         assert fallback._default_value == default
 
     def test_guards_preserved_with_fallback(self):
-        """Fallback 추가 시 Guard(KillSwitch, ErrorBudget)는 유지된다."""
+        """Adding a fallback keeps the ErrorBudget guard."""
         pipeline = standard_pipeline(
             "test_service",
             fallback_default={"status": "degraded"},
         )
         guard_types = [type(g) for g in pipeline._guards]
-        assert KillSwitchGuard in guard_types
-        assert ErrorBudgetGuard in guard_types
+        assert guard_types == [ErrorBudgetGuard]
 
     def test_policy_count_with_fallback(self):
         """With Fallback, _policies count is 3 (Fallback + Retry + CB)."""
@@ -409,12 +405,12 @@ class TestStandardPipelineFallbackBehavior:
 
 
 # =============================================================================
-# 동작 검증 — ha_pipeline Fallback 통합 (#234)
+# Behavior — ha_pipeline Fallback integration (#234)
 # =============================================================================
 
 
 class TestHaPipelineFallbackBehavior:
-    """ha_pipeline() Fallback 파라미터 동작 검증 (#234)."""
+    """ha_pipeline() Fallback parameter behavior (#234)."""
 
     @pytest.fixture(autouse=True)
     def _require_pro(self):
@@ -422,7 +418,7 @@ class TestHaPipelineFallbackBehavior:
         pytest.importorskip("baldur_pro")
 
     def test_no_fallback_params_excludes_fallback_policy(self):
-        """Fallback 파라미터 없으면 FallbackPolicy가 _policies에 포함되지 않는다."""
+        """Without Fallback parameters, no FallbackPolicy is included in _policies."""
         pipeline = ha_pipeline(
             "test_service",
             candidates=[lambda: "alt"],
@@ -431,7 +427,7 @@ class TestHaPipelineFallbackBehavior:
         assert "fallback" not in policy_names
 
     def test_fallback_default_adds_fallback_policy(self):
-        """fallback_default 전달 시 FallbackPolicy가 _policies에 추가된다."""
+        """Passing fallback_default adds a FallbackPolicy to _policies."""
         pipeline = ha_pipeline(
             "test_service",
             candidates=[lambda: "alt"],
@@ -464,7 +460,7 @@ class TestHaPipelineFallbackBehavior:
         assert policy_names[3] == "hedging"
 
     def test_policy_count_with_fallback(self):
-        """Fallback 추가 시 _policies 개수는 4 (Retry + Bulkhead + Hedging + Fallback)이다."""
+        """With Fallback added, _policies has 4 entries (Retry + Bulkhead + Hedging + Fallback)."""
         pipeline = ha_pipeline(
             "test_service",
             candidates=[lambda: "alt"],
@@ -484,34 +480,33 @@ class TestHaPipelineFallbackBehavior:
         assert fallback._fallback_chain == chain
 
     def test_guards_preserved_with_fallback(self):
-        """Fallback 추가 시 Guard(KillSwitch, ErrorBudget)는 유지된다."""
+        """Adding a fallback keeps the ErrorBudget guard."""
         pipeline = ha_pipeline(
             "test_service",
             candidates=[lambda: "alt"],
             fallback_default={"status": "degraded"},
         )
         guard_types = [type(g) for g in pipeline._guards]
-        assert KillSwitchGuard in guard_types
-        assert ErrorBudgetGuard in guard_types
+        assert guard_types == [ErrorBudgetGuard]
 
 
 # =============================================================================
-# 동작 검증 — minimal_pipeline
+# Behavior — minimal_pipeline
 # =============================================================================
 
 
 class TestMinimalPipelineBehavior:
-    """minimal_pipeline() 동작 검증."""
+    """minimal_pipeline() behavior."""
 
     def test_returns_policy_composer(self):
-        """minimal_pipeline()은 PolicyComposer 인스턴스를 반환한다."""
+        """minimal_pipeline() returns a PolicyComposer instance."""
         from baldur.resilience.policies.presets import minimal_pipeline
 
         pipeline = minimal_pipeline("test_service")
         assert isinstance(pipeline, PolicyComposer)
 
     def test_has_circuit_breaker_policy(self):
-        """CircuitBreakerPolicy가 _policies에 포함되어 있다."""
+        """CircuitBreakerPolicy is included in _policies."""
         from baldur.resilience.policies.presets import minimal_pipeline
 
         pipeline = minimal_pipeline("test_service")
@@ -519,21 +514,21 @@ class TestMinimalPipelineBehavior:
         assert pipeline._policies[0].name == "circuit_breaker"
 
     def test_no_guards(self):
-        """Guard가 포함되지 않는다 (ErrorBudget Redis 호출 절약)."""
+        """No Guard is included (saves ErrorBudget Redis calls)."""
         from baldur.resilience.policies.presets import minimal_pipeline
 
         pipeline = minimal_pipeline("test_service")
         assert len(pipeline._guards) == 0
 
     def test_no_sinks(self):
-        """Sink가 포함되지 않는다 (DLQ 미사용)."""
+        """No Sink is included (DLQ not used)."""
         from baldur.resilience.policies.presets import minimal_pipeline
 
         pipeline = minimal_pipeline("test_service")
         assert len(pipeline._sinks) == 0
 
     def test_default_audit_rate_uses_audit_hook(self):
-        """audit_sampling_rate 기본값(1.0)이면 AuditHook이 사용된다."""
+        """With the default audit_sampling_rate (1.0), AuditHook is used."""
         from baldur.resilience.policies.presets import minimal_pipeline
 
         pipeline = minimal_pipeline("test_service")
@@ -541,7 +536,7 @@ class TestMinimalPipelineBehavior:
         assert type(pipeline._hooks[0]) is AuditHook
 
     def test_sampled_rate_uses_sampled_audit_hook(self):
-        """audit_sampling_rate < 1.0이면 SampledAuditHook이 사용된다."""
+        """With audit_sampling_rate < 1.0, SampledAuditHook is used."""
         from baldur.resilience.policies.hooks.sampled_audit import (
             SampledAuditHook,
         )
@@ -554,14 +549,14 @@ class TestMinimalPipelineBehavior:
         assert hook.sample_rate == 0.5
 
     def test_zero_rate_no_hooks(self):
-        """audit_sampling_rate=0.0이면 Hook이 없다."""
+        """With audit_sampling_rate=0.0, there are no Hooks."""
         from baldur.resilience.policies.presets import minimal_pipeline
 
         pipeline = minimal_pipeline("test_service", audit_sampling_rate=0.0)
         assert len(pipeline._hooks) == 0
 
     def test_service_name_passed_to_cb(self):
-        """service_name이 CircuitBreakerPolicy에 전달된다."""
+        """service_name is passed to CircuitBreakerPolicy."""
         from baldur.resilience.policies.presets import minimal_pipeline
 
         pipeline = minimal_pipeline("my_read_api")
@@ -570,12 +565,12 @@ class TestMinimalPipelineBehavior:
 
 
 # =============================================================================
-# 동작 검증 — adaptive_pipeline
+# Behavior — adaptive_pipeline
 # =============================================================================
 
 
 class TestAdaptivePipelineBehavior:
-    """adaptive_pipeline() 동작 검증."""
+    """adaptive_pipeline() behavior."""
 
     def _reset_settings(self):
         from baldur.settings.pipeline import reset_pipeline_settings
@@ -583,18 +578,17 @@ class TestAdaptivePipelineBehavior:
         reset_pipeline_settings()
 
     def test_disabled_returns_standard_pipeline(self):
-        """adaptive_enabled=False이면 standard_pipeline을 반환한다."""
+        """With adaptive_enabled=False, returns standard_pipeline."""
         from baldur.resilience.policies.presets import adaptive_pipeline
 
         self._reset_settings()
         pipeline = adaptive_pipeline("test_service")
-        # standard_pipeline은 KillSwitchGuard + ErrorBudgetGuard를 가짐
+        # standard_pipeline carries the ErrorBudgetGuard (and no kill-switch guard)
         guard_types = [type(g) for g in pipeline._guards]
-        assert KillSwitchGuard in guard_types
-        assert ErrorBudgetGuard in guard_types
+        assert guard_types == [ErrorBudgetGuard]
 
     def test_enabled_hot_tier_returns_minimal(self):
-        """adaptive_enabled=True + hot tier → minimal_pipeline 반환."""
+        """adaptive_enabled=True + hot tier → returns minimal_pipeline."""
         from unittest.mock import patch
 
         from baldur.resilience.policies.presets import adaptive_pipeline
@@ -611,12 +605,12 @@ class TestAdaptivePipelineBehavior:
             return_value=mock_settings,
         ):
             pipeline = adaptive_pipeline("test_service", tier_id="non_essential")
-        # minimal은 Guard가 없다
+        # minimal has no Guard
         assert len(pipeline._guards) == 0
         assert pipeline._policies[0].name == "circuit_breaker"
 
     def test_enabled_non_hot_tier_returns_standard(self):
-        """adaptive_enabled=True + non-hot tier → standard_pipeline 반환."""
+        """adaptive_enabled=True + non-hot tier → returns standard_pipeline."""
         from unittest.mock import patch
 
         from baldur.resilience.policies.presets import adaptive_pipeline
@@ -634,10 +628,10 @@ class TestAdaptivePipelineBehavior:
         ):
             pipeline = adaptive_pipeline("test_service", tier_id="critical")
         guard_types = [type(g) for g in pipeline._guards]
-        assert KillSwitchGuard in guard_types
+        assert guard_types == [ErrorBudgetGuard]
 
     def test_enabled_no_tier_returns_standard(self):
-        """adaptive_enabled=True + tier_id=None → standard_pipeline 반환."""
+        """adaptive_enabled=True + tier_id=None → returns standard_pipeline."""
         from unittest.mock import patch
 
         from baldur.resilience.policies.presets import adaptive_pipeline
@@ -655,10 +649,10 @@ class TestAdaptivePipelineBehavior:
         ):
             pipeline = adaptive_pipeline("test_service", tier_id=None)
         guard_types = [type(g) for g in pipeline._guards]
-        assert KillSwitchGuard in guard_types
+        assert guard_types == [ErrorBudgetGuard]
 
     def test_degradation_active_returns_minimal(self):
-        """GracefulDegradation이 full_guards를 비활성화하면 minimal 반환."""
+        """Returns minimal when GracefulDegradation disables full_guards."""
         from unittest.mock import MagicMock, patch
 
         from baldur.resilience.policies.presets import adaptive_pipeline
@@ -684,12 +678,12 @@ class TestAdaptivePipelineBehavior:
             ),
         ):
             pipeline = adaptive_pipeline("test_service", tier_id="standard")
-        # minimal → Guard 없음
+        # minimal → no Guard
         assert len(pipeline._guards) == 0
         mock_degradation.is_enabled.assert_called_once_with("full_guards")
 
     def test_audit_sampling_rate_propagated_to_minimal(self):
-        """adaptive_pipeline의 audit_sampling_rate가 minimal에 전달된다."""
+        """adaptive_pipeline's audit_sampling_rate is passed to minimal."""
         from unittest.mock import patch
 
         from baldur.resilience.policies.hooks.sampled_audit import (
@@ -715,7 +709,7 @@ class TestAdaptivePipelineBehavior:
         assert hook.sample_rate == 0.05
 
     def test_fallback_params_forwarded_to_standard(self):
-        """adaptive_pipeline의 fallback 파라미터가 standard_pipeline에 전달된다."""
+        """adaptive_pipeline's fallback parameters are passed to standard_pipeline."""
         from baldur.resilience.policies.presets import adaptive_pipeline
 
         self._reset_settings()

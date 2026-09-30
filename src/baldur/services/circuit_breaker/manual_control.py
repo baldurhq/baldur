@@ -59,6 +59,22 @@ def is_manual_pin_active(state: CircuitBreakerStateData) -> bool:
     )
 
 
+def is_operator_block_in_force(state: CircuitBreakerStateData) -> bool:
+    """Whether this row is an operator's Block that still holds.
+
+    OPEN under a manual pin in force. A Block is the operator's instruction,
+    not an automatic intervention, so every refusal site enforces it under
+    observe-only (dry-run, or a pulled kill switch) exactly as on the active
+    path, while every other refusal steps aside there. The single spelling of
+    the compound check every such site asks.
+    """
+    return (
+        getattr(state, "state", None) == CircuitState.OPEN
+        and bool(getattr(state, "manually_controlled", False))
+        and is_manual_pin_active(state)
+    )
+
+
 def is_pin_lift_due(state: CircuitBreakerStateData) -> bool:
     """The operator's own pinned OPEN whose TTL has passed, lift not yet taken.
 
@@ -127,9 +143,10 @@ def _warn_if_manual_override_under_dry_run(service_name: str, action: str) -> No
 
     Manual force_open/force_close are explicit operator intent and stay live
     under dry-run by design (observe-only suppresses only Baldur's *automatic*
-    interventions). This surfaces the override at the moment it happens so the
-    operator is not surprised; it does not change behavior — the force still
-    executes.
+    interventions): a forced open is refused on every refusal site while it
+    holds, dry-run or not (``is_operator_block_in_force``). This surfaces the
+    override at the moment it happens so the operator is not surprised; it does
+    not change behavior — the force still executes.
 
     The observe-only signal is read through the single resolver
     (``get_execution_mode()``), so the warning covers the runtime dry-run toggle

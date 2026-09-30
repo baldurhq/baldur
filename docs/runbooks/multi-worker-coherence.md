@@ -12,7 +12,7 @@
 - **Multiple pods/hosts** — set all three:
 
   ```bash
-  export BALDUR_SYSTEM_CONTROL_BACKEND=redis     # shared state backend
+  export BALDUR_SYSTEM_CONTROL_BACKEND=redis     # shared state backend (the default once BALDUR_REDIS_URL is set)
   export BALDUR_EVENT_BUS_BACKEND=redis          # cross-pod CONFIG_UPDATED
   export BALDUR_LEADER_ELECTION_ENABLED=1        # one scheduler cluster-wide
   export BALDUR_LEADER_ELECTION_BACKEND=redis
@@ -29,7 +29,7 @@ Three independent mechanisms must line up for a runtime-config change made on on
 
 | Mechanism | Default | What it governs |
 |-----------|---------|-----------------|
-| State backend | `file` (single host) | Where pending changes + applied config live. Shared only when `redis`. |
+| State backend | `redis` when `BALDUR_REDIS_URL` is set, else `file` (single host) | Where pending changes, applied config and the switch state (kill switch, dry-run, emergency level) live. Shared only when `redis`. |
 | EventBus backend | `memory` (in-process) | `CONFIG_UPDATED` propagation to live resilience consumers. Cross-pod only when `redis`. |
 | Leader election | disabled | Which process runs the scheduler. Single-host uses a local file lock; cross-host needs Redis/K8s. |
 
@@ -58,7 +58,11 @@ export BALDUR_SYSTEM_CONTROL_BACKEND=redis
 export BALDUR_REDIS_URL=redis://your-redis:6379/0
 ```
 
-Without this each pod keeps its own file/memory state, so a pending change created on pod A is never visible to the applier on pod B.
+Without this each pod keeps its own file/memory state, so a pending change created on pod A is never visible to the applier on pod B. With no backend set, naming `BALDUR_REDIS_URL` (or `BALDUR_SYSTEM_CONTROL_REDIS_URL`) already selects Redis; set it explicitly anyway before a rolling upgrade, so old and new processes read the same store.
+
+The switch state lives in this store too. Every process re-reads it on its own schedule — the kill switch and dry-run every five seconds, the emergency level on its interval (thirty seconds by default) — so a flip reaches every pod sharing the store without a restart. `GET /system/status/` on any process shows its own view: `store_reachable`, `state_age_seconds` and, for the file store, the directory it resolved. Two processes started from different working directories resolve a relative `BALDUR_SYSTEM_CONTROL_DIR` to two different stores; use an absolute path. Every process sharing a file store is restarted together on an upgrade.
+
+If you ever edit the stored switch state by hand (the `system_control` or `emergency_mode` key), increment its `__occ_version__` field, so that a conditional write a process already has in flight cannot land over your edit.
 
 ### 2. Cross-pod event propagation
 

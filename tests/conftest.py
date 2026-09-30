@@ -108,6 +108,12 @@ os.environ.setdefault("BALDUR_CB_STATE_SEED_AUTOSTART", "0")
 # daemon thread. Tests that exercise the updater start one directly. Mirrors
 # the autostart hatches above.
 os.environ.setdefault("BALDUR_BULKHEAD_METRICS_AUTOSTART", "0")
+# The control-state refresher thread re-reads the kill switch / dry-run /
+# emergency level from the process-default runtime's store every few seconds
+# and assigns it to the process-wide managers, which would race a test's own
+# store setup. Tests drive passes with refresh_now(); a test of the thread
+# itself sets BALDUR_CONTROL_STATE_REFRESHER_AUTOSTART=1 for its scope.
+os.environ.setdefault("BALDUR_CONTROL_STATE_REFRESHER_AUTOSTART", "0")
 
 # 742 D1: MetricsSettings.enabled defaults True and init() now starts a
 # per-process gauge collector (a daemon thread refreshing the DLQ/CB gauge

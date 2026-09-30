@@ -21,7 +21,9 @@ from baldur.api.handlers.system_control import (
     system_enable,
     system_status,
 )
+from baldur.core.exceptions import SystemControlStoreError
 from baldur.interfaces.web_framework import HttpMethod, RequestContext
+from baldur.services.system_control import SystemControlChange
 
 
 def _make_ctx(
@@ -52,6 +54,11 @@ def _mock_state(
         **extra,
     }
     return state
+
+
+def _committed(state: MagicMock) -> SystemControlChange:
+    """A flip outcome the store confirmed."""
+    return SystemControlChange(state=state, persisted=True, applies="everywhere")
 
 
 # =============================================================================
@@ -132,7 +139,7 @@ class TestSystemEnableBehavior:
     def test_enable_invokes_manager_with_actor_and_reason(self):
         """Body.reason + ctx.user flows into manager.enable()."""
         manager = MagicMock()
-        manager.enable.return_value = _mock_state(enabled=True)
+        manager.enable.return_value = _committed(_mock_state(enabled=True))
 
         with patch(
             "baldur.api.handlers.system_control.get_system_control",
@@ -149,11 +156,32 @@ class TestSystemEnableBehavior:
         manager.enable.assert_called_once_with(actor="bob", reason="maintenance done")
         assert resp.status_code == 200
         assert resp.body["success"] is True
+        assert resp.body["persisted"] is True
+        assert resp.body["applies"] == "everywhere"
+
+    def test_enable_the_store_did_not_confirm_answers_503(self):
+        """A re-enable that did not reach the store answers 503 with where it applies."""
+        manager = MagicMock()
+        manager.enable.side_effect = SystemControlStoreError(
+            change="enable", persisted=False, applies="none", withdrew_held_change=True
+        )
+        manager.get_state.return_value = _mock_state(enabled=False)
+
+        with patch(
+            "baldur.api.handlers.system_control.get_system_control",
+            return_value=manager,
+        ):
+            resp = system_enable(_make_ctx(method="POST", json_body={}))
+
+        assert resp.status_code == 503
+        assert resp.body["persisted"] is False
+        assert resp.body["applies"] == "none"
+        assert resp.body["withdrew_held_change"] is True
 
     def test_enable_defaults_reason_to_empty_string(self):
         """Empty body -> reason=''."""
         manager = MagicMock()
-        manager.enable.return_value = _mock_state(enabled=True)
+        manager.enable.return_value = _committed(_mock_state(enabled=True))
 
         with patch(
             "baldur.api.handlers.system_control.get_system_control",
@@ -198,7 +226,7 @@ class TestSystemDisableBehavior:
     def test_valid_reason_invokes_manager_disable(self):
         """Reason present -> manager.disable() called with actor+reason."""
         manager = MagicMock()
-        manager.disable.return_value = _mock_state(enabled=False)
+        manager.disable.return_value = _committed(_mock_state(enabled=False))
 
         with patch(
             "baldur.api.handlers.system_control.get_system_control",
@@ -215,7 +243,27 @@ class TestSystemDisableBehavior:
         manager.disable.assert_called_once_with(actor="eve", reason="emergency")
         assert resp.status_code == 200
         assert resp.body["success"] is True
-        assert "warning" in resp.body
+        assert "effect" in resp.body
+        assert "All baldur operations are now stopped" not in str(resp.body)
+
+    def test_held_disable_answers_503_this_process(self):
+        """A kill switch held in this process only answers 503 and says so."""
+        manager = MagicMock()
+        manager.disable.return_value = SystemControlChange(
+            state=_mock_state(enabled=False), persisted=False, applies="this_process"
+        )
+
+        with patch(
+            "baldur.api.handlers.system_control.get_system_control",
+            return_value=manager,
+        ):
+            resp = system_disable(
+                _make_ctx(method="POST", json_body={"reason": "store down"})
+            )
+
+        assert resp.status_code == 503
+        assert resp.body["persisted"] is False
+        assert resp.body["applies"] == "this_process"
 
 
 # =============================================================================
@@ -228,7 +276,7 @@ class TestDryRunEnableBehavior:
 
     def test_enable_invokes_manager_with_actor(self):
         manager = MagicMock()
-        manager.enable_dry_run.return_value = _mock_state(dry_run=True)
+        manager.enable_dry_run.return_value = _committed(_mock_state(dry_run=True))
 
         with patch(
             "baldur.api.handlers.system_control.get_system_control",
@@ -276,7 +324,7 @@ class TestDryRunDisableBehavior:
     def test_confirm_true_invokes_manager(self):
         """confirm=true -> manager.disable_dry_run() called."""
         manager = MagicMock()
-        manager.disable_dry_run.return_value = _mock_state(dry_run=False)
+        manager.disable_dry_run.return_value = _committed(_mock_state(dry_run=False))
 
         with patch(
             "baldur.api.handlers.system_control.get_system_control",

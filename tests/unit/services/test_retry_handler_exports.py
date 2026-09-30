@@ -1,8 +1,8 @@
 """
-retry_handler 패키지 Re-export 단위 테스트.
+retry_handler package re-export unit tests.
 
-테스트 대상: services/retry_handler/__init__.py
-- 패키지 레벨 re-export 검증 (RetryPolicy, Guards, Sinks)
+Test targets: services/retry_handler/__init__.py
+- Package-level re-export check (RetryPolicy, Guards, Sinks)
 
 Note: the ``@with_retry`` decorator was removed in 670 (superseded by the
 unified ``@retry`` in resilience/policies/async_retry.py). Its behavior is now
@@ -16,39 +16,42 @@ import pytest
 from baldur.services import retry_handler as pkg
 
 # =============================================================================
-# 패키지 Re-export — 계약 검증
+# Package re-export — contract
 # =============================================================================
 
 
 class TestRetryHandlerPackageExportsContract:
-    """retry_handler 패키지에서 새 클래스들이 정상 re-export되는지 검증."""
+    """Verify the new classes are re-exported correctly from the retry_handler package."""
 
     @pytest.mark.parametrize(
         "name",
         [
             "RetryPolicy",
             "RetryPolicyConfig",
-            "KillSwitchGuard",
             "ErrorBudgetGuard",
             "DLQSink",
             "detect_rate_limit",
         ],
     )
     def test_new_symbol_importable(self, name: str):
-        """새로 추가된 심볼이 패키지에서 import 가능하다."""
+        """Newly added symbols are importable from the package."""
         assert hasattr(pkg, name), f"{name} is not exported from retry_handler"
 
     def test_all_new_symbols_in_dunder_all(self):
-        """__all__에 새 심볼 6개가 포함되어 있다."""
+        """__all__ carries the five new symbols."""
         expected = {
             "RetryPolicy",
             "RetryPolicyConfig",
-            "KillSwitchGuard",
             "ErrorBudgetGuard",
             "DLQSink",
             "detect_rate_limit",
         }
         assert expected.issubset(set(pkg.__all__))
+
+    def test_kill_switch_guard_removed(self):
+        """The kill-switch guard is gone: the switch rides the resolver."""
+        assert not hasattr(pkg, "KillSwitchGuard")
+        assert "KillSwitchGuard" not in pkg.__all__
 
     def test_with_retry_removed(self):
         """``with_retry`` was removed in 670 (superseded by unified ``@retry``)."""

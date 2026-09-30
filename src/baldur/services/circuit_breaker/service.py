@@ -47,6 +47,7 @@ from .freeze_mode import should_allow_cb_state_change
 from .manual_control import (
     ManualControlMixin,
     is_manual_pin_active,
+    is_operator_block_in_force,
     is_pin_lift_due,
 )
 from .outcome_window import OutcomeWindow, evaluate_trip
@@ -527,7 +528,7 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             # pinned circuit would fall through to the trial path once
             # recovery_timeout elapsed and keep leaking half_open_max_calls
             # requests per window for as long as the block stayed in place.
-            if state.manually_controlled and is_manual_pin_active(state):
+            if is_operator_block_in_force(state):
                 return "open"
 
             # The recovery gate is skipped for exactly one row shape: the

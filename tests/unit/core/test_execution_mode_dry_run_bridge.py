@@ -4,10 +4,10 @@ Covers the D1 bridge and the D2 guard predicate added to
 ``baldur.core.execution_mode``:
 
 - ``_resolve_mode()`` / ``get_execution_mode()`` precedence
-  (override > runtime dry-run toggle > ``BALDUR_EXECUTION_MODE`` env),
-  monotonicity toward observe-only, and the ``mode_source`` resolution.
-- ``_is_runtime_dry_run()`` fail-safe behaviour (any error → not dry-run, so
-  the toggle never disables healing on error).
+  (kill switch > override > runtime dry-run toggle > ``BALDUR_EXECUTION_MODE``
+  env), monotonicity toward observe-only, and the ``mode_source`` resolution.
+- ``_read_switches()`` fail-safe behaviour (an import failure → enabled and
+  live, so an early-init error never disables healing).
 - ``intervention_suppressed()`` predicate + its both-halves observability
   contract (fixed-field decision record AND the per-site would-have log).
 
@@ -26,7 +26,7 @@ import structlog
 from baldur.core.execution_mode import (
     ExecutionMode,
     _get_mode_from_env,
-    _is_runtime_dry_run,
+    _read_switches,
     _resolve_mode,
     clear_execution_mode_override,
     get_execution_mode,
@@ -58,8 +58,8 @@ def _env_mode(value: str | None):
 
 @contextmanager
 def _toggle(on: bool):
-    """Force the runtime dry-run toggle on/off by patching the reader."""
-    with patch("baldur.core.execution_mode._is_runtime_dry_run", return_value=on):
+    """Force the runtime dry-run toggle on/off (kill switch not pulled)."""
+    with patch("baldur.core.execution_mode._read_switches", return_value=(True, on)):
         yield
 
 
@@ -151,28 +151,28 @@ class TestExecutionModeBridge:
 
 
 class TestRuntimeDryRunFailSafe:
-    """D1 — ``_is_runtime_dry_run()`` is fail-safe (error → not dry-run)."""
+    """D1 — ``_read_switches()`` is fail-safe (error → enabled and live)."""
 
     def teardown_method(self):
         clear_execution_mode_override()
         _get_mode_from_env.cache_clear()
 
-    def test_toggle_read_error_falls_back_to_not_dry_run(self):
-        # Given the System Control reader raises (cycle / early-init / backend)
+    def test_switch_read_error_falls_back_to_enabled_and_live(self):
+        # Given the System Control accessor raises (cycle / early-init)
         with patch(
-            "baldur.services.system_control.is_dry_run",
-            side_effect=RuntimeError("backend down"),
+            "baldur.services.system_control.get_system_control",
+            side_effect=RuntimeError("early init"),
         ):
-            # Then the fail-safe swallows it and reports "not dry-run"
-            assert _is_runtime_dry_run() is False
+            # Then the fail-safe swallows it and reports enabled, not dry-run
+            assert _read_switches() == (True, False)
 
-    def test_toggle_read_error_preserves_healing_in_resolved_mode(self):
+    def test_switch_read_error_preserves_healing_in_resolved_mode(self):
         # The error must NOT disable healing — env=active stays executing.
         with (
             _env_mode(None),
             patch(
-                "baldur.services.system_control.is_dry_run",
-                side_effect=RuntimeError("backend down"),
+                "baldur.services.system_control.get_system_control",
+                side_effect=RuntimeError("early init"),
             ),
         ):
             mode, source = _resolve_mode()

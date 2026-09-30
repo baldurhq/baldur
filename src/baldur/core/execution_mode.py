@@ -155,25 +155,23 @@ def _get_mode_from_env() -> ExecutionMode:
     return ExecutionMode.active()
 
 
-def _is_runtime_dry_run() -> bool:
-    """Read the System Control runtime dry-run toggle, fail-safe.
+def _read_switches() -> tuple[bool, bool]:
+    """Read System Control's ``(enabled, dry_run)`` from one copy read.
 
-    The import is deliberately kept inside the function body: ``system_control``
-    pulls in the audit pipeline and the state backend, which would form an
-    import-time cycle if imported at module scope. A def-body import is excluded
-    from the first-party import-time graph by construction.
-
-    Any failure (import cycle, early init, backend error) falls back to "not
-    dry-run" so the toggle never disables healing on error — consistent with the
-    kill switch assuming the system is enabled when its state cannot be read.
+    The copy read itself never raises and does no store I/O. The import is
+    deliberately kept inside the function body: ``system_control`` pulls in the
+    audit pipeline and the state backend, which would form an import-time cycle
+    if imported at module scope. A def-body import is excluded from the
+    first-party import-time graph by construction. A failed import (early init)
+    reads as enabled and live, the defaults every process starts from.
     """
     # def-body lazy import — excluded from the G40 import-cycle graph
     try:
-        from baldur.services.system_control import is_dry_run
+        from baldur.services.system_control import get_system_control
 
-        return is_dry_run()
+        return get_system_control().switches()
     except Exception:
-        return False
+        return True, False
 
 
 def _resolve_mode() -> tuple[ExecutionMode, str]:
@@ -181,25 +179,33 @@ def _resolve_mode() -> tuple[ExecutionMode, str]:
 
     Single observe-only resolver. Precedence:
 
-    1. Programmatic override (``set_execution_mode``) — test / advanced hook,
-       wins absolutely (can force-execute over an on toggle).
-    2. Runtime dry-run toggle (System Control) — monotonic toward observe-only:
+    1. Kill switch (System Control) — while an operator has pulled it, every
+       automatic intervention steps aside exactly where dry-run holds it back.
+       Above the programmatic override: a code hook must not defeat the
+       operator's brake.
+    2. Programmatic override (``set_execution_mode``) — test / advanced hook,
+       can force-execute over an on dry-run toggle.
+    3. Runtime dry-run toggle (System Control) — monotonic toward observe-only:
        forces ``shadow`` only when the env mode would otherwise execute. An
        already-observe-only env posture (``shadow`` / ``evaluation``) is kept
        as-is, so ``evaluation`` retains ``validate_only=True``.
-    3. ``BALDUR_EXECUTION_MODE`` env — the deployment-time posture.
+    4. ``BALDUR_EXECUTION_MODE`` env — the deployment-time posture.
 
     Returns:
-        ``(mode, source)`` where source is one of ``"override"`` /
-        ``"runtime_toggle"`` / ``"env"`` — which rung resolved the mode. Used by
-        the would-have log so an operator can tell a console toggle from a
-        deployment-posture env var.
+        ``(mode, source)`` where source is one of ``"kill_switch"`` /
+        ``"override"`` / ``"runtime_toggle"`` / ``"env"`` — which rung resolved
+        the mode. Used by the would-have log so an operator can tell a console
+        toggle from a deployment-posture env var.
     """
+    enabled, dry_run = _read_switches()
+    if not enabled:
+        return ExecutionMode.shadow(), "kill_switch"
+
     if _override_mode is not None:
         return _override_mode, "override"
 
     env_mode = _get_mode_from_env()
-    if env_mode.should_execute and _is_runtime_dry_run():
+    if env_mode.should_execute and dry_run:
         return ExecutionMode.shadow(), "runtime_toggle"
     return env_mode, "env"
 
@@ -208,16 +214,27 @@ def get_execution_mode() -> ExecutionMode:
     """
     Get the current execution mode — the single observe-only source of truth.
 
-    Resolves the deployment-time env posture and the runtime dry-run toggle
-    through one function. Precedence: programmatic override > runtime dry-run
-    toggle > ``BALDUR_EXECUTION_MODE`` env. The toggle is monotonic toward
-    observe-only: it can force observe-only over an executing env posture, never
-    the reverse.
+    Resolves the operator's kill switch, the deployment-time env posture and
+    the runtime dry-run toggle through one function. Precedence: kill switch >
+    programmatic override > runtime dry-run toggle > ``BALDUR_EXECUTION_MODE``
+    env. While the kill switch is pulled this reports ``shadow``: Baldur's
+    automatic interventions step aside everywhere dry-run holds them back. The
+    toggle is monotonic toward observe-only: it can force observe-only over an
+    executing env posture, never the reverse.
 
     Returns:
         Current ExecutionMode configuration
     """
     return _resolve_mode()[0]
+
+
+def resolve_execution_mode() -> tuple[ExecutionMode, str]:
+    """The current execution mode and the rung that set it.
+
+    The source is one of ``"kill_switch"`` / ``"override"`` /
+    ``"runtime_toggle"`` / ``"env"``.
+    """
+    return _resolve_mode()
 
 
 def intervention_suppressed(
@@ -233,14 +250,19 @@ def intervention_suppressed(
     site-appropriate value — this is a guard predicate, not a control-flow
     router; the caller still owns the branch after it returns.
 
-    On the suppressed path this emits both halves of the would-have contract in
-    one place so every site logs identically:
+    On a dry-run / shadow / evaluation suppression this emits both halves of the
+    would-have contract in one place so every site logs identically:
 
     - the fixed-field decision record
       (``log_intervention_evaluated(allowed=False, POLICY_CONSTRAINT_ACTIVE)``),
       mirroring the action executor's log-only path; and
     - the per-site structured log carrying the suppressed action's identity and
       the ``mode_source`` field (the half the fixed-field record cannot express).
+
+    A suppression by the kill switch emits neither: the would-have timeline is
+    dry-run's product, and an operator who pulls the brake during an incident
+    needs reach, not a per-call record at request rate. System Control logs
+    once per process when its copy of the switch changes.
 
     Args:
         service_name: Affected service identifier (decision-record field).
@@ -255,6 +277,8 @@ def intervention_suppressed(
     mode, source = _resolve_mode()
     if mode.should_execute:
         return False
+    if source == "kill_switch":
+        return True
 
     log_intervention_evaluated(
         service_name=service_name,
@@ -277,6 +301,7 @@ __all__ = [
     "ExecutionMode",
     "get_execution_mode",
     "intervention_suppressed",
+    "resolve_execution_mode",
     "set_execution_mode",
     "clear_execution_mode_override",
 ]

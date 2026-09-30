@@ -636,6 +636,14 @@ class BaldurEventBus:
 
         return handlers_called
 
+    def publish_local(self, event: BaldurEvent) -> int:
+        """Publish an event to this process's handlers only.
+
+        The in-memory bus never leaves the process, so this is ``publish``.
+        The distributed bus overrides the distinction.
+        """
+        return self.publish(event)
+
     def emit(
         self,
         event_type: EventType,

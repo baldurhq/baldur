@@ -253,6 +253,7 @@ def init(
             _emit_tier_setting_warnings()
             ext_result = _run_pro_extensions()
             _enforce_post_hook_requirements()
+            _load_control_state()
             _seed_circuit_breaker_config()
             _warn_unknown_env_vars()
             _apply_audit_default_provider()
@@ -4875,6 +4876,58 @@ def _start_dlq_outbox_starter() -> None:
         logger.warning("baldur.dlq_outbox_start_failed", error=exc)
 
 
+def _load_control_state() -> None:
+    """Read every control-state key once, then start this process's refresher.
+
+    The switch state (kill switch, dry-run, emergency level) lives in the shared
+    state store, and every process acts on its own copy. This pass gives the
+    process a copy it read itself before it serves anything; the refresher then
+    keeps it within each key's interval of the store.
+
+    Runs in every process that calls ``init()``, fork sources included — no
+    ``is_fork_source_process()`` gate: a ``--preload`` master runs scheduled
+    jobs that read the copy, and a worker forked from it inherits a copy at
+    most one interval old. Placed after the PRO extensions, which register the
+    emergency-level key. A store that cannot be reached or built leaves the
+    default copy (enabled, live, NORMAL) marked unknown; the refresher retries
+    and nothing here raises.
+    """
+    try:
+        from baldur.core.control_state import get_control_state_refresher
+        from baldur.services.system_control import get_system_control
+
+        # Constructing the manager registers its key; it performs no store I/O.
+        get_system_control()
+        refresher = get_control_state_refresher()
+        refresher.refresh_now()
+        refresher.start()
+    except Exception as exc:
+        logger.warning("baldur.control_state_load_failed", error=exc)
+
+
+def _start_control_state_refresher() -> None:
+    """Load the control state and start the refresher in this worker.
+
+    The per-worker counterpart of ``_load_control_state``: a worker forked from
+    a process that ran ``init()`` holds no live refresher (threads do not
+    survive ``fork()``), so it reads once itself and starts its own thread
+    before serving. A process whose refresher already runs — ``init()``'s own
+    process — skips the extra read. No fork-source gate, for the reason
+    ``_load_control_state`` gives.
+    """
+    try:
+        from baldur.core.control_state import get_control_state_refresher
+        from baldur.services.system_control import get_system_control
+
+        get_system_control()
+        refresher = get_control_state_refresher()
+        if not refresher.is_running:
+            refresher.refresh_now()
+        refresher.start()
+    except Exception as exc:
+        logger.warning("baldur.control_state_refresher_start_failed", error=exc)
+
+
 def _start_event_bus_listener_if_enabled() -> None:
     """Revive the Redis event-bus listener thread in this process.
 
@@ -4991,6 +5044,13 @@ def _start_event_bus_listener_if_enabled() -> None:
 # ``redis`` backend, which defaults to ``memory``, so no AUTOSTART hatch is
 # needed. Order-independent from the watchdog starter because every listener
 # spawn path is individually fork-safe.
+# ``_start_control_state_refresher`` reads the switch state (kill switch,
+# dry-run, emergency level) once in this worker and starts the refresher that
+# keeps its copy within each key's interval of the store. It deliberately has
+# NO fork-source skip: a pre-fork server's worker started without the hook
+# reads as the fork source for life and still needs a live copy, and the fork
+# source itself runs scheduled jobs that read it. A process whose refresher
+# already runs skips the read.
 
 # Order note: the two starters that perform entry-point fork repair (audit
 # pipeline, DLQ outbox) run FIRST — before anything that can start the
@@ -5013,6 +5073,7 @@ _BACKGROUND_WORKER_STARTERS: tuple[Callable[[], None], ...] = (
     _seed_circuit_breaker_state_if_enabled,
     _setup_config_invalidation_delivery,
     _start_event_bus_listener_if_enabled,
+    _start_control_state_refresher,
 )
 
 

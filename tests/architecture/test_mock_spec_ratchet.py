@@ -177,7 +177,7 @@ _MOCK_CREATION_BUDGETS: dict[str, int] = {
     # identity against the runtime singleton instead.
     # close write-through delegation: -1 — the close-check test's spec-less
     # mirror double became autospec patches of the two mirror methods.
-    "oss": 4315,
+    "oss": 4313,
     "pro": 1800,
     "dormant": 401,
 }
@@ -190,7 +190,7 @@ _DECORATOR_PATCH_BUDGETS: dict[str, int] = {
     # audit WAL seam: -4 — the DLQ-compression audit suite stopped patching the
     # PRO audit writer per test and now stubs the WAL that writer resolves, so
     # the real delivery-ownership rule runs instead of a stand-in for it.
-    "oss": 663,
+    "oss": 661,
     "pro": 434,
     "dormant": 144,
 }

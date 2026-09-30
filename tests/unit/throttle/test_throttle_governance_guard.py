@@ -103,14 +103,14 @@ class TestThrottleGovernanceGuardBreakGlassBehavior:
 
 
 # =============================================================================
-# Kill Switch rejection
+# Kill Switch — not a refusal
 # =============================================================================
 
 
 class TestThrottleGovernanceGuardKillSwitchBehavior:
-    """Kill Switch rejection."""
+    """A pulled kill switch never refuses the call: Baldur steps aside instead."""
 
-    def test_kill_switch_disabled_rejects(self):
+    def test_kill_switch_disabled_does_not_reject(self):
         guard = ThrottleGovernanceGuard()
         checker = _make_checker(is_system_enabled=False)
 
@@ -119,21 +119,9 @@ class TestThrottleGovernanceGuardKillSwitchBehavior:
             ProviderRegistry.governance.override(checker),
         ):
             result = guard.check()
-            assert result.allowed is False
-            assert result.reason == "kill_switch_disabled"
-
-    def test_kill_switch_exception_failopen(self):
-        """``is_system_enabled`` raising falls through to allowed (fail-open)."""
-        guard = ThrottleGovernanceGuard()
-        checker = _make_checker()
-        checker.is_system_enabled.side_effect = RuntimeError("boom")
-
-        with (
-            patch.object(guard, "_is_break_glass_active", return_value=False),
-            ProviderRegistry.governance.override(checker),
-        ):
-            result = guard.check()
             assert result.allowed is True
+            assert result.reason != "kill_switch_disabled"
+            checker.is_system_enabled.assert_not_called()
 
 
 # =============================================================================

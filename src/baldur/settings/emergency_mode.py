@@ -115,7 +115,11 @@ class EmergencyModeSettings(BaseSettings):
         default=30,
         ge=5,
         le=300,
-        description="State cache TTL (seconds).",
+        description=(
+            "Refresh interval (seconds): how often every process re-reads the "
+            "emergency level from the state store. A level changed in one "
+            "process reaches the others within this interval."
+        ),
     )
     max_snapshots: MediumCount = Field(
         default=10,

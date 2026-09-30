@@ -49,6 +49,7 @@ from baldur.services.retry_handler.rate_limit_detection import (
 
 from .config import CircuitBreakerConfig, CircuitState
 from .exceptions import CircuitBreakerOpenError
+from .manual_control import is_operator_block_in_force
 from .rate_limit_observation import (
     OutboundObservationScope,
     close_scope,
@@ -270,8 +271,24 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
         # read-only for the would-have signal, run the business function exactly
         # once, and never reject or record; the business exception still
         # propagates. The active path keeps its single-fetch admission below.
+        # One exception: an operator's Block is the operator's instruction, not
+        # an automatic intervention, and is refused exactly as on the active
+        # path — pulling the kill switch must not reopen traffic to a service
+        # the operator cut off.
         if not get_execution_mode().should_execute:
             peek = service.get_or_create_state(self._service_name)
+            if is_operator_block_in_force(peek):
+                block_result: PolicyResult[T] = PolicyResult(
+                    outcome=PolicyOutcome.REJECTED,
+                    error=CircuitBreakerOpenError(self._service_name),
+                    executed_policies=["circuit_breaker"],
+                    metadata={
+                        "service_name": self._service_name,
+                        "state": peek.state,
+                    },
+                )
+                self._invoke_hooks("on_reject", self._service_name, "circuit_open")
+                return "reject", block_result, None
             would_reject = peek.state == CircuitState.OPEN
             intervention_suppressed(
                 service_name=self._service_name,

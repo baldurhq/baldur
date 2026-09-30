@@ -80,6 +80,8 @@ __all__ = [
     "CompensationError",
     "ConcurrencyConflictError",
     "ConfigVersionConflictError",
+    # Control state
+    "SystemControlStoreError",
 ]
 
 
@@ -781,3 +783,49 @@ class ConfigVersionConflictError(ConcurrencyConflictError):
         if self.config_type:
             ctx["config_type"] = self.config_type
         return ctx
+
+
+# ── Control state errors ─────────────────────────────────────
+
+
+class SystemControlStoreError(BaldurError):
+    """Raised when an operator control change did not reach the shared store.
+
+    Covers the kill switch, dry-run and emergency-level changes. ``persisted``
+    is ``False`` when the store does not hold the change and never will, and
+    ``None`` when the write may or may not have landed (a later read of the
+    store decides it). ``applies`` says where the change is in force:
+    ``"none"`` (nowhere) or ``"this_process"`` (held locally). Lives in OSS
+    core so the OSS REST handlers can map it to HTTP 503 across the
+    PRO-manager boundary.
+    """
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        change: str = "",
+        persisted: bool | None = False,
+        applies: str = "none",
+        withdrew_held_change: bool = False,
+        may_still_land: bool = False,
+    ):
+        if not message:
+            outcome = (
+                "was not applied" if persisted is False else "has an unknown outcome"
+            )
+            message = f"Control change {change or 'request'} {outcome}: the state store did not confirm it"
+        super().__init__(message, code="control_state_store_unavailable")
+        self.change = change
+        self.persisted = persisted
+        self.applies = applies
+        self.withdrew_held_change = withdrew_held_change
+        self.may_still_land = may_still_land
+
+    def extra_context(self) -> dict[str, Any]:
+        return {
+            **super().extra_context(),
+            "change": self.change,
+            "persisted": self.persisted,
+            "applies": self.applies,
+        }

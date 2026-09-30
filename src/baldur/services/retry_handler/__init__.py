@@ -3,7 +3,7 @@ Retry Handler Package
 
 Provides retry mechanisms with:
 - RetryPolicy: Pure retry policy (recommended, PolicyComposer compatible)
-- Guards: KillSwitchGuard, ErrorBudgetGuard
+- Guards: ErrorBudgetGuard
 - Sinks: DLQSink
 
 .. versionadded:: 2.1.0
@@ -21,7 +21,7 @@ import types as _types
 from typing import Any as _Any
 
 # Guards
-from .guards import ErrorBudgetGuard, KillSwitchGuard
+from .guards import ErrorBudgetGuard
 
 # === Explicit re-exports ===
 # Models
@@ -52,7 +52,6 @@ __all__ = [
     # policy
     "RetryPolicy",
     # guards
-    "KillSwitchGuard",
     "ErrorBudgetGuard",
     # sinks
     "DLQSink",

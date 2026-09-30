@@ -98,6 +98,19 @@ def _try_get_cb_service():
     return service
 
 
+def _is_operator_block(state_data: Any) -> bool:
+    """Whether the row is an operator's Block in force (fail-open on a read error)."""
+    try:
+        # def-body import: the breaker package is loaded lazily by this module.
+        from baldur.services.circuit_breaker.manual_control import (
+            is_operator_block_in_force,
+        )
+
+        return is_operator_block_in_force(state_data)
+    except Exception:
+        return False
+
+
 def check_cb_open(
     request: RequestContext,
     service_name: str | None = None,
@@ -108,12 +121,14 @@ def check_cb_open(
     supplied, or the CB infrastructure is unavailable (fail-open — a broken
     health check should never block legitimate traffic).
 
-    Observe-only (dry-run / shadow / evaluation) also returns ``None``: the
-    rejection is this seam's only intervention, so a mode that promises to
-    decide without intervening must report the 503 rather than send it. The
-    Django middleware gates its own preemptive branch the same way, and the
-    breaker policy gates the outbound one — this is the third seam of the same
-    decision, not a new posture.
+    Observe-only (dry-run / shadow / evaluation, or a pulled kill switch) also
+    returns ``None``: the rejection is this seam's only intervention, so a mode
+    that promises to decide without intervening must report the 503 rather than
+    send it. An operator's Block is still refused there — it is the operator's
+    instruction, not an automatic intervention. The Django middleware gates its
+    own preemptive branch the same way, and the breaker policy gates the
+    outbound one — this is the third seam of the same decision, not a new
+    posture.
     """
     if service_name is None:
         return None
@@ -140,8 +155,9 @@ def check_cb_open(
 
     # Resolved before the reject is built, not after: the ResponseContext IS
     # the intervention, and the WARNING below announces a block that observe-only
-    # never performs.
-    if intervention_suppressed(
+    # never performs. An operator's Block is the exception: it is the operator's
+    # instruction, refused under observe-only exactly as on the active path.
+    if not _is_operator_block(state_data) and intervention_suppressed(
         service_name=service_name,
         action="circuit_breaker_reject",
         would_reject=True,

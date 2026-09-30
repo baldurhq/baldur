@@ -579,6 +579,21 @@ class RedisEventBus:
         self._publish_distributed(event)
         return count
 
+    def publish_local(self, event: BaldurEvent) -> int:
+        """Publish an event to this process's handlers only, never to Redis.
+
+        For a transition this process observed rather than made: its peers
+        observe it themselves, and a copy on the channel would reach each of
+        them a second time.
+
+        Args:
+            event: Event to publish
+
+        Returns:
+            int: Number of local handlers called
+        """
+        return self._local_bus.publish(event)
+
     def emit(
         self,
         event_type: EventType,

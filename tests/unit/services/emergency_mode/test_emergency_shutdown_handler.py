@@ -3,7 +3,7 @@ Tests for EmergencyModeShutdownHandler (395 C2).
 
 Covers:
 - ShutdownHandler interface contract
-- on_shutdown_start calls stop_gradual_recovery
+- on_shutdown_start calls the shutdown stop (not the operator's stop)
 - is_drain_complete checks recovery thread state
 - on_force_shutdown re-calls stop
 """
@@ -37,6 +37,7 @@ def mock_manager():
     manager = MagicMock()
     manager._recovery_thread = None
     manager.stop_gradual_recovery = MagicMock()
+    manager.stop_gradual_recovery_on_shutdown = MagicMock()
     return manager
 
 
@@ -52,30 +53,42 @@ def handler(mock_manager):
 
 
 class TestEmergencyModeShutdownHandlerContract:
-    """EmergencyModeShutdownHandler ShutdownHandler 인터페이스 계약 검증."""
+    """EmergencyModeShutdownHandler ShutdownHandler interface contract."""
 
     def test_implements_shutdown_handler_interface(self, handler):
-        """ShutdownHandler ABC를 구현한다."""
+        """Implements the ShutdownHandler ABC."""
         assert isinstance(handler, ShutdownHandler)
 
-    def test_on_shutdown_start_calls_stop_gradual_recovery(self, handler, mock_manager):
-        """on_shutdown_start()가 stop_gradual_recovery(stopped_by=...)를 호출한다."""
-        handler.on_shutdown_start()
-        mock_manager.stop_gradual_recovery.assert_called_once()
-        # Regression guard: the real GracefulDegradationManager
-        # .stop_gradual_recovery requires `stopped_by`; a bare no-arg call
-        # raises TypeError in production (masked here only because mock_manager
-        # is an unspec'd MagicMock).
-        assert "stopped_by" in mock_manager.stop_gradual_recovery.call_args.kwargs
+    def test_on_shutdown_start_calls_the_shutdown_stop(self, handler, mock_manager):
+        """on_shutdown_start() calls the shutdown stop, never the operator's stop.
 
-    def test_on_force_shutdown_calls_stop_gradual_recovery(self, handler, mock_manager):
-        """on_force_shutdown()이 stop_gradual_recovery(stopped_by=...)를 호출한다."""
+        The operator's stop clears any stored walk; the shutdown stop clears
+        only a walk this process runs, so a worker that inherited a walk from
+        its fork source leaves it alone.
+        """
+        handler.on_shutdown_start()
+        mock_manager.stop_gradual_recovery_on_shutdown.assert_called_once()
+        mock_manager.stop_gradual_recovery.assert_not_called()
+        # Regression guard: the real method requires `stopped_by`; a bare
+        # no-arg call raises TypeError in production (masked here only because
+        # mock_manager is an unspec'd MagicMock).
+        assert (
+            "stopped_by"
+            in mock_manager.stop_gradual_recovery_on_shutdown.call_args.kwargs
+        )
+
+    def test_on_force_shutdown_calls_the_shutdown_stop(self, handler, mock_manager):
+        """on_force_shutdown() calls the shutdown stop as well."""
         handler.on_force_shutdown(pending_requests=[])
-        mock_manager.stop_gradual_recovery.assert_called_once()
-        assert "stopped_by" in mock_manager.stop_gradual_recovery.call_args.kwargs
+        mock_manager.stop_gradual_recovery_on_shutdown.assert_called_once()
+        mock_manager.stop_gradual_recovery.assert_not_called()
+        assert (
+            "stopped_by"
+            in mock_manager.stop_gradual_recovery_on_shutdown.call_args.kwargs
+        )
 
     def test_on_drain_complete_is_noop(self, handler, mock_manager):
-        """on_drain_complete()는 아무 것도 하지 않는다."""
+        """on_drain_complete() does nothing."""
         handler.on_drain_complete()
         # No exception raised is sufficient
 
@@ -86,22 +99,22 @@ class TestEmergencyModeShutdownHandlerContract:
 
 
 class TestIsDrainCompleteBehavior:
-    """is_drain_complete() recovery thread 상태 감지 동작 검증."""
+    """is_drain_complete() recovery thread state detection behavior."""
 
     def test_drain_complete_when_no_thread(self, handler, mock_manager):
-        """recovery thread가 None이면 True를 반환한다."""
+        """Returns True if the recovery thread is None."""
         mock_manager._recovery_thread = None
         assert handler.is_drain_complete() is True
 
     def test_drain_complete_when_thread_not_alive(self, handler, mock_manager):
-        """recovery thread가 종료 상태이면 True를 반환한다."""
+        """Returns True if the recovery thread has terminated."""
         mock_thread = MagicMock(spec=threading.Thread)
         mock_thread.is_alive.return_value = False
         mock_manager._recovery_thread = mock_thread
         assert handler.is_drain_complete() is True
 
     def test_drain_not_complete_when_thread_alive(self, handler, mock_manager):
-        """recovery thread가 실행 중이면 False를 반환한다."""
+        """Returns False if the recovery thread is running."""
         mock_thread = MagicMock(spec=threading.Thread)
         mock_thread.is_alive.return_value = True
         mock_thread.join = MagicMock()  # join(0.1) returns, thread still alive

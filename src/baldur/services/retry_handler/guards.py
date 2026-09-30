@@ -1,5 +1,5 @@
 """
-Retry Policy Guards — Kill Switch, Error Budget pre-checks.
+Retry Policy Guards — Error Budget pre-check.
 
 Pre-check implementation that PolicyComposer calls before executing a Policy.
 If Guard.check() returns allowed=False, Policy execution is blocked.
@@ -12,39 +12,6 @@ import structlog
 from baldur.interfaces.resilience_policy import GuardResult, PolicyContext
 
 logger = structlog.get_logger()
-
-
-class KillSwitchGuard:
-    """
-    Global Kill Switch pre-check.
-
-    Calls SystemControlManager.is_enabled() to check whether the self-healing
-    system is enabled. When disabled, blocks all Policy execution.
-    """
-
-    @property
-    def name(self) -> str:
-        return "kill_switch"
-
-    def check(self, context: PolicyContext | None = None) -> GuardResult:
-        """Check whether the Kill Switch is active. context is unused."""
-        try:
-            from baldur.services.system_control import SystemControlManager
-
-            manager = SystemControlManager()
-            if manager.is_enabled():
-                return GuardResult(allowed=True)
-            return GuardResult(
-                allowed=False,
-                reason="Kill Switch is active: baldur system is disabled",
-            )
-        except Exception as e:
-            # Fail-Open: pass when SystemControlManager fails to load
-            logger.debug(
-                "kill_switch_guard.systemcontrolmanager_available",
-                error=e,
-            )
-            return GuardResult(allowed=True)
 
 
 class ErrorBudgetGuard:

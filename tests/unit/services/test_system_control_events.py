@@ -1,27 +1,35 @@
-"""SystemControlManager kill-switch event emission and persist-dirty guard.
+"""SystemControlManager kill-switch event emission and held-change guard.
 
 Target: ``baldur.services.system_control.SystemControlManager`` — the flip
 path that publishes ``KILL_SWITCH_ACTIVATED`` / ``KILL_SWITCH_DEACTIVATED``
-and the persist-dirty guard that keeps a failed state write from being
-silently undone by the next refresh.
+and the held-change guard: a kill switch the store did not confirm is held in
+this process, retried on each refresh pass, and never lets a stale write
+overwrite newer state.
 
 Verification techniques applied (§8):
   - §8.8 State transition — emission fires only on an observed transition
   - §8.3 Idempotency — a repeated flip publishes nothing
   - §8.4 Side effects — payload / source / priority reaching subscribers
-  - §8.2 Exception/edge cases — backend write failure sets persist-dirty and
-    the refresh refuses to resurrect the stale backend value
+  - §8.2 Exception/edge cases — a store write failure holds the change in this
+    process and a refresh pass never resurrects the stale store value
 """
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 
-from baldur.core.state_backend import MemoryStateBackend
+from baldur.core.control_state import get_control_state_refresher
+from baldur.core.exceptions import SystemControlStoreError
+from baldur.core.state_backend import (
+    MemoryStateBackend,
+    configure_state_backend,
+    reset_state_backend,
+)
 from baldur.services.event_bus import BaldurEvent, EventType
 from baldur.services.event_bus.bus.event_types import EventPriority
 from baldur.services.system_control import (
@@ -40,9 +48,9 @@ REASON = "payment incident"
 class _FlakyBackend(MemoryStateBackend):
     """Memory backend whose writes can be forced to fail.
 
-    Models the shipped backends' real failure shape: ``set`` raises (Redis
-    OOM, read-only file mount) while ``get`` keeps serving the last value
-    that actually landed.
+    Models the shipped backends' real failure shape: a write raises (Redis
+    OOM, read-only file mount) while reads keep serving the last value that
+    actually landed.
     """
 
     def __init__(self) -> None:
@@ -55,6 +63,11 @@ class _FlakyBackend(MemoryStateBackend):
         if self.fail_writes:
             raise RuntimeError("backend write failed")
         super().set(key, value, ttl_seconds=ttl_seconds)
+
+    def compare_and_set(self, key, expected_version, new_value, **kwargs) -> bool:
+        if self.fail_writes:
+            raise RuntimeError("backend write failed")
+        return super().compare_and_set(key, expected_version, new_value, **kwargs)
 
 
 @dataclass
@@ -70,8 +83,14 @@ class _FlipEnv:
         self.backend.set(STATE_KEY, SystemState(enabled=enabled).to_dict())
 
     def set_local_mirror(self, *, enabled: bool) -> None:
-        """Force this process's cached view, leaving the backend untouched."""
-        self.manager._cached_state.enabled = enabled
+        """Force this process's copy, leaving the backend untouched."""
+        self.manager._snapshot = dataclasses.replace(
+            self.manager._snapshot, enabled=enabled
+        )
+
+    def refresh(self) -> None:
+        """Run one refresh pass, as this process's refresher would."""
+        get_control_state_refresher().refresh_now()
 
     def event_types(self) -> list[EventType]:
         return [e.event_type for e in self.events]
@@ -86,10 +105,8 @@ def flip_env():
     SystemControlManager._instance = None
 
     backend = _FlakyBackend()
-    with patch(
-        "baldur.services.system_control.get_state_backend", return_value=backend
-    ):
-        manager = SystemControlManager()
+    configure_state_backend(backend)
+    manager = SystemControlManager()
 
     bus = get_event_bus()
     bus.reset()
@@ -103,9 +120,11 @@ def flip_env():
 
     yield _FlipEnv(manager=manager, backend=backend, events=events)
 
+    backend.fail_writes = False
     bus.reset()
     SystemControlManager._instance = None
     reset_system_control()
+    reset_state_backend()
 
 
 # =============================================================================
@@ -182,13 +201,11 @@ class TestSystemControlKillSwitchEmissionBehavior:
     def test_disable_emits_when_either_view_differs_from_the_committed_value(
         self, flip_env, mirror_enabled, backend_enabled, expected
     ):
-        """disable() emits unless BOTH the pre- and post-refresh views were
-        already disabled.
+        """disable() emits unless BOTH this process's copy and the stored state
+        it replaced were already disabled.
 
-        The pre-refresh half covers a backend another pod already flipped
-        (the refresh performs the transition, so the post-refresh sample is
-        already the committed value); the post-refresh half covers a local
-        mirror that was wrongly disabled.
+        The stored half covers a backend another pod already flipped; the copy
+        half covers a local copy that was wrongly disabled.
         """
         # Given
         flip_env.seed_backend(enabled=backend_enabled)
@@ -220,9 +237,8 @@ class TestSystemControlKillSwitchEmissionBehavior:
     ):
         """enable() is the symmetric twin of the disable() gate.
 
-        The wrongly-enabled mirror case is the one an init-time fallback
-        state produces: without the post-refresh half the operator's own
-        enable() would notify nobody while the backend transitioned.
+        Without the stored half, an operator's enable() over a store another
+        process disabled would notify nobody while the store transitioned.
         """
         # Given
         flip_env.seed_backend(enabled=backend_enabled)
@@ -241,8 +257,7 @@ class TestSystemControlKillSwitchEmissionBehavior:
         assert len(flip_env.events) == 1
 
     def test_reset_publishes_nothing(self, flip_env):
-        """reset() is test cleanup: a stale 'disabled' verdict decaying at TTL
-        is the safe direction, and recovery events from cleanup are noise."""
+        """reset() is test cleanup: recovery events from cleanup are noise."""
         flip_env.manager.disable(actor=ACTOR, reason=REASON)
         flip_env.events.clear()
 
@@ -262,73 +277,73 @@ class TestSystemControlKillSwitchEmissionBehavior:
         assert flip_env.events == []
 
     def test_flip_still_commits_when_the_event_bus_is_unavailable(self, flip_env):
-        """Emission is fail-safe: a broken bus degrades subscribers to their
-        own TTLs, it never aborts the kill switch."""
+        """Emission is fail-safe: a broken bus never aborts the kill switch."""
         with patch.object(SystemControlManager, "_get_event_bus", return_value=None):
-            state = flip_env.manager.disable(actor=ACTOR, reason=REASON)
+            change = flip_env.manager.disable(actor=ACTOR, reason=REASON)
 
-        assert state.enabled is False
+        assert change.state.enabled is False
+        assert change.persisted is True
         assert flip_env.events == []
 
 
 # =============================================================================
-# Behavior — persist-dirty guard (a failed write must stay fail-closed)
+# Behavior — held changes (a kill switch the store did not confirm)
 # =============================================================================
 
 
 class TestSystemControlPersistDirtyBehavior:
-    """A failed state write is recorded, retried, and never overwritten."""
+    """A disable the store did not confirm is held, retried, and never overwrites."""
 
-    def test_failed_state_write_marks_the_manager_persist_dirty(self, flip_env):
-        """The write failure is swallowed by _save_state, so the flag is the
-        only record a caller can act on."""
+    def test_failed_state_write_holds_the_disable_in_this_process(self, flip_env):
+        """The response says where the change applies, and the flag records it."""
         flip_env.seed_backend(enabled=True)
         flip_env.backend.fail_writes = True
 
-        flip_env.manager.disable(actor=ACTOR, reason=REASON)
+        change = flip_env.manager.disable(actor=ACTOR, reason=REASON)
 
+        assert change.persisted is False
+        assert change.applies == "this_process"
         assert flip_env.manager.is_persist_dirty() is True
 
     def test_successful_write_leaves_the_manager_clean(self, flip_env):
         """Negative twin — the flag is not simply always set after a flip."""
-        flip_env.manager.disable(actor=ACTOR, reason=REASON)
+        change = flip_env.manager.disable(actor=ACTOR, reason=REASON)
 
+        assert change.persisted is True
         assert flip_env.manager.is_persist_dirty() is False
 
-    def test_refresh_while_dirty_does_not_resurrect_the_stale_backend_value(
+    def test_refresh_while_held_does_not_resurrect_the_stale_backend_value(
         self, flip_env
     ):
-        """The kill switch stays closed locally after a failed write.
+        """The kill switch stays pulled locally after a failed write.
 
-        Without the guard the refresh re-reads the unwritten backend and
-        overwrites the local state back to enabled — turning a fail-closed
-        kill switch into fail-open indefinitely.
+        Without the guard a refresh pass reads the unwritten store and assigns
+        'enabled' back — turning a pulled brake into a released one.
         """
         # Given: the backend still holds the pre-flip 'enabled' value
         flip_env.seed_backend(enabled=True)
         flip_env.backend.fail_writes = True
         flip_env.manager.disable(actor=ACTOR, reason=REASON)
 
-        # When: every later reader refreshes from the backend
-        first = flip_env.manager.get_state(refresh=True)
-        second = flip_env.manager.get_state(refresh=True)
+        # When: two refresh passes run
+        flip_env.refresh()
+        flip_env.refresh()
 
         # Then
-        assert first.enabled is False
-        assert second.enabled is False
+        assert flip_env.manager.is_enabled() is False
         assert flip_env.backend.get(STATE_KEY)["enabled"] is True
 
-    def test_refresh_retries_the_failed_write_and_clears_the_dirty_flag(self, flip_env):
-        """Persistence self-heals on the next refresh once the backend is back."""
+    def test_refresh_retries_the_held_write_and_clears_the_flag(self, flip_env):
+        """Persistence self-heals on the next pass once the backend is back."""
         flip_env.seed_backend(enabled=True)
         flip_env.backend.fail_writes = True
         flip_env.manager.disable(actor=ACTOR, reason=REASON)
 
         flip_env.backend.fail_writes = False
-        state = flip_env.manager.get_state(refresh=True)
+        flip_env.refresh()
 
         assert flip_env.manager.is_persist_dirty() is False
-        assert state.enabled is False
+        assert flip_env.manager.is_enabled() is False
         assert flip_env.backend.get(STATE_KEY)["enabled"] is False
 
     def test_persist_dirty_gauge_is_set_on_failure_and_cleared_on_retry(self, flip_env):
@@ -342,16 +357,12 @@ class TestSystemControlPersistDirtyBehavior:
             assert mock_gauge.call_args_list[-1].args == (True,)
 
             flip_env.backend.fail_writes = False
-            flip_env.manager.get_state(refresh=True)
+            flip_env.refresh()
             assert mock_gauge.call_args_list[-1].args == (False,)
 
     def test_repeated_retry_failures_are_announced_only_once(self, flip_env):
-        """A dirty node retries the write on every refresh — and every
-        governance cache miss is a refresh.
-
-        Announcing each retry at exception level would put a traceback on the
-        gate's miss path for as long as the backend stays down; the standing
-        signals are the gauge and the status field instead.
+        """A held change is retried on every pass; each failed retry logs at
+        DEBUG only — the standing signals are the gauge and the status field.
         """
         flip_env.seed_backend(enabled=True)
         flip_env.backend.fail_writes = True
@@ -360,28 +371,29 @@ class TestSystemControlPersistDirtyBehavior:
 
         with patch("baldur.services.system_control.logger") as mock_logger:
             for _ in range(3):
-                flip_env.manager.get_state(refresh=True)
+                flip_env.refresh()
 
         assert mock_logger.exception.call_count == 0
         assert mock_logger.warning.call_count == 0
 
-    def test_unpersisted_enable_never_overwrites_a_newer_remote_disable(self, flip_env):
-        """The retry must not blind-write a stale 'enabled' over a live flip.
+    def test_unconfirmed_enable_never_overwrites_a_newer_remote_disable(self, flip_env):
+        """A re-enable the store did not confirm changes nothing locally.
 
-        The guard exists to keep an unpersisted *disable* closed. Applying it
-        to an unpersisted *enable* points it the other way: the retry is a
-        last-writer-wins write, so a node whose enable never landed would
-        resurrect it over a kill switch another node committed meanwhile --
-        lifting that kill switch cluster-wide, with no event published.
+        It raises, keeps this process disabled, and leaves nothing to retry:
+        a node whose enable never landed cannot resurrect it over a kill
+        switch another node committed meanwhile.
         """
         # Given: this node's enable() could not be persisted
         flip_env.seed_backend(enabled=False)
+        flip_env.set_local_mirror(enabled=False)
         flip_env.backend.fail_writes = True
-        flip_env.manager.enable(actor=ACTOR, reason="incident resolved")
-        assert flip_env.manager.is_enabled() is True
+        with pytest.raises(SystemControlStoreError) as excinfo:
+            flip_env.manager.enable(actor=ACTOR, reason="incident resolved")
+        assert excinfo.value.persisted is False
+        assert excinfo.value.applies == "none"
+        assert flip_env.manager.is_enabled() is False
 
         # And: the backend recovers, and another node commits a kill switch
-        # before this one has refreshed
         flip_env.backend.fail_writes = False
         flip_env.backend.set(
             STATE_KEY,
@@ -390,22 +402,23 @@ class TestSystemControlPersistDirtyBehavior:
             ).to_dict(),
         )
 
-        # When: this node refreshes (a governance cache miss, a status poll)
-        state = flip_env.manager.get_state(refresh=True)
+        # When: this node refreshes
+        flip_env.refresh()
 
         # Then: the remote kill switch stands, here and in the backend
-        assert state.enabled is False
+        assert flip_env.manager.is_enabled() is False
         assert flip_env.backend.get(STATE_KEY)["enabled"] is False
         assert flip_env.backend.get(STATE_KEY)["disabled_by"] == "other-pod"
 
-    def test_dirty_flip_still_emits_and_blocks_locally(self, flip_env):
-        """The in-process flip, its event and local blocking all survive a
-        backend outage — only cross-process propagation waits for the retry."""
+    def test_held_flip_still_announces_and_blocks_locally(self, flip_env):
+        """The in-process flip, its local announcement and local stepping aside
+        all survive a store outage — only cross-process reach waits for the
+        retry."""
         flip_env.seed_backend(enabled=True)
         flip_env.backend.fail_writes = True
 
-        state = flip_env.manager.disable(actor=ACTOR, reason=REASON)
+        change = flip_env.manager.disable(actor=ACTOR, reason=REASON)
 
-        assert state.enabled is False
+        assert change.state.enabled is False
         assert flip_env.manager.is_enabled() is False
         assert flip_env.event_types() == [EventType.KILL_SWITCH_ACTIVATED]

@@ -311,7 +311,7 @@ class PolicyGuard(Protocol):
     Pre-execution validation for a Policy.
 
     Guard implementations must define the default behavior when context=None:
-    - KillSwitchGuard: ignore context, only check global state
+    - FullStopGuard: ignore context, only check global state
     - ErrorBudgetGuard: tier_id=None -> global decision (tier-agnostic)
     - RetryBudgetGuard: decide against the default budget
     """

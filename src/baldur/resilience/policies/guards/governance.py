@@ -1,9 +1,14 @@
 """
-ThrottleGovernanceGuard — Kill Switch + Emergency + ErrorBudget + BreakGlass guard.
+ThrottleGovernanceGuard — Emergency + ErrorBudget + BreakGlass guard.
 
-Replaces the four hardcoded governance dependencies that lived on
+Replaces the hardcoded governance dependencies that lived on
 AdaptiveThrottle via the GovernanceCheckMixin inheritance with a single
 PolicyComposer-compatible Guard.
+
+The kill switch is deliberately not checked here: a guard can only allow or
+refuse the application's call, and a pulled kill switch means Baldur steps
+aside, not that the application's traffic is refused. The execution-mode
+resolver carries the kill switch to every automatic intervention instead.
 
 Resolution strategy:
     GovernanceChecker is resolved via ProviderRegistry.governance (516 D2/D3) —
@@ -17,7 +22,7 @@ Fail-open principle:
     The NoOp default GovernanceChecker registered by OSS returns "allowed"
     for every check; if PRO is absent, this Guard always passes.
     Hot-path exceptions are also caught and logged WARNING per the
-    KillSwitchGuard / ErrorBudgetGuard precedent.
+    ErrorBudgetGuard precedent.
 """
 
 from __future__ import annotations
@@ -38,13 +43,12 @@ logger = structlog.get_logger()
 
 
 class ThrottleGovernanceGuard:
-    """Kill Switch + Emergency + ErrorBudget + BreakGlass combined Guard.
+    """Emergency + ErrorBudget + BreakGlass combined Guard.
 
     Order:
     1. Break Glass — if active, all other checks bypassed (emergency override).
-    2. Kill Switch (is_system_enabled) → reject if disabled.
-    3. Emergency Level → reject at LEVEL_3+.
-    4. Error Budget → reject if exhausted.
+    2. Emergency Level → reject at LEVEL_3+.
+    3. Error Budget → reject if exhausted.
     """
 
     def __init__(self) -> None:
@@ -83,8 +87,8 @@ class ThrottleGovernanceGuard:
     def check(self, context: PolicyContext | None = None) -> GuardResult:
         """Run governance pre-checks.
 
-        Break Glass → Kill Switch → Emergency → Error Budget, with each
-        delegating to the registered GovernanceChecker.
+        Break Glass → Emergency → Error Budget, with each delegating to the
+        registered GovernanceChecker.
         """
         if self._is_break_glass_active():
             logger.debug(
@@ -97,10 +101,6 @@ class ThrottleGovernanceGuard:
         if governance is None:
             return GuardResult(allowed=True)
 
-        kill_switch_result = self._check_kill_switch(governance)
-        if not kill_switch_result.allowed:
-            return kill_switch_result
-
         emergency_result = self._check_emergency_level(governance)
         if not emergency_result.allowed:
             return emergency_result
@@ -109,24 +109,6 @@ class ThrottleGovernanceGuard:
         if not budget_result.allowed:
             return budget_result
 
-        return GuardResult(allowed=True)
-
-    def _check_kill_switch(self, governance: GovernanceChecker) -> GuardResult:
-        """Kill Switch global state check (Fail-Open)."""
-        try:
-            if not governance.is_system_enabled():
-                return GuardResult(
-                    allowed=False,
-                    reason="kill_switch_disabled",
-                )
-        except Exception as e:
-            logger.warning(
-                "guard.check_failed_fail_open",
-                guard_name="throttle_governance",
-                check="kill_switch",
-                error=str(e),
-                exc_info=True,
-            )
         return GuardResult(allowed=True)
 
     def _check_emergency_level(self, governance: GovernanceChecker) -> GuardResult:
