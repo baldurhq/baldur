@@ -35,8 +35,11 @@ class PeerProcess:
         self._stop_file = stop_file
         self._shutdown_timeout = shutdown_timeout
         self._lines: queue.Queue[dict[str, Any]] = queue.Queue()
+        # -P: the script's own directory stays off sys.path. The integration
+        # test directories hold a test package named ``redis``, which would
+        # otherwise shadow redis-py in the peer.
         self.proc = subprocess.Popen(
-            [sys.executable, str(script)],
+            [sys.executable, "-P", str(script)],
             env={**env, "PYTHONUNBUFFERED": "1", "PEER_STOP_FILE": str(stop_file)},
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,

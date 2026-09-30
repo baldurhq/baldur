@@ -20,8 +20,11 @@ fork-source gate; a process whose refresher thread died (the next read restarts
 it); a process started after the flip (its first pass announces the brake to its
 own subscribers). In every case B's request thread performs no store read.
 
-The file-store variants need only the local filesystem; the Redis-store variant
-runs under ``requires_redis``.
+The file-store variants need only the local filesystem. Under ``requires_redis``:
+the reach over the Redis store, and two Redis event-bus cases — a throttle Full
+Stop another process emits reaches B and is never undone by B's passes, and a
+process started after the flip on the Redis bus still hears the brake from its
+own first pass.
 """
 
 from __future__ import annotations
@@ -44,11 +47,15 @@ from baldur.core.state_backend import (
     configure_state_backend,
     reset_state_backend,
 )
+from baldur.services.event_bus.bus.event_types import EventType
+from baldur.services.event_bus.bus.models import create_event
+from baldur.services.event_bus.redis_bus import RedisEventBus
 from baldur.services.system_control import (
     SystemControlManager,
     get_system_control,
     reset_system_control,
 )
+from baldur.settings.event_bus import reset_event_bus_settings
 from tests.factories.constants import RedisTestConfig
 from tests.factories.peer_process import PeerProcess
 
@@ -289,4 +296,80 @@ class TestControlStateCrossProcessRedisBehavior:
         done = peer.finish()
 
         assert reach < _REACH_BOUND_SECONDS
+        assert done["request_thread_store_reads"] == []
+
+
+def _redis_bus_env(url: str) -> dict[str, str]:
+    """B's environment for the Redis event bus (the listener starts in init())."""
+    return {
+        "PEER_STARTUP": "init",
+        "BALDUR_EVENT_BUS_BACKEND": "redis",
+        "BALDUR_EVENT_BUS_REDIS_URL": url,
+    }
+
+
+@pytest.fixture
+def redis_bus_url(monkeypatch) -> Iterator[str]:
+    """The Redis both processes' event buses publish and listen on."""
+    url = os.environ.get("REDIS_URL", RedisTestConfig().test_redis_url)
+    monkeypatch.setenv("BALDUR_EVENT_BUS_REDIS_URL", url)
+    reset_event_bus_settings()
+    yield url
+    reset_event_bus_settings()
+
+
+@pytest.mark.requires_redis
+class TestControlStateCrossProcessRedisBusBehavior:
+    """Kill-switch events on the Redis event bus: the heard-value rule across processes."""
+
+    def test_throttle_full_stop_from_a_peer_is_heard_but_never_undone(
+        self, shared_file_store, redis_bus_url
+    ):
+        """A Full Stop reaches B over Redis; B's passes announce no DEACTIVATED."""
+        # Given: B serving on the Redis bus, switch up
+        peer = shared_file_store.start_peer(**_redis_bus_env(redis_bus_url))
+        peer.next_event("ready", timeout=_READY_TIMEOUT_SECONDS)
+
+        # When: A's throttle emits a Full Stop (source throttle, no flip) on Redis,
+        # then two dry-run toggles force two passes in B after B heard it
+        bus = RedisEventBus()
+        try:
+            bus.publish(
+                create_event(
+                    EventType.KILL_SWITCH_ACTIVATED,
+                    {"reason": "full_stop"},
+                    "throttle",
+                )
+            )
+            peer.next_event(
+                "heard",
+                timeout=_REACH_BOUND_SECONDS + 5.0,
+                event_type=_KILL_SWITCH_ACTIVATED,
+                source="throttle",
+            )
+        finally:
+            bus.stop_listener()
+        manager = shared_file_store.manager
+        manager.enable_dry_run(actor="operator-a")
+        peer.next_event("observed", timeout=_REACH_BOUND_SECONDS + 5.0, dry_run=True)
+        manager.disable_dry_run(actor="operator-a")
+        peer.next_event("observed", timeout=_REACH_BOUND_SECONDS + 5.0, dry_run=False)
+        done = peer.finish()
+
+        # Then
+        assert [_KILL_SWITCH_ACTIVATED, "throttle"] in done["heard"]
+        assert [_KILL_SWITCH_DEACTIVATED, "system_control"] not in done["heard"]
+
+    def test_peer_started_after_the_flip_announces_the_brake_on_the_redis_bus(
+        self, shared_file_store, redis_bus_url
+    ):
+        """No event reaches a process started later; its own first pass tells it."""
+        shared_file_store.manager.disable(actor="operator-a", reason="incident")
+
+        peer = shared_file_store.start_peer(**_redis_bus_env(redis_bus_url))
+        ready = peer.next_event("ready", timeout=_READY_TIMEOUT_SECONDS)
+        done = peer.finish()
+
+        assert ready["enabled"] is False
+        assert [_KILL_SWITCH_ACTIVATED, "system_control"] in done["heard"]
         assert done["request_thread_store_reads"] == []

@@ -8,8 +8,9 @@ peer reports every change it observes. It never reads the switch store on its
 own request thread; which threads did read the store is reported at the end.
 
 Protocol: every line the peer prints for the test starts with ``PEER `` and
-carries one JSON object — ``ready``, then one ``observed`` per change, then
-``done``. Configuration arrives through environment variables:
+carries one JSON object — ``ready``, then one ``observed`` per change and one
+``heard`` per kill-switch event its own subscriber received, then ``done``.
+Configuration arrives through environment variables:
 
 - ``PEER_INTERVAL``: the switch refresh interval, set before the manager exists.
 - ``PEER_DURATION``: the longest the peer serves after ``ready``.
@@ -58,6 +59,7 @@ def _record_kill_switch_events() -> list[list[str]]:
 
     def record(event) -> None:
         heard.append([event.event_type.value, event.source])
+        _emit("heard", event_type=event.event_type.value, source=event.source)
 
     bus = get_event_bus()
     bus.subscribe(EventType.KILL_SWITCH_ACTIVATED, record)

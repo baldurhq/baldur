@@ -47,7 +47,9 @@ def _run_writers(directory: Path, mode: str, count: int, base: int = 0) -> list[
     for name in ("writer-a", "writer-b"):
         procs.append(
             subprocess.Popen(
-                [sys.executable, str(_WRITER)],
+                # -P keeps this directory (and its ``redis`` test package) off
+                # the writer's sys.path.
+                [sys.executable, "-P", str(_WRITER)],
                 env={
                     **env,
                     "PYTHONUNBUFFERED": "1",
