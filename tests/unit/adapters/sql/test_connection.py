@@ -5,7 +5,7 @@ Coverage:
 - DSN scheme → driver selection (sqlite works without extras;
   postgres/mysql raise a helpful ImportError when the driver is absent).
 - build_connection_factory default path reads resolve_dsn() (singleton).
-- One-shot dev/test factory warning (PR2 review fix #5).
+- One-shot no-pool line (PR2 review fix #5; INFO since 801 G13).
 """
 
 from __future__ import annotations
@@ -79,22 +79,27 @@ class TestBuildConnectionFactoryBehavior:
 
 
 # ---------------------------------------------------------------------------
-# PR2 review fix #5 — one-shot dev/test factory warning
+# PR2 review fix #5 — one-shot no-pool line
 # ---------------------------------------------------------------------------
 
 
-_WARNING_EVENT = "sql.default_factory_no_pool"
+_NO_POOL_EVENT = "sql.default_factory_no_pool"
 
 
 class TestDefaultFactoryWarningBehavior:
-    """``build_connection_factory`` emits a one-shot WARNING."""
+    """``build_connection_factory`` emits a one-shot INFO line (801 G13).
+
+    It fires once per process on every DSN-wired boot, which is the
+    documented PRO production path, so it states the connection model
+    instead of warning about it.
+    """
 
     def _spy_logger(self, monkeypatch):
         """Replace the module logger with a recorder; return the call list."""
         calls: list[tuple[str, dict]] = []
 
         class _Recorder:
-            def warning(self, event, **kwargs):
+            def info(self, event, **kwargs):
                 calls.append((event, kwargs))
 
             # Ignore any other levels emitted incidentally.
@@ -104,35 +109,35 @@ class TestDefaultFactoryWarningBehavior:
         monkeypatch.setattr(connection_mod, "logger", _Recorder())
         return calls
 
-    def test_first_call_emits_warning(self, monkeypatch):
-        """First invocation → warning event is recorded once."""
+    def test_first_call_emits_the_line(self, monkeypatch):
+        """First invocation → the event is recorded once."""
         calls = self._spy_logger(monkeypatch)
         build_connection_factory("sqlite:///:memory:")
         events = [e for e, _ in calls]
-        assert events.count(_WARNING_EVENT) == 1
+        assert events.count(_NO_POOL_EVENT) == 1
 
-    def test_second_call_does_not_emit_warning(self, monkeypatch):
+    def test_second_call_does_not_emit_again(self, monkeypatch):
         """Second invocation does not emit again — gate stays armed."""
         calls = self._spy_logger(monkeypatch)
         build_connection_factory("sqlite:///:memory:")
         build_connection_factory("sqlite:///:memory:")
         events = [e for e, _ in calls]
-        assert events.count(_WARNING_EVENT) == 1
+        assert events.count(_NO_POOL_EVENT) == 1
 
-    def test_reset_helper_re_arms_warning(self, monkeypatch):
+    def test_reset_helper_re_arms_the_line(self, monkeypatch):
         """``_reset_default_factory_warning`` lets the next call emit again."""
         calls = self._spy_logger(monkeypatch)
         build_connection_factory("sqlite:///:memory:")
         _reset_default_factory_warning()
         build_connection_factory("sqlite:///:memory:")
         events = [e for e, _ in calls]
-        assert events.count(_WARNING_EVENT) == 2
+        assert events.count(_NO_POOL_EVENT) == 2
 
-    def test_warning_payload_includes_guidance(self, monkeypatch):
+    def test_line_payload_includes_guidance(self, monkeypatch):
         """The emitted record carries operator-facing guidance text."""
         calls = self._spy_logger(monkeypatch)
         build_connection_factory("sqlite:///:memory:")
-        # Find the warning entry.
-        warning = next(kw for ev, kw in calls if ev == _WARNING_EVENT)
-        assert "guidance" in warning
-        assert "pool" in warning["guidance"].lower()
+        # Find the emitted entry.
+        record = next(kw for ev, kw in calls if ev == _NO_POOL_EVENT)
+        assert "guidance" in record
+        assert "pool" in record["guidance"].lower()

@@ -187,9 +187,9 @@ class TestReadySecretsPropagationContract:
     """Production CRITICAL-secret ``ConfigurationError`` MUST propagate through ``ready()``.
 
     Since 632 D7 the secret gate lives inside ``baldur.init()``
-    (``bootstrap._validate_critical_secrets``), so a missing ``encryption_key``
-    / ``audit_signing_key`` in production surfaces as a ``ConfigurationError`` from
-    the ``baldur.init()`` call site in ``ready()``. ``ready()`` must not swallow
+    (``bootstrap._validate_critical_secrets``), so a missing ``audit_signing_key``
+    in production (audit on, or a PRO entitlement active) surfaces as a
+    ``ConfigurationError`` from the ``baldur.init()`` call site in ``ready()``. ``ready()`` must not swallow
     it — best-effort silent recovery is unacceptable for security-critical
     secrets. (Same fail-loud contract previously held by the removed
     ``apps.py._validate_secrets`` step.)
@@ -208,13 +208,14 @@ class TestReadySecretsPropagationContract:
 
         def _raise_secret_error(**kwargs):
             raise ConfigurationError(
-                "[Security] CRITICAL secrets not configured in production: "
-                "encryption_key, audit_signing_key."
+                "[Security] BALDUR_SECRETS_AUDIT_SIGNING_KEY is required in "
+                "production while the audit trail is on (BALDUR_AUDIT_ENABLED) "
+                "or a PRO entitlement is active."
             )
 
         monkeypatch.setattr("baldur.init", _raise_secret_error, raising=False)
 
-        with pytest.raises(ConfigurationError, match="CRITICAL secrets"):
+        with pytest.raises(ConfigurationError, match="AUDIT_SIGNING_KEY is required"):
             app_config.ready()
 
 

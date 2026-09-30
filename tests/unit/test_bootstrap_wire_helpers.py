@@ -67,6 +67,22 @@ def recovery_session_registry_isolated():
         yield ProviderRegistry.recovery_session_repo
 
 
+def _group_b_dispatch_row():
+    """The ``recovery_session_repo`` wiring row with boot validation off.
+
+    These cases pin the helper's dispatch matrix; construction of the
+    selected backend is covered by the eager-validation tests.
+    """
+    from baldur import bootstrap
+
+    row = next(
+        w
+        for w in bootstrap._REGISTRIES_TO_WIRE
+        if w.registry_attr == "recovery_session_repo"
+    )
+    return row._replace(eager_validate=False)
+
+
 @pytest.fixture
 def rate_limit_registry_isolated():
     """Use ``ProviderRegistry.rate_limit_storage`` for D11 fallback tests."""
@@ -273,8 +289,7 @@ class TestWireSqlDjangoRegistryBehavior:
 
         bootstrap._wire_sql_django_registry(
             recovery_session_registry_isolated,
-            sql_target="sql",
-            django_target="django",
+            _group_b_dispatch_row(),
             sql_set=True,
             django_set=True,  # ignored
             runtime=fake_runtime(is_production=True),
@@ -290,8 +305,7 @@ class TestWireSqlDjangoRegistryBehavior:
 
         bootstrap._wire_sql_django_registry(
             recovery_session_registry_isolated,
-            sql_target="sql",
-            django_target="django",
+            _group_b_dispatch_row(),
             sql_set=False,
             django_set=True,
             runtime=fake_runtime(is_production=True),
@@ -299,26 +313,30 @@ class TestWireSqlDjangoRegistryBehavior:
 
         assert recovery_session_registry_isolated.get_default_name() == "django"
 
-    def test_neither_signal_in_production_raises_configuration_error(
-        self, recovery_session_registry_isolated, fake_runtime
+    def test_neither_signal_in_production_falls_back_to_memory_without_raising(
+        self, recovery_session_registry_isolated, fake_runtime, caplog
     ):
-        """prod + neither signal → ConfigurationError naming both."""
+        """prod + neither signal → memory + INFO (801 D2).
+
+        Wiring no longer refuses: production requires a SQL or Django store
+        only under a PRO entitlement, enforced after the PRO hook.
+        """
         from baldur import bootstrap
 
-        with pytest.raises(ConfigurationError) as exc_info:
+        with caplog.at_level("INFO"):
             bootstrap._wire_sql_django_registry(
                 recovery_session_registry_isolated,
-                sql_target="sql",
-                django_target="django",
+                _group_b_dispatch_row(),
                 sql_set=False,
                 django_set=False,
                 runtime=fake_runtime(is_production=True),
             )
 
-        message = str(exc_info.value)
-        assert "BALDUR_SQL_DSN" in message
-        assert "Django DATABASES" in message
-        assert "ProviderRegistry.recovery_session_repo" in message
+        assert recovery_session_registry_isolated.get_default_name() == "memory"
+        assert any(
+            "registry_memory_fallback" in r.message and "BALDUR_SQL_DSN" in r.message
+            for r in caplog.records
+        )
 
     def test_neither_signal_in_non_production_reports_and_falls_back_to_memory(
         self, recovery_session_registry_isolated, fake_runtime, caplog
@@ -329,8 +347,7 @@ class TestWireSqlDjangoRegistryBehavior:
         with caplog.at_level("INFO"):
             bootstrap._wire_sql_django_registry(
                 recovery_session_registry_isolated,
-                sql_target="sql",
-                django_target="django",
+                _group_b_dispatch_row(),
                 sql_set=False,
                 django_set=False,
                 runtime=fake_runtime(is_production=False),
@@ -352,8 +369,7 @@ class TestWireSqlDjangoRegistryBehavior:
 
         bootstrap._wire_sql_django_registry(
             recovery_session_registry_isolated,
-            sql_target="sql",
-            django_target="django",
+            _group_b_dispatch_row(),
             sql_set=True,
             django_set=False,
             runtime=fake_runtime(is_production=False),
@@ -369,8 +385,7 @@ class TestWireSqlDjangoRegistryBehavior:
 
         bootstrap._wire_sql_django_registry(
             recovery_session_registry_isolated,
-            sql_target="sql",
-            django_target="django",
+            _group_b_dispatch_row(),
             sql_set=False,
             django_set=True,
             runtime=fake_runtime(is_production=False),

@@ -2,7 +2,7 @@
 
 Everything else in the writable-dir change is delegation — a surface calls the
 primitive and stores ``.path`` — and is covered by unit tests. The boot gate is
-genuine composition: ``_install_resilient_storage_backend`` reads a predicate
+genuine composition: ``_install_resilient_storage_backend`` reads the WAL state
 the backend derives from a ``ResolvedDir`` produced inside ``WriteAheadLog``,
 which is produced by the primitive, while the settings carry-over in that same
 function decides the ``operator_set`` input to the whole chain. Four components
@@ -98,24 +98,23 @@ class TestProductionWALBootGateIntegration:
         with pytest.raises(ConfigurationError):
             wire_storage(is_production=True)
 
-    def test_unwritable_default_dir_refuses_production_boot_despite_a_live_wal(
+    def test_unwritable_default_dir_boots_production_with_a_live_wal(
         self, writable_dir_chain, deny_dir, wire_storage, monkeypatch
     ):
-        """Case (iii): the composition that the old predicate would have let through.
+        """Case (iii): the default falls back and production boots (801 D3).
 
-        The default falls back, so the WAL is initialized and usable — yet the
-        gate must still refuse, because it promises the WAL is on its
-        *configured* directory.
+        The WAL is initialized and usable on the fallback — the same
+        durability class as the default path — so the gate accepts it and
+        announces it at WARNING instead of refusing.
         """
         monkeypatch.delenv(WAL_DIR_ENV_VAR, raising=False)
         deny_dir(Path(DEFAULT_WAL_DIR))
 
-        with pytest.raises(ConfigurationError) as exc_info:
-            wire_storage(is_production=True)
+        backend = wire_storage(is_production=True)
 
-        message = str(exc_info.value)
-        assert DEFAULT_WAL_DIR in message
-        assert WAL_DIR_ENV_VAR in message
+        assert backend._wal_initialized is True
+        assert backend._wal_on_fallback_dir is True
+        assert backend._wal.wal_dir.is_relative_to(writable_dir_chain.state)
 
     def test_unwritable_default_dir_boots_non_production_with_a_live_wal(
         self, writable_dir_chain, deny_dir, wire_storage, monkeypatch
@@ -130,27 +129,30 @@ class TestProductionWALBootGateIntegration:
         assert backend._wal_on_fallback_dir is True
         assert backend._wal.wal_dir.is_relative_to(writable_dir_chain.state)
 
-    def test_break_glass_env_var_restores_production_boot(
+    def test_the_env_var_moves_a_relocated_wal_onto_the_chosen_dir(
         self, writable_dir_chain, deny_dir, wire_storage, monkeypatch, tmp_path
     ):
-        """The documented escape: choosing a writable path explicitly is honored.
+        """The documented remedy: choosing a writable path explicitly is honored.
 
-        This is the only break-glass mechanism, so it has to actually work —
-        pointing the variable at any writable path makes the directory
-        operator-chosen and the gate then accepts it.
+        The fallback WARNING names this variable, so it has to actually work
+        — pointing it at any writable path makes the directory operator-chosen
+        and the WAL runs there.
         """
-        # Given — the shipped default is unwritable and production refuses
+        # Given — the shipped default is unwritable and the WAL relocates
         monkeypatch.delenv(WAL_DIR_ENV_VAR, raising=False)
         deny_dir(Path(DEFAULT_WAL_DIR))
-        with pytest.raises(ConfigurationError):
-            wire_storage(is_production=True)
+        relocated = wire_storage(is_production=True)
+        assert relocated._wal_on_fallback_dir is True
 
         # When — the operator points the override at a writable path
-        monkeypatch.setenv(WAL_DIR_ENV_VAR, str(tmp_path / "break-glass"))
+        chosen = tmp_path / "wal-volume"
+        monkeypatch.setenv(WAL_DIR_ENV_VAR, str(chosen))
         backend = wire_storage(is_production=True)
 
         # Then — boot proceeds on the explicitly chosen directory
-        assert backend._wal_honors_configured_dir is True
+        assert backend._wal_initialized is True
+        assert backend._wal_on_fallback_dir is False
+        assert backend._wal.wal_dir == chosen
 
 
 class TestStorageDirsReportIntegration:

@@ -5,14 +5,16 @@ Provides ``baldur.init()`` — the single entry point that all framework
 adapters (Django, FastAPI, Flask, plain Python) call at startup.
 
 Responsibilities:
-1. Validate startup config (Safe Defaults / Quarantine Mode) and CRITICAL
-   secrets (production boot-abort gate, every framework adapter)
+1. Validate startup config (Safe Defaults / Quarantine Mode)
 2. Register default event bus handlers
 3. Register shutdown handlers (GracefulShutdownCoordinator)
 4. Discover PRO entry-point hooks (``baldur.bootstrap_hooks``)
-5. Apply audit default provider per ``AuditSettings.enabled``
-6. Start audit pipeline (WAL + AuditSyncWorker) if audit is enabled
-7. Record env_snapshot through the resolved audit adapter
+5. Enforce the production requirements that depend on the hook's verdict
+   (audit signing key, SQL/Django store under a PRO entitlement) — the
+   production boot-abort gate, on every framework adapter
+6. Apply audit default provider per ``AuditSettings.enabled``
+7. Start audit pipeline (WAL + AuditSyncWorker) if audit is enabled
+8. Record env_snapshot through the resolved audit adapter
 
 Idempotency:
     ``init()`` is a silent no-op on re-entry. A module-level ``_init_done``
@@ -119,12 +121,13 @@ class _RegistryWiring(NamedTuple):
     the other memory/redis/sql hybrid — resets to ``"redis"``, which is
     its module-load default.
 
-    ``eager_validate`` (PRIORITY_CHAIN only) constructs the selected
-    provider once, at wiring time, so a backend that probes True but is
-    unusable — the classic case being a SQL DSN with no driver installed
-    — cannot masquerade as the wired default. Off by default: it costs an
-    eager construction per row, and the rows that carry durability
-    promises are the ones that need it.
+    ``eager_validate`` (SQL_DJANGO and PRIORITY_CHAIN rows) constructs the
+    selected provider once, at wiring time, so a backend that probes True
+    but is unusable — the classic case being a SQL DSN with no driver
+    installed — cannot masquerade as the wired default. A ``redis`` or
+    ``django`` selection that a probe made is accepted without construction
+    (see :func:`_eager_validate_wired_backend`). Off by default: rows whose
+    selection cannot fail to construct gain nothing from it.
     """
 
     backend_kind: _BackendKind
@@ -240,7 +243,6 @@ def init(
         _init_in_progress = True
         try:
             _validate_startup_config(quarantine_callback=quarantine_callback)
-            _validate_critical_secrets()
             _register_default_event_handlers()
             _init_bridge_instrumentation()
             _instrument_otel_if_enabled()
@@ -250,6 +252,7 @@ def init(
             _install_idempotency_gate()
             _emit_tier_setting_warnings()
             ext_result = _run_pro_extensions()
+            _enforce_post_hook_requirements()
             _seed_circuit_breaker_config()
             _warn_unknown_env_vars()
             _apply_audit_default_provider()
@@ -580,10 +583,12 @@ def _validate_critical_secrets() -> None:
 
     Centralizes the secret gate that previously lived only in Django's
     ``apps.py``. Routing it through ``init()`` makes it fire on every framework
-    adapter (Django / Flask / FastAPI / CLI), so a non-Django production deploy
-    without ``audit_signing_key`` / ``encryption_key`` no longer boots and runs
-    keyless. Placed right after ``_validate_startup_config`` so the abort is
-    fail-fast — before the admin server, scheduler, or background workers start.
+    adapter (Django / Flask / FastAPI / CLI). The only CRITICAL secret is
+    ``audit_signing_key``, and only while a keyed audit chain can be written
+    — the audit trail is on or a PRO entitlement is active — so this runs from
+    :func:`_enforce_post_hook_requirements`, after the PRO hook has settled
+    both, and still before the first chain write during ``init()`` and before
+    the admin server, scheduler, or background workers start.
 
     Behavior:
     - Non-production: best-effort. ``validate_required_secrets`` reports the
@@ -643,6 +648,60 @@ def _validate_critical_secrets() -> None:
             "baldur.secrets_validation_failed",
             error=e,
         )
+
+
+def _enforce_post_hook_requirements() -> None:
+    """Refuse a production boot that lacks what an active writer consumes.
+
+    Two production requirements depend on inputs that only the PRO bootstrap
+    hook settles: the entitlement verdict (the hook re-validates it with
+    ``force=True``, replacing a MISSING cached by an earlier import-time read
+    taken before a licence token reached the environment) and the audit
+    switch (the hook turns audit on for an entitled process). Both are read
+    here, directly after the hook and before the first chain write during
+    ``init()``:
+
+    1. The audit signing key (:func:`_validate_critical_secrets`), required
+       while the audit trail is on or a PRO entitlement is active.
+    2. A SQL or Django store — ``BALDUR_SQL_DSN`` or Django ``DATABASES`` —
+       required under an active PRO entitlement, which writes postmortems
+       and security incidents to it. Without one, wiring has already put the
+       Group B stores on memory and announced it at INFO; on OSS nothing
+       writes them automatically.
+
+    The key check runs first, so an entitled deployment missing both learns
+    about the key first. Test mode skips this step, as it skips wiring.
+    Aborting after the wiring side effects is how the Redis, SQL-backend and
+    WAL gates already abort.
+    """
+    from baldur.runtime import get_runtime
+
+    runtime = get_runtime()
+    if runtime.is_test_mode:
+        return
+
+    _validate_critical_secrets()
+
+    if not runtime.is_production:
+        return
+
+    from baldur.core.entitlement import is_entitlement_active
+
+    if not is_entitlement_active():
+        return
+    sql_set = bool((os.environ.get("BALDUR_SQL_DSN") or "").strip())
+    if sql_set or _django_databases_configured():
+        return
+
+    from baldur.core.exceptions import ConfigurationError
+
+    raise ConfigurationError(
+        "Neither BALDUR_SQL_DSN nor Django DATABASES is configured in "
+        "production while a PRO entitlement is active. An active PRO "
+        "entitlement writes postmortems and security incidents to this "
+        "store, and per-worker memory would lose them on restart. Set "
+        "BALDUR_SQL_DSN=postgresql://... or configure Django DATABASES."
+    )
 
 
 def _validate_idempotency_cache_in_production() -> None:
@@ -1695,15 +1754,31 @@ def _postgres_dsn_configured() -> bool:
     )
 
 
-def _redis_url_configured() -> bool:
-    """Return True iff ``BALDUR_REDIS_URL`` is set and non-empty (after strip).
+def _redis_driver_importable() -> bool:
+    """Return True iff the ``redis`` package imports.
 
-    Mirrors the inline ``redis_set`` computation in
-    :func:`_wire_registry_defaults` (Group A reads ``os.environ`` directly
-    rather than ``RedisSettings.url`` because the settings default would
-    mask the unset case). Consumed by the ``event_journal_repo``
-    PRIORITY_CHAIN row as the first probe in its ``redis > sql > memory``
-    chain.
+    ``BALDUR_REDIS_URL`` names a server; without the ``redis`` extra no
+    Redis-backed adapter can be built to reach it, and the first one built
+    would raise a bare ``ModuleNotFoundError`` from deep inside startup.
+    """
+    try:
+        import redis  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _redis_url_configured() -> bool:
+    """Return True iff ``BALDUR_REDIS_URL`` is set (after strip) and the driver imports.
+
+    Mirrors the ``redis_set`` verdict of :func:`_wire_registry_defaults`
+    (Group A reads ``os.environ`` directly rather than ``RedisSettings.url``
+    because the settings default would mask the unset case). Consumed by
+    the ``event_journal_repo`` and ``failed_op_repo`` PRIORITY_CHAIN rows
+    as the first probe in their ``redis > sql > memory`` chains, which
+    accept a probe-selected ``redis`` without constructing it — so
+    "Redis configured" has to include the driver, or a chain would select
+    a Redis adapter nothing can build.
 
     Deliberately env-only, and deliberately NOT the broader
     ``redis_explicitly_configured()`` predicate: wiring runs at a fixed
@@ -1712,7 +1787,7 @@ def _redis_url_configured() -> bool:
     posture; this answers "can wiring resolve one right now?".
     """
     redis_url = os.environ.get("BALDUR_REDIS_URL")
-    return bool(redis_url and redis_url.strip())
+    return bool(redis_url and redis_url.strip()) and _redis_driver_importable()
 
 
 # 464 D9 — ordered table of registries that ``init()`` rewires from the
@@ -1746,9 +1821,21 @@ _REGISTRIES_TO_WIRE: tuple[_RegistryWiring, ...] = (
     ),
     # Group B — SQL/Django-backed (464 D7 reclassifies security_repo here;
     # 570 D5 adds postmortem_repo, structurally identical — memory/django/sql).
-    _RegistryWiring(_BackendKind.SQL_DJANGO, "recovery_session_repo", "django"),
-    _RegistryWiring(_BackendKind.SQL_DJANGO, "security_repo", "django"),
-    _RegistryWiring(_BackendKind.SQL_DJANGO, "postmortem_repo", "django"),
+    # eager_validate: a BALDUR_SQL_DSN selection must construct at boot, so a
+    # missing driver or an unparsable DSN is a startup verdict, not a first-
+    # write failure.
+    _RegistryWiring(
+        _BackendKind.SQL_DJANGO,
+        "recovery_session_repo",
+        "django",
+        eager_validate=True,
+    ),
+    _RegistryWiring(
+        _BackendKind.SQL_DJANGO, "security_repo", "django", eager_validate=True
+    ),
+    _RegistryWiring(
+        _BackendKind.SQL_DJANGO, "postmortem_repo", "django", eager_validate=True
+    ),
     # Group C — probe-surface (473 D1, generalized in 515 D6). Each row
     # declares a priority chain of provider candidates; first one that
     # probes True and is registered wins. Production fail-loud is
@@ -1766,6 +1853,7 @@ _REGISTRIES_TO_WIRE: tuple[_RegistryWiring, ...] = (
         ),
         env_override="BALDUR_DATABASE_HEALTH_PROVIDER",
         reset_baseline="noop",
+        eager_validate=True,
     ),
     _RegistryWiring(
         _BackendKind.PRIORITY_CHAIN,
@@ -1778,6 +1866,7 @@ _REGISTRIES_TO_WIRE: tuple[_RegistryWiring, ...] = (
         ),
         env_override="BALDUR_PG_ADMIN_PROVIDER",
         reset_baseline="noop",
+        eager_validate=True,
     ),
     _RegistryWiring(
         _BackendKind.PRIORITY_CHAIN,
@@ -1811,6 +1900,7 @@ _REGISTRIES_TO_WIRE: tuple[_RegistryWiring, ...] = (
         ),
         env_override="BALDUR_EVENT_JOURNAL_BACKEND",
         reset_baseline="memory",
+        eager_validate=True,
     ),
     # 778 D1/D3 — failed_op_repo is the second memory/redis/sql hybrid. The
     # SQL dead-letter adapter shipped registered but unselectable: no knob,
@@ -1825,10 +1915,9 @@ _REGISTRIES_TO_WIRE: tuple[_RegistryWiring, ...] = (
     # baseline. Production posture is inherited from the cache row: with
     # Redis unset in production, Phase 1 raises before this row runs.
     #
-    # eager_validate is on: this row is the one that promises durability,
-    # and "sql selected, driver missing" would otherwise degrade to silent
-    # per-worker memory at first capture (the DI fallback policy defaults
-    # to ALLOW in every environment, production included).
+    # eager_validate is on: this row promises durability, and "sql selected,
+    # driver missing" would otherwise degrade to per-worker memory at first
+    # capture, announced only by the DI fallback line.
     _RegistryWiring(
         _BackendKind.PRIORITY_CHAIN,
         "failed_op_repo",
@@ -1854,6 +1943,15 @@ _REGISTRIES_TO_WIRE: tuple[_RegistryWiring, ...] = (
 # which is exactly what Channel 2 exists for.
 register_direct_read_env_vars(
     *(w.env_override for w in _REGISTRIES_TO_WIRE if w.env_override)
+)
+
+# Every variable that selects a backend for a wired registry. Test mode skips
+# wiring, so in production it announces which of these it leaves inert.
+# Derived from the table so a future override knob joins by construction.
+_BACKEND_SELECTION_ENV_VARS: tuple[str, ...] = (
+    "BALDUR_REDIS_URL",
+    "BALDUR_SQL_DSN",
+    *(w.env_override for w in _REGISTRIES_TO_WIRE if w.env_override),
 )
 
 
@@ -1930,67 +2028,62 @@ def _wire_redis_registry(
 
 def _wire_sql_django_registry(
     registry: GenericProviderRegistry,
-    sql_target: str,
-    django_target: str,
+    wiring: _RegistryWiring,
     sql_set: bool,
     django_set: bool,
     runtime: BaldurRuntime,
 ) -> None:
     """Apply the trigger matrix to a single SQL/Django-backed row.
 
-    Priority: ``sql > django > memory``. ``runtime.is_test_mode``
-    is handled by the caller's early return.
-    """
-    # D5: backend priority sql > django > memory.
-    from baldur.core.exceptions import ConfigurationError
+    Priority: ``sql > django > memory``, in every environment. Wiring never
+    refuses here: whether production must have a SQL or Django store depends
+    on the PRO entitlement, which is final only after the PRO hook has run,
+    so that requirement lives in :func:`_enforce_post_hook_requirements`.
+    The SQL adapter is registered as ``"sql"`` by every Group B discover
+    function; ``wiring.target_name`` names the Django one.
 
+    ``runtime.is_test_mode`` is handled by the caller's early return.
+    """
     adapter_type = registry._adapter_type
 
     if sql_set:
-        registry.set_default(sql_target)
+        registry.set_default("sql")
         logger.info(
             "baldur.registry_default_wired",
             registry=adapter_type,
-            backend=sql_target,
+            backend="sql",
             source="BALDUR_SQL_DSN",
         )
-        return
-
-    if django_set:
-        registry.set_default(django_target)
+    elif django_set:
+        registry.set_default(wiring.target_name)
         logger.info(
             "baldur.registry_default_wired",
             registry=adapter_type,
-            backend=django_target,
+            backend=wiring.target_name,
             source="django_databases",
         )
-        return
-
-    if runtime.is_production:
-        raise ConfigurationError(
-            f"Neither BALDUR_SQL_DSN nor Django DATABASES is configured in "
-            f"production for ProviderRegistry.{adapter_type}. The framework "
-            "cannot silently archive audit-relevant state to per-worker "
-            "memory. Set BALDUR_SQL_DSN=postgresql://... or configure "
-            "Django DATABASES, or run with BALDUR_TEST_MODE=true for a "
-            "deliberate memory-only mode."
+    else:
+        # No signal — memory, announced at INFO in every environment. On OSS
+        # nothing writes these stores automatically, so a healthy production
+        # boot that follows the docs reaches this line; alarm level would
+        # teach operators to ignore it. The same reasoning sets the Redis
+        # memory fallback above and the empty development secrets.
+        logger.info(
+            "baldur.registry_memory_fallback",
+            registry=adapter_type,
+            reason="sql_django_unset",
+            hint=(
+                "Set BALDUR_SQL_DSN (or DJANGO_SETTINGS_MODULE with "
+                "DATABASES) to keep this store's records — security "
+                "incidents recorded through the security API, PRO "
+                "postmortems — across restarts and workers."
+            ),
         )
+        registry.set_default("memory")
 
-    # Non-production + no signal — memory fallback, announced at INFO. Same
-    # reasoning as the Redis-keyed site above; this one keys on SQL/Django
-    # signals, so no Redis-posture predicate reaches it and it needs its own
-    # level decision. Production raised above.
-    logger.info(
-        "baldur.registry_memory_fallback",
-        registry=adapter_type,
-        reason="sql_django_unset",
-        hint=(
-            "Set BALDUR_SQL_DSN or DJANGO_SETTINGS_MODULE+DATABASES "
-            "for durable archival. Set BALDUR_TEST_MODE=true to "
-            "suppress this notice."
-        ),
+    _eager_validate_wired_backend(
+        registry, wiring, runtime, ["memory"], operator_chosen=False
     )
-    registry.set_default("memory")
 
 
 def _wire_priority_chain_registry(
@@ -2057,7 +2150,9 @@ def _wire_priority_chain_registry(
                     backend=env_val,
                     source=wiring.env_override,
                 )
-                _eager_validate_wired_backend(registry, wiring, runtime, matched)
+                _eager_validate_wired_backend(
+                    registry, wiring, runtime, matched, operator_chosen=True
+                )
                 return
             logger.warning(
                 "baldur.registry_env_override_invalid",
@@ -2096,7 +2191,34 @@ def _wire_priority_chain_registry(
             backend=winner,
             source="priority_chain",
         )
-    _eager_validate_wired_backend(registry, wiring, runtime, matched)
+    _eager_validate_wired_backend(
+        registry, wiring, runtime, matched, operator_chosen=False
+    )
+
+
+# Backends a wiring probe may select without boot constructing them.
+# - ``redis``: the Group A phase has already proven the driver imports
+#   (:func:`_redis_driver_importable`), and construction is not I/O-free — a
+#   ``redis+cluster://`` URL dials the nodes inside the cluster client's
+#   constructor, and the event-journal factory takes the process-global
+#   Redis-client lock.
+# - ``django``: the ``DATABASES`` probe already proves Django is configured,
+#   and a Django repository imports concrete models in ``__init__``, which
+#   raises before the app registry is ready (a Celery worker that runs
+#   ``init()`` before ``django.setup()``).
+# A name the operator chose through the row's ``env_override`` is constructed
+# whatever it is — a host may register its own provider under either name.
+_PROBE_ACCEPTED_BACKENDS: frozenset[str] = frozenset({"redis", "django"})
+
+# The fix to name when a selected backend cannot be constructed, keyed by
+# backend name. Each hint names a variable the operator can act on; the row's
+# ``env_override`` is appended when the row has one.
+_BACKEND_UNUSABLE_HINTS: dict[str, str] = {
+    "sql": (
+        "Install the driver for the BALDUR_SQL_DSN dialect "
+        "(pip install psycopg2-binary for postgresql), or correct BALDUR_SQL_DSN"
+    ),
+}
 
 
 def _eager_validate_wired_backend(
@@ -2104,6 +2226,8 @@ def _eager_validate_wired_backend(
     wiring: _RegistryWiring,
     runtime: BaldurRuntime,
     candidates: list[str],
+    *,
+    operator_chosen: bool,
 ) -> None:
     """Construct the just-wired provider so an unusable one cannot hide.
 
@@ -2111,23 +2235,32 @@ def _eager_validate_wired_backend(
     behind it works. ``BALDUR_SQL_DSN`` with no database driver installed
     passes every probe, registers fine (the discover block imports only
     stdlib), and raises ``ImportError`` at the first capture — where the DI
-    fallback swallows it into per-worker memory, silently, in production
-    too. An operator who asked for durable storage would get the opposite
-    with no log line saying so.
+    fallback replaces it with per-worker memory. An operator who asked for
+    durable storage would get the opposite.
 
-    Constructing once at wiring time converts that into a startup verdict:
+    What is constructed: every selection, except a ``redis`` or ``django``
+    that a probe chose (``operator_chosen=False``), which is accepted as is
+    — see ``_PROBE_ACCEPTED_BACKENDS``. A selection made through the row's
+    ``env_override`` is always constructed. Construction does no I/O: SQL
+    repositories bootstrap their schema lazily, the health / pg_admin
+    factories only build a connection callable, and a PostgreSQL DSN is
+    parsed without dialing.
 
-    - construction succeeds → keep the selection. Note this proves the
-      driver is importable and the connection factory builds, NOT that the
-      database is reachable; an unreachable database stays a runtime event,
-      and the capture path already answers it with a WARNING-logged
-      local-file fallback.
-    - construction fails in production → ``ConfigurationError``. A
-      deployment that asked for a backend it cannot build is a misconfigured
-      deployment, and a crash-looping pod is louder than a lie.
-    - construction fails elsewhere → WARNING, then demote to the next
-      matched chain member. The terminal ``("memory", lambda: True)`` row
-      always constructs, so the loop always terminates on a usable default.
+    Constructing once at wiring time converts a broken selection into a
+    startup verdict:
+
+    - construction succeeds → keep the selection. This proves the driver
+      imports and the connection factory builds (a PostgreSQL DSN parses),
+      NOT that the database answers; an unreachable database stays a
+      runtime event.
+    - construction fails in production → ``ConfigurationError`` naming the
+      fix. A deployment that asked for a backend it cannot build is a
+      misconfigured deployment, and a crash-looping pod is louder than a lie.
+    - construction fails elsewhere → WARNING, then demote to the next of
+      ``candidates`` that constructs. ``redis`` and ``django`` are never
+      demotion targets, because they are never constructed here; every
+      flagged row's remaining candidates end in ``memory`` or ``noop``, which
+      always construct.
 
     Opt-in per row (``eager_validate``); rows that do not set it keep the
     lazy first-use behavior exactly.
@@ -2135,24 +2268,34 @@ def _eager_validate_wired_backend(
     if not wiring.eager_validate:
         return
 
+    selected = registry.get_default_name()
+    if selected is None:
+        return
+    if not operator_chosen and selected in _PROBE_ACCEPTED_BACKENDS:
+        return
+
     from baldur.core.exceptions import ConfigurationError
 
     adapter_type = registry._adapter_type
-    selected = registry.get_default_name()
-    # Selected first, then the matched chain members as demotion targets.
-    remaining = [selected] if selected else []
-    remaining += [name for name in candidates if name != selected]
+    remaining = [selected] + [
+        name
+        for name in candidates
+        if name != selected and name not in _PROBE_ACCEPTED_BACKENDS
+    ]
 
     for name in remaining:
         try:
             registry.get(name)
         except Exception as e:
             if runtime.is_production:
+                hint = _BACKEND_UNUSABLE_HINTS.get(
+                    name, f"Fix the provider registered as {name!r}"
+                )
+                if wiring.env_override:
+                    hint += f", or select another backend via {wiring.env_override}"
                 raise ConfigurationError(
                     f"ProviderRegistry.{adapter_type} selected backend "
-                    f"{name!r}, but it cannot be constructed: {e}. Install "
-                    "the backend's driver, correct the connection settings, "
-                    f"or select another backend via {wiring.env_override}."
+                    f"{name!r}, but it cannot be constructed: {e}. {hint}."
                 ) from e
             logger.warning(
                 "baldur.registry_backend_unusable",
@@ -2175,14 +2318,28 @@ def _eager_validate_wired_backend(
 def _install_resilient_storage_backend(runtime: BaldurRuntime) -> None:
     """Eagerly construct ResilientStorageBackend and install via configure_*.
 
-    Mirrors the production WAL fail-fast: after construction, a WAL that does
-    not honor the configured ``wal_dir`` — it failed to initialize, or fell
-    back to another directory — raises ``ConfigurationError`` in production
-    so the bad volume mount surfaces at deploy time.
-    Non-production silently logs and proceeds (dev laptop tolerates the
-    WAL failure).
+    Production WAL gate, after construction:
+
+    - The WAL did not start at all → ``ConfigurationError``. That covers an
+      operator-chosen ``wal_dir`` that is unwritable (the writable-dir
+      resolver never falls back from a directory the operator chose), a
+      default directory with no writable fallback either (a read-only root
+      filesystem with no writable mount), and any other initialisation
+      error.
+    - The WAL started on a fallback directory → one WARNING naming the
+      configured directory, the one in use and
+      ``BALDUR_RESILIENT_STORAGE_WAL_DIR``, and boot continues. This follows
+      the resolver's own split — the audit WAL, checkpoint storage and DLQ
+      disk buffer already accept a default-path fallback — and the fallback
+      leaf is deterministic, so a restarted process in the same container
+      recovers the same files. The gate never tested for a volume: a root
+      container writes the default path onto its own ephemeral layer.
+
+    Non-production logs and proceeds in both cases (the resolver's INFO
+    ``storage.writable_dir_fallback`` announces a fallback).
     """
     from baldur.adapters.resilient.backend import (
+        WAL_DIR_ENV_VAR,
         ResilientStorageBackend,
         configure_storage_backend,
     )
@@ -2211,22 +2368,34 @@ def _install_resilient_storage_backend(runtime: BaldurRuntime) -> None:
     backend = ResilientStorageBackend(settings=settings)
     configure_storage_backend(backend)
 
-    if runtime.is_production and not backend._wal_honors_configured_dir:
+    if runtime.is_production and not backend._wal_initialized:
         raise ConfigurationError(
-            f"WAL initialization did not honor {backend.config.wal_dir} in "
-            "production"
-            + (
-                f" (fell back to {backend._wal.wal_dir})"
-                if backend._wal_on_fallback_dir and backend._wal is not None
-                else ""
-            )
-            + ". Check container volume mount or directory permissions — "
-            "the WAL-First Write Protocol cannot be honored without a "
-            "writable wal_dir. To prioritize availability during an "
-            "infrastructure incident, set "
-            "BALDUR_RESILIENT_STORAGE_WAL_DIR to any writable path; an "
-            "ephemeral one is accepted, because choosing it explicitly "
-            "makes the durability trade-off yours rather than ours."
+            f"WAL initialization failed for {backend.config.wal_dir} in "
+            "production. Check container volume mount or directory "
+            "permissions — the WAL-First Write Protocol cannot be honored "
+            "without a writable WAL directory. Set "
+            "BALDUR_RESILIENT_STORAGE_WAL_DIR to a writable path, ideally a "
+            "mounted volume; an ephemeral one is accepted, because choosing "
+            "it explicitly makes the durability trade-off yours rather than "
+            "ours."
+        )
+
+    if (
+        runtime.is_production
+        and backend._wal_on_fallback_dir
+        and backend._wal is not None
+    ):
+        logger.warning(
+            "baldur.resilient_storage_wal_dir_relocated",
+            configured_dir=str(backend.config.wal_dir),
+            wal_dir=str(backend._wal.wal_dir),
+            env_var=WAL_DIR_ENV_VAR,
+            hint=(
+                "The default WAL directory is not writable; the WAL runs on "
+                "a fallback directory instead. Point "
+                "BALDUR_RESILIENT_STORAGE_WAL_DIR at a mounted volume to "
+                "keep it where you expect."
+            ),
         )
 
     logger.info(
@@ -2251,6 +2420,107 @@ def _resilient_storage_redis_url_source(settings: ResilientStorageSettings) -> s
     return "default"
 
 
+def _announce_test_mode_wiring_skip(runtime: BaldurRuntime) -> None:
+    """Say which selected backends test mode leaves inert.
+
+    ``BALDUR_TEST_MODE=true`` skips all registry wiring, so every store runs
+    on per-process memory whatever the environment selects. Outside
+    production that is the point — the unit suite and offline development
+    run this way — and it stays a DEBUG line. In production, a documented
+    single-process deployment that later adds a backend would keep running
+    on memory with nothing at the default level, so the skip is a WARNING
+    there. It names the ignored variables, never their values: a URL can
+    embed credentials.
+    """
+    ignored = [
+        name
+        for name in _BACKEND_SELECTION_ENV_VARS
+        if (os.environ.get(name) or "").strip()
+    ]
+    if runtime.is_production and ignored:
+        logger.warning(
+            "baldur.registry_wiring_skipped",
+            reason="test_mode",
+            ignored_env_vars=ignored,
+            hint=(
+                "BALDUR_TEST_MODE=true keeps every store on per-process "
+                "memory; unset it to use the selected backends."
+            ),
+        )
+        return
+    logger.debug("baldur.wire_registry_defaults_skipped_test_mode")
+
+
+def _wire_redis_backed_registries(
+    runtime: BaldurRuntime, redis_set: bool, django_set: bool
+) -> None:
+    """Wire the Group A rows, then install the resilient storage backend.
+
+    Redis named but its driver absent: refuse in production (raises), or
+    announce and run Group A on memory elsewhere — never a bare
+    ``ModuleNotFoundError`` from the first adapter built. Otherwise each row
+    goes through :func:`_wire_redis_registry`; the cache is row 1, and a
+    ``ConfigurationError`` from any row aborts the loop and propagates.
+
+    The ResilientStorageBackend is constructed once, only when Redis was
+    selected, so a non-production boot with the URL unset skips the eager
+    backend. It is a singleton, not a registry default, so it lives outside
+    the table.
+    """
+    from baldur.factory.registry import ProviderRegistry
+
+    redis_driver_missing = redis_set and not _redis_driver_importable()
+    if redis_driver_missing:
+        _refuse_or_announce_missing_redis_driver(runtime)
+
+    for wiring in _REGISTRIES_TO_WIRE:
+        if wiring.backend_kind is not _BackendKind.REDIS:
+            continue
+        registry = getattr(ProviderRegistry, wiring.registry_attr)
+        if redis_driver_missing:
+            registry.set_default("memory")
+            continue
+        _wire_redis_registry(
+            registry,
+            wiring.target_name,
+            wiring.fallback_target,
+            redis_set,
+            django_set,
+            runtime,
+        )
+
+    if redis_set and not redis_driver_missing:
+        _install_resilient_storage_backend(runtime)
+
+
+def _refuse_or_announce_missing_redis_driver(runtime: BaldurRuntime) -> None:
+    """Answer ``BALDUR_REDIS_URL`` set with no Redis driver installed.
+
+    Production refuses with ``ConfigurationError`` — the class every
+    framework adapter's startup aborts on (the Celery worker receiver
+    converts only this one to ``SystemExit``), instead of the bare
+    ``ModuleNotFoundError`` the first Redis adapter built would raise.
+    Elsewhere the caller runs the Group A rows on memory, announced here once
+    at WARNING.
+    """
+    if runtime.is_production:
+        from baldur.core.exceptions import ConfigurationError
+
+        raise ConfigurationError(
+            "BALDUR_REDIS_URL is set, but the Redis driver is not installed, "
+            "so no Redis-backed store can be built. Install it with "
+            "pip install baldur-framework[redis]."
+        )
+    logger.warning(
+        "baldur.redis_driver_unavailable",
+        env_var="BALDUR_REDIS_URL",
+        hint=(
+            "pip install baldur-framework[redis]; until then the "
+            "Redis-backed stores run on per-process memory."
+        ),
+    )
+
+
 def _wire_registry_defaults() -> None:
     """Install environment-aware registry defaults at startup.
 
@@ -2269,8 +2539,14 @@ def _wire_registry_defaults() -> None:
        pre-converged precedents fails CrashLoop instead of silently
        regressing the three security gates.
     2. **Test mode early return** — ``BALDUR_TEST_MODE=true`` skips all
-       wiring silently (no WARNING, no eager backend construction).
-    3. **Group A phase** — read ``BALDUR_REDIS_URL`` once, dispatch each
+       wiring (no eager backend construction). In production, when a
+       backend-selecting variable is set, the skip is one WARNING
+       ``baldur.registry_wiring_skipped`` naming those variables; otherwise
+       a DEBUG line.
+    3. **Group A phase** — read ``BALDUR_REDIS_URL`` once. When it is set
+       but the ``redis`` driver does not import, production raises
+       :class:`ConfigurationError` and other environments wire every
+       Group A row to memory with one WARNING. Otherwise dispatch each
        Group A row through :func:`_wire_redis_registry`. The
        ``rate_limit_storage`` row carries ``fallback_target="database"``,
        allowing a Django-only **non-production** deployment
@@ -2282,26 +2558,32 @@ def _wire_registry_defaults() -> None:
        (production with URL set, or non-production with URL set), eagerly
        construct the backend and install via
        :func:`configure_storage_backend`. WAL directory creation runs at
-       construction time; production WAL init failure raises
-       :class:`ConfigurationError`.
+       construction time; in production a WAL that could not start at all
+       raises :class:`ConfigurationError`, and one that started on a
+       fallback directory is announced at WARNING.
     5. **Group B phase** — read SQL/Django signals, dispatch each Group B
-       row through :func:`_wire_sql_django_registry`. Group A and Group
-       B verdicts run independently — a deploy that satisfies one but
-       not the other still fails loudly at the deficient phase.
+       row through :func:`_wire_sql_django_registry` (``sql > django >
+       memory``) and construct a ``sql`` selection at once. No refusal for
+       an unset store here: production requires one only under an active
+       PRO entitlement, checked after the PRO hook by
+       :func:`_enforce_post_hook_requirements`.
     6. **PRIORITY_CHAIN phase** — the probe-surface registries
        (``database_health``, ``pg_admin``, ``pool_info``) plus the
-       ``event_journal_repo`` memory/redis/sql hybrid dispatch
-       through :func:`_wire_priority_chain_registry`. Each row carries a
-       data-driven priority chain consulted in declared order; an
-       optional env override (e.g. ``BALDUR_PG_ADMIN_PROVIDER``,
+       ``event_journal_repo`` and ``failed_op_repo`` memory/redis/sql
+       hybrids dispatch through :func:`_wire_priority_chain_registry`.
+       Each row carries a data-driven priority chain consulted in declared
+       order; an optional env override (e.g. ``BALDUR_PG_ADMIN_PROVIDER``,
        ``BALDUR_EVENT_JOURNAL_BACKEND``) lets operators force a specific
-       provider. No production fail-loud in this phase: non-Django
+       provider. No production refusal for an unmatched chain: non-Django
        runtimes legitimately ship without the probe-surface adapters, and
-       SQLite-only deployments ship without Postgres. ``event_journal``
-       is not silently memory-degraded in production despite the absent
-       fail-loud — the cache row (row 1) already raised
-       :class:`ConfigurationError` if Redis was unset, so by this phase
-       Redis is guaranteed present and the ``redis`` probe matches.
+       SQLite-only deployments ship without Postgres. Rows flagged
+       ``eager_validate`` construct their selection (see
+       :func:`_eager_validate_wired_backend`), so a selected backend that
+       cannot be built refuses production boot. ``event_journal`` is not
+       silently memory-degraded in production — the cache row (row 1)
+       already raised :class:`ConfigurationError` if Redis was unset, so by
+       this phase Redis is guaranteed present and the ``redis`` probe
+       matches.
 
     URL-unset detection reads ``os.environ`` directly because
     ``RedisSettings.url`` defaults to ``redis://localhost:6379/0`` and
@@ -2324,11 +2606,12 @@ def _wire_registry_defaults() -> None:
             "'staging'/'development' otherwise."
         )
 
-    # Test mode wins: silent memory, no WARNING, no eager backend
-    # construction. Local-dev offline workflow uses BALDUR_TEST_MODE=true
-    # to silence non-prod WARNINGs without introducing a new env var.
+    # Test mode wins: memory, no eager backend construction. Local-dev
+    # offline workflow uses BALDUR_TEST_MODE=true to silence non-prod
+    # WARNINGs without introducing a new env var. In production the skip is
+    # announced when it leaves an operator-selected backend inert.
     if runtime.is_test_mode:
-        logger.debug("baldur.wire_registry_defaults_skipped_test_mode")
+        _announce_test_mode_wiring_skip(runtime)
         return
 
     # Read all signals once. The Group A and Group B phases consult these
@@ -2342,39 +2625,19 @@ def _wire_registry_defaults() -> None:
 
     django_set = _django_databases_configured()
 
-    # Phase 1 — Group A (Redis-backed). Cache is row 1; ConfigurationError
-    # from any row aborts the loop and propagates out of _wire_*.
-    for wiring in _REGISTRIES_TO_WIRE:
-        if wiring.backend_kind is not _BackendKind.REDIS:
-            continue
-        registry = getattr(ProviderRegistry, wiring.registry_attr)
-        _wire_redis_registry(
-            registry,
-            wiring.target_name,
-            wiring.fallback_target,
-            redis_set,
-            django_set,
-            runtime,
-        )
+    # Phases 1 and 1.5 — Group A and the resilient storage backend.
+    _wire_redis_backed_registries(runtime, redis_set, django_set)
 
-    # Phase 1.5 — ResilientStorageBackend special case. Constructed once,
-    # only when Redis was selected (so non-prod+URL-unset skips the eager
-    # backend, matching #463 behavior). Storage backend is a singleton,
-    # not a registry default, so it lives outside the table.
-    if redis_set:
-        _install_resilient_storage_backend(runtime)
-
-    # Phase 2 — Group B (SQL/Django-backed). Independent verdict — a
-    # deploy with Redis set but no SQL/Django signal raises here even
-    # though Group A succeeded.
+    # Phase 2 — Group B (SQL/Django-backed). Never refuses: the production
+    # requirement for a SQL or Django store follows the PRO entitlement and
+    # is enforced after the PRO hook (_enforce_post_hook_requirements).
     for wiring in _REGISTRIES_TO_WIRE:
         if wiring.backend_kind is not _BackendKind.SQL_DJANGO:
             continue
         registry = getattr(ProviderRegistry, wiring.registry_attr)
         _wire_sql_django_registry(
             registry,
-            sql_target="sql",
-            django_target=wiring.target_name,
+            wiring,
             sql_set=sql_set,
             django_set=django_set,
             runtime=runtime,

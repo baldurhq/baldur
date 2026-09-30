@@ -9,6 +9,10 @@ Tests for the 3-tier FallbackPolicy:
 Test Categories:
     A. Unit: resolve_with_fallback 3-tier behavior
     B. Integration: CircuitBreakerService / DLQServiceBase / ReplayService
+
+Each mocked config marks ``fallback_policy`` as operator-set
+(``model_fields_set``): an unset policy is derived from the environment
+(801 D4), and these cases pin the policy itself.
 """
 
 from unittest.mock import MagicMock, patch
@@ -43,6 +47,7 @@ class TestResolveWithFallbackBehavior:
 
         mock_config = MagicMock()
         mock_config.fallback_policy = FallbackPolicy.ALLOW
+        mock_config.model_fields_set = {"fallback_policy"}
         fallback_cls = MagicMock()
         fallback_instance = MagicMock()
         fallback_cls.return_value = fallback_instance
@@ -69,6 +74,7 @@ class TestResolveWithFallbackBehavior:
 
         mock_config = MagicMock()
         mock_config.fallback_policy = FallbackPolicy.WARN_AND_ALLOW
+        mock_config.model_fields_set = {"fallback_policy"}
         fallback_cls = MagicMock()
         fallback_cls.__name__ = "InMemoryRepo"
         fallback_instance = MagicMock()
@@ -93,6 +99,7 @@ class TestResolveWithFallbackBehavior:
             "service.fallback_adapter",
             adapter="InMemoryRepo",
             service="TestService",
+            error="No repo",
         )
         mock_metric.assert_called_once_with("TestService", "InMemoryRepo")
 
@@ -102,6 +109,7 @@ class TestResolveWithFallbackBehavior:
 
         mock_config = MagicMock()
         mock_config.fallback_policy = FallbackPolicy.WARN_AND_ALLOW
+        mock_config.model_fields_set = {"fallback_policy"}
         fallback_cls = MagicMock()
         fallback_cls.__name__ = "InMemoryRepo"
 
@@ -126,6 +134,7 @@ class TestResolveWithFallbackBehavior:
 
         mock_config = MagicMock()
         mock_config.fallback_policy = FallbackPolicy.FAIL_FAST
+        mock_config.model_fields_set = {"fallback_policy"}
 
         with (
             patch(
@@ -146,6 +155,7 @@ class TestResolveWithFallbackBehavior:
 
         mock_config = MagicMock()
         mock_config.fallback_policy = FallbackPolicy.FAIL_FAST
+        mock_config.model_fields_set = {"fallback_policy"}
         original_exc = ValueError("Original error")
 
         with (
@@ -168,6 +178,7 @@ class TestResolveWithFallbackBehavior:
 
         mock_config = MagicMock()
         mock_config.fallback_policy = FallbackPolicy.ALLOW
+        mock_config.model_fields_set = {"fallback_policy"}
         fallback_cls = MagicMock()
 
         with patch(
@@ -229,6 +240,7 @@ class TestCircuitBreakerServiceDIFallbackBehavior:
         service = self._make_service()
         mock_config = MagicMock()
         mock_config.fallback_policy = FallbackPolicy.ALLOW
+        mock_config.model_fields_set = {"fallback_policy"}
 
         with (
             patch(
@@ -252,6 +264,7 @@ class TestCircuitBreakerServiceDIFallbackBehavior:
         service = self._make_service()
         mock_config = MagicMock()
         mock_config.fallback_policy = FallbackPolicy.FAIL_FAST
+        mock_config.model_fields_set = {"fallback_policy"}
 
         with (
             patch(
@@ -320,6 +333,7 @@ class TestDLQServiceBaseDIFallbackBehavior:
         service = self._make_service()
         mock_config = MagicMock()
         mock_config.fallback_policy = FallbackPolicy.ALLOW
+        mock_config.model_fields_set = {"fallback_policy"}
 
         with (
             patch(
@@ -340,6 +354,7 @@ class TestDLQServiceBaseDIFallbackBehavior:
         service = self._make_service()
         mock_config = MagicMock()
         mock_config.fallback_policy = FallbackPolicy.FAIL_FAST
+        mock_config.model_fields_set = {"fallback_policy"}
 
         with (
             patch(
@@ -387,6 +402,7 @@ class TestReplayServiceDIFallbackBehavior:
         service = self._make_service()
         mock_config = MagicMock()
         mock_config.fallback_policy = FallbackPolicy.ALLOW
+        mock_config.model_fields_set = {"fallback_policy"}
 
         with (
             patch(
@@ -407,6 +423,7 @@ class TestReplayServiceDIFallbackBehavior:
         service = self._make_service()
         mock_config = MagicMock()
         mock_config.fallback_policy = FallbackPolicy.FAIL_FAST
+        mock_config.model_fields_set = {"fallback_policy"}
 
         with (
             patch(

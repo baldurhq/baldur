@@ -49,11 +49,16 @@ if TYPE_CHECKING:
 class FallbackPolicy(str, Enum):
     """DI fallback policy for in-memory adapter usage.
 
-    Controls how services behave when ProviderRegistry is unavailable.
+    Controls how services behave when a ProviderRegistry lookup cannot
+    construct their adapter.
 
-    - ALLOW: InMemory fallback silently (dev/test)
-    - WARN_AND_ALLOW: Fallback with metrics + warning (staging)
-    - FAIL_FAST: Crash immediately for K8s pod restart (production)
+    - ALLOW: InMemory fallback silently
+    - WARN_AND_ALLOW: InMemory fallback with a WARNING log and the
+      ``di_fallback_total`` counter
+    - FAIL_FAST: raise to the caller
+
+    Set it with the unprefixed ``FALLBACK_POLICY`` variable. Unset, the
+    effective policy is WARN_AND_ALLOW in production and ALLOW elsewhere.
     """
 
     ALLOW = "allow"
@@ -95,7 +100,11 @@ class BaldurSettings(BaseSettings):
     )
     fallback_policy: FallbackPolicy = Field(
         default=FallbackPolicy.ALLOW,
-        description="DI fallback policy: allow (dev), warn (staging), fail_fast (prod)",
+        description=(
+            "DI fallback policy (FALLBACK_POLICY): allow, warn, or fail_fast. "
+            "When unset, the effective policy is warn in production and "
+            "allow elsewhere."
+        ),
     )
 
     # ==========================================================================

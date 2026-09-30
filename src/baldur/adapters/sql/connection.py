@@ -1,12 +1,15 @@
 """
 Default DB-API 2.0 connection factory.
 
-⚠️  **Dev / test convenience only — not for production.**
-This factory opens a fresh DB-API connection on every call and never
-closes or pools them. 429 C15 mandates that Baldur does *not* ship a
-connection pool: production deployments MUST replace the callable with
-a pooled equivalent (SQLAlchemy ``engine.raw_connection``,
-``dj-db-conn-pool``, PgBouncer ``getconn``, etc.). Production examples::
+This factory opens a fresh DB-API connection for every operation and does
+not pool them. That is the connection model of every SQL store Baldur wires
+from ``BALDUR_SQL_DSN``, and it suits the incident archives' write rate.
+Baldur does not ship a connection pool: where the connection count
+matters — a SQL dead-letter queue under a failure storm, a busy database —
+register the provider under the name ``sql`` before ``baldur.init()`` with a
+pooled callable (SQLAlchemy ``engine.raw_connection``, ``dj-db-conn-pool``,
+PgBouncer ``getconn``, etc.). Discovery never overwrites an existing
+registration. Examples::
 
     from sqlalchemy import create_engine
     engine = create_engine(DSN, pool_size=10, pool_pre_ping=True)
@@ -18,8 +21,12 @@ a pooled equivalent (SQLAlchemy ``engine.raw_connection``,
                                         autocommit_delegated=True)
 
 The first call to ``build_connection_factory()`` emits a one-shot
-``baldur.sql.default_factory_no_pool`` warning so an accidental
-production deployment surfaces in logs.
+``sql.default_factory_no_pool`` INFO line saying so.
+
+A PostgreSQL DSN is parsed when the factory is built, without dialing, so a
+DSN libpq cannot parse fails at construction rather than at the first
+write. The parse error is re-raised without the DSN: libpq echoes the whole
+string, password included.
 """
 
 from __future__ import annotations
@@ -66,6 +73,23 @@ def _postgres_factory(dsn: str) -> Callable[[], Any]:
             "(pip install psycopg2-binary)"
         ) from exc
 
+    # ``psycopg2.connect`` runs this same parse before it dials, so no DSN
+    # that connects is refused here; the parse itself does no I/O.
+    try:
+        psycopg2.extensions.parse_dsn(dsn)
+        parsed = True
+    except Exception:
+        parsed = False
+    if not parsed:
+        # Security: libpq's parse error quotes the whole DSN, password
+        # included. Raising here, outside the ``except`` block, leaves the
+        # original off both ``__cause__`` and ``__context__``, so no
+        # traceback or log line that renders this exception can reach it.
+        raise ValueError(
+            "baldur.sql: BALDUR_SQL_DSN is not a valid PostgreSQL connection "
+            "string (the value is not shown because it can carry a password)"
+        )
+
     def _connect() -> Any:
         return psycopg2.connect(dsn)
 
@@ -105,21 +129,27 @@ def build_connection_factory(dsn: str | None = None) -> Callable[[], Any]:
     When ``dsn`` is None, ``resolve_dsn()`` is used — the documented
     precedence chain (``BALDUR_SQL_DSN`` > ``BALDUR_POSTGRES_*`` fallback).
 
-    The returned callable opens a *new* DB-API connection on every call
-    and never closes them. Suitable for dev / tests only; wrap or replace
-    with a pooled callable for production (see module docstring).
+    The returned callable opens a *new* DB-API connection on every call,
+    with no pool. To pool, register a pooled provider under ``sql`` before
+    ``baldur.init()`` (see module docstring).
+
+    Raises:
+        ImportError: The driver for the DSN's dialect is not installed.
+        ValueError: A PostgreSQL DSN that libpq cannot parse. The message
+            names ``BALDUR_SQL_DSN`` and carries no part of the DSN.
     """
     global _warned
     if not _warned:
         with _warned_lock:
             if not _warned:
-                logger.warning(
+                logger.info(
                     "sql.default_factory_no_pool",
                     guidance=(
-                        "build_connection_factory is dev/test only — opens a "
-                        "new DB-API connection per call and never closes them. "
-                        "Wrap with a pool (SQLAlchemy engine.raw_connection, "
-                        "dj-db-conn-pool, PgBouncer getconn) for production."
+                        "SQL stores wired from BALDUR_SQL_DSN open a new "
+                        "DB-API connection per operation, with no pool. To "
+                        "pool, register a pooled provider under 'sql' before "
+                        "baldur.init() (SQLAlchemy engine.raw_connection, "
+                        "dj-db-conn-pool, PgBouncer getconn)."
                     ),
                 )
                 _warned = True

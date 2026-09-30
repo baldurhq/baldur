@@ -89,7 +89,7 @@ class _StorageBackendStub:
     """Stand-in for the eagerly constructed storage backend.
 
     A hand-written double rather than a mock: the production boot gate reads
-    four plain attributes off it, and a spec-carrying mock cannot expose the
+    three plain attributes off it, and a spec-carrying mock cannot expose the
     private instance attributes at all. What is under test here is the registry
     default the wiring step selects, not the backend's own construction.
     """
@@ -97,7 +97,6 @@ class _StorageBackendStub:
     def __init__(self, wal_dir: str) -> None:
         self._wal_initialized = True
         self._wal_on_fallback_dir = False
-        self._wal_honors_configured_dir = True
         self.config = SimpleNamespace(wal_dir=wal_dir)
 
 

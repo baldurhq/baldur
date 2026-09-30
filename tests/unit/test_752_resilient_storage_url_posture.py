@@ -140,7 +140,6 @@ class TestInstallResilientStorageBackendUrlBehavior:
         backend_instance = MagicMock(spec=ResilientStorageBackend)
         backend_instance._wal_initialized = True
         backend_instance._wal_on_fallback_dir = False
-        backend_instance._wal_honors_configured_dir = True
         backend_cls = MagicMock(
             spec=ResilientStorageBackend, return_value=backend_instance
         )

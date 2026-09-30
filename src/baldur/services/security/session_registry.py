@@ -50,16 +50,15 @@ class UserSessionRegistry:
     @property
     def cache(self) -> CacheProviderInterface:
         if self._cache is None:
+            from baldur.adapters.cache.memory_adapter import InMemoryCacheAdapter
+            from baldur.core.di_fallback import resolve_with_fallback
             from baldur.factory import ProviderRegistry
 
-            try:
-                self._cache = ProviderRegistry.get_cache()
-            except (ValueError, ImportError):
-                from baldur.adapters.cache.memory_adapter import (
-                    InMemoryCacheAdapter,
-                )
-
-                self._cache = InMemoryCacheAdapter()
+            self._cache = resolve_with_fallback(
+                registry_method=ProviderRegistry.get_cache,
+                fallback_class=InMemoryCacheAdapter,
+                service_name=self.__class__.__name__,
+            )
         return self._cache
 
     def _key(self, user_id: int) -> str:

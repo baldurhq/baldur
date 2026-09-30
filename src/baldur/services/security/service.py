@@ -82,32 +82,30 @@ class SecurityViolationService:
     def repository(self) -> SecurityIncidentRepository:
         """Get the repository, creating default adapter if needed."""
         if self._repository is None:
+            from baldur.adapters.memory import InMemorySecurityIncidentRepository
+            from baldur.core.di_fallback import resolve_with_fallback
             from baldur.factory import ProviderRegistry
 
-            try:
-                self._repository = ProviderRegistry.get_security_repo()
-            except (ValueError, ImportError):
-                from baldur.adapters.memory import (
-                    InMemorySecurityIncidentRepository,
-                )
-
-                self._repository = InMemorySecurityIncidentRepository()
+            self._repository = resolve_with_fallback(
+                registry_method=ProviderRegistry.get_security_repo,
+                fallback_class=InMemorySecurityIncidentRepository,
+                service_name=self.__class__.__name__,
+            )
         return self._repository
 
     @property
     def cache(self) -> CacheProviderInterface:
         """Get the cache provider, creating default if needed."""
         if self._cache is None:
+            from baldur.adapters.cache.memory_adapter import InMemoryCacheAdapter
+            from baldur.core.di_fallback import resolve_with_fallback
             from baldur.factory import ProviderRegistry
 
-            try:
-                self._cache = ProviderRegistry.get_cache()
-            except (ValueError, ImportError):
-                from baldur.adapters.cache.memory_adapter import (
-                    InMemoryCacheAdapter,
-                )
-
-                self._cache = InMemoryCacheAdapter()
+            self._cache = resolve_with_fallback(
+                registry_method=ProviderRegistry.get_cache,
+                fallback_class=InMemoryCacheAdapter,
+                service_name=self.__class__.__name__,
+            )
         return self._cache
 
     def handle_violation(

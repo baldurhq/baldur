@@ -18,6 +18,13 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `from baldur.api.django import pool_circuit_breaker` now gives the module, not the breaker.
 - Production idempotency without a shared cache now raises instead of deduping per process.
 - Async idempotency in production refuses a non-Redis cache adapter instead of deduping per process.
+- Production no longer requires `BALDUR_SECRETS_ENCRYPTION_KEY`.
+- Production needs `BALDUR_SECRETS_AUDIT_SIGNING_KEY` only with audit on or an active PRO licence.
+- Production needs `BALDUR_SQL_DSN` or Django `DATABASES` only with an active PRO licence.
+- Production boots on a fallback WAL dir with a warning; set `BALDUR_RESILIENT_STORAGE_WAL_DIR`.
+- Production refuses a Redis or SQL backend that cannot be built: missing driver, unparsable DSN.
+- A store falling back to process memory in production now logs a warning.
+- `BALDUR_TEST_MODE=true` in production now warns, naming the backend variables it ignores.
 
 ### Fixed
 

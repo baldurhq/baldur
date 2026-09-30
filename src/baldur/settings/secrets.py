@@ -12,7 +12,9 @@ Benefits:
 - Safe for audit logs
 
 Security hardening:
-- validate_required_secrets(): warns/errors when core secrets are unset
+- validate_required_secrets(): reports unset secrets, and in production
+  refuses to start without ``audit_signing_key`` while a keyed audit chain
+  can be written (audit trail on, or a PRO entitlement active)
 """
 
 import structlog
@@ -196,21 +198,44 @@ def _report_unset_secrets(
     return unset
 
 
+def _audit_signing_key_required() -> bool:
+    """Whether a keyed audit chain can be written in this process.
+
+    ``audit_signing_key`` keys every audit hash-chain entry. Chains are
+    written by the audit adapters only while the audit trail is on, and by
+    PRO (postmortem sealing, weighted error-budget audit) only under an
+    active entitlement. Read the entitlement after the PRO bootstrap hook
+    has run: the hook re-validates it and turns audit on, so an earlier
+    read can see neither.
+    """
+    from baldur.settings.audit import get_audit_settings
+
+    if get_audit_settings().enabled:
+        return True
+
+    from baldur.core.entitlement import is_entitlement_active
+
+    return is_entitlement_active()
+
+
 def validate_required_secrets(secrets: SecretsSettings | None = None) -> dict:
     """
     Verify that the core secrets are configured.
 
     Security hardening, in production:
-    - CRITICAL secrets (encryption_key, audit_signing_key): ERROR log when unset
+    - CRITICAL: ``audit_signing_key`` while a keyed audit chain can be
+      written — the audit trail is on (``BALDUR_AUDIT_ENABLED``) or a PRO
+      entitlement is active. ERROR log when unset.
     - IMPORTANT secrets (database_password, redis_password): WARNING log when unset
-    - OPTIONAL secrets: INFO log when unset
+    - OPTIONAL secrets, ``encryption_key`` among them, and
+      ``audit_signing_key`` when nothing writes a keyed chain: INFO log when
+      unset
 
     Outside production the CRITICAL and IMPORTANT reports drop to INFO and
     DEBUG. Every one of these fields defaults to an empty ``SecretStr``, so
     an empty secret is the expected state of a zero-config development boot;
     a security ERROR that fires on every healthy dev machine teaches
-    operators to ignore security ERRORs. Production is where this is a real
-    finding, and there both the levels and the abort below are unchanged.
+    operators to ignore security ERRORs.
 
     In production, a missing CRITICAL secret raises ConfigurationError —
     the deliberate fail-loud class every framework adapter's startup path
@@ -231,23 +256,28 @@ def validate_required_secrets(secrets: SecretsSettings | None = None) -> dict:
     if secrets is None:
         secrets = get_secrets()
 
-    # Secret classification
-    critical_secrets = {
-        "encryption_key": secrets.encryption_key,
-        "audit_signing_key": secrets.audit_signing_key,
-    }
+    # Secret classification. The signing key is CRITICAL only where a keyed
+    # chain can be written; the encryption key has no production reader.
+    critical_secrets: dict[str, SecretStr] = {}
+    optional_secrets: dict[str, SecretStr] = {"encryption_key": secrets.encryption_key}
+    if _audit_signing_key_required():
+        critical_secrets["audit_signing_key"] = secrets.audit_signing_key
+    else:
+        optional_secrets["audit_signing_key"] = secrets.audit_signing_key
     important_secrets = {
         "database_password": secrets.database_password,
         "redis_password": secrets.redis_password,
     }
-    optional_secrets = {
-        "toss_secret_key": secrets.toss_secret_key,
-        "slack_webhook_token": secrets.slack_webhook_token,
-        "slack_bot_token": secrets.slack_bot_token,
-        "pagerduty_api_key": secrets.pagerduty_api_key,
-        "aws_access_key_id": secrets.aws_access_key_id,
-        "aws_secret_access_key": secrets.aws_secret_access_key,
-    }
+    optional_secrets.update(
+        {
+            "toss_secret_key": secrets.toss_secret_key,
+            "slack_webhook_token": secrets.slack_webhook_token,
+            "slack_bot_token": secrets.slack_bot_token,
+            "pagerduty_api_key": secrets.pagerduty_api_key,
+            "aws_access_key_id": secrets.aws_access_key_id,
+            "aws_secret_access_key": secrets.aws_secret_access_key,
+        }
+    )
 
     from baldur.runtime import is_production
 
@@ -271,12 +301,16 @@ def validate_required_secrets(secrets: SecretsSettings | None = None) -> dict:
         ),
     }
 
-    # In production, missing CRITICAL secrets must abort startup.
+    # In production, missing CRITICAL secrets must abort startup. The only
+    # CRITICAL secret is the audit signing key, so the message names its
+    # variable and the condition that made it required.
     if production and result["critical"]:
         raise ConfigurationError(
-            f"[Security] CRITICAL secrets not configured in production: "
-            f"{', '.join(result['critical'])}. "
-            "Cannot start Baldur system without these secrets."
+            "[Security] BALDUR_SECRETS_AUDIT_SIGNING_KEY is required in "
+            "production while the audit trail is on (BALDUR_AUDIT_ENABLED) "
+            "or a PRO entitlement is active: it keys every audit hash-chain "
+            "entry, so an actor without it cannot forge one. Set it to a "
+            "long random secret."
         )
 
     return result

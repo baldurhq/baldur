@@ -1,9 +1,11 @@
 """632 D7 — centralized CRITICAL-secret boot gate (``bootstrap._validate_critical_secrets``).
 
-The prod boot-abort for missing CRITICAL secrets (``encryption_key`` /
-``audit_signing_key``) was lifted out of the Django-only
-``apps.py._validate_secrets`` into ``baldur.init()`` so it fires on every
-framework adapter (Django / Flask / FastAPI / CLI).
+The prod boot-abort for a missing CRITICAL secret was lifted out of the
+Django-only ``apps.py._validate_secrets`` into ``baldur.init()`` so it fires on
+every framework adapter (Django / Flask / FastAPI / CLI). Since 801 D1 the only
+CRITICAL secret is ``audit_signing_key``, and only while a keyed audit chain can
+be written (audit trail on, or a PRO entitlement active); ``encryption_key`` is
+optional.
 
 This file pins the **end-to-end** gate behavior against the REAL
 ``validate_required_secrets`` under a REAL production runtime — the genuinely
@@ -33,6 +35,7 @@ import pytest
 from baldur import bootstrap
 from baldur.bootstrap import _validate_critical_secrets
 from baldur.core.exceptions import ConfigurationError
+from baldur.settings.audit import reset_audit_settings
 from baldur.settings.secrets import reset_secrets_settings
 
 _AUDIT_KEY_ENV = "BALDUR_SECRETS_AUDIT_SIGNING_KEY"
@@ -44,9 +47,11 @@ def _reset_bootstrap_runtime_and_secrets():
     """Each case starts and ends with clean runtime + secrets state."""
     bootstrap.reset_init_state()
     reset_secrets_settings()
+    reset_audit_settings()
     yield
     bootstrap.reset_init_state()
     reset_secrets_settings()
+    reset_audit_settings()
 
 
 def _seed(
@@ -55,17 +60,27 @@ def _seed(
     production: bool,
     audit_signing_key: str | None,
     encryption_key: str | None = "encryption-value",
+    audit_enabled: bool = True,
+    entitled: bool = False,
 ) -> None:
     """Set environment + rebuild runtime so ``is_production()`` re-reads it.
 
     ``audit_signing_key`` / ``encryption_key`` of ``None`` means *unset*
     (delenv, overriding the ambient test-value); a string (incl. ``""``) is set
     verbatim so the empty-string ≡ unset invariant is exercisable end-to-end.
+    ``audit_enabled`` defaults on — the condition under which the signing key
+    is CRITICAL without a PRO entitlement. ``entitled`` pins the verdict the
+    requirement reads: the suite-wide fixture reports ACTIVE wherever PRO is
+    installed, and the public CI runs with PRO absent.
     """
     monkeypatch.setenv(
         "BALDUR_ENVIRONMENT", "production" if production else "development"
     )
     monkeypatch.delenv("BALDUR_TEST_MODE", raising=False)
+    monkeypatch.setenv("BALDUR_AUDIT_ENABLED", "true" if audit_enabled else "false")
+    monkeypatch.setattr(
+        "baldur.core.entitlement.is_entitlement_active", lambda: entitled
+    )
 
     for env_name, value in (
         (_AUDIT_KEY_ENV, audit_signing_key),
@@ -76,20 +91,23 @@ def _seed(
         else:
             monkeypatch.setenv(env_name, value)
 
-    # Rebuild the runtime (is_production) and drop the cached secrets instance.
+    # Rebuild the runtime (is_production) and drop the cached settings.
     bootstrap.reset_init_state()
     reset_secrets_settings()
+    reset_audit_settings()
 
 
 class TestValidateCriticalSecretsGate:
     """End-to-end behavior of the centralized prod secret gate (D7)."""
 
     def test_production_with_unset_audit_signing_key_aborts(self, monkeypatch):
-        # Given production with audit_signing_key unset (encryption present)
+        # Given production, audit on, audit_signing_key unset (encryption present)
         _seed(monkeypatch, production=True, audit_signing_key=None)
 
-        # Then the gate raises, naming the missing CRITICAL secret
-        with pytest.raises(ConfigurationError, match="audit_signing_key"):
+        # Then the gate raises, naming the missing key's variable
+        with pytest.raises(
+            ConfigurationError, match="BALDUR_SECRETS_AUDIT_SIGNING_KEY"
+        ):
             _validate_critical_secrets()
 
     def test_production_with_empty_audit_signing_key_aborts(self, monkeypatch):
@@ -97,11 +115,13 @@ class TestValidateCriticalSecretsGate:
         _seed(monkeypatch, production=True, audit_signing_key="")
 
         # Then the empty key is treated as missing and aborts boot
-        with pytest.raises(ConfigurationError, match="audit_signing_key"):
+        with pytest.raises(
+            ConfigurationError, match="BALDUR_SECRETS_AUDIT_SIGNING_KEY"
+        ):
             _validate_critical_secrets()
 
-    def test_production_with_unset_encryption_key_aborts(self, monkeypatch):
-        # Given production with the OTHER CRITICAL secret unset
+    def test_production_with_unset_encryption_key_does_not_abort(self, monkeypatch):
+        # Given production with encryption_key unset (801 D1: it has no reader)
         _seed(
             monkeypatch,
             production=True,
@@ -109,9 +129,21 @@ class TestValidateCriticalSecretsGate:
             encryption_key=None,
         )
 
-        # Then the gate also covers encryption_key (D7 side benefit)
-        with pytest.raises(ConfigurationError, match="encryption_key"):
-            _validate_critical_secrets()
+        # Then the gate does not abort — encryption_key is optional
+        _validate_critical_secrets()
+
+    def test_production_with_audit_off_and_no_key_does_not_abort(self, monkeypatch):
+        # Given production, audit off, no PRO entitlement, no signing key
+        _seed(
+            monkeypatch,
+            production=True,
+            audit_signing_key=None,
+            encryption_key=None,
+            audit_enabled=False,
+        )
+
+        # Then nothing writes a keyed chain, so no key is required
+        _validate_critical_secrets()
 
     def test_production_with_all_critical_secrets_set_passes(self, monkeypatch):
         # Given production with every CRITICAL secret configured
@@ -138,11 +170,20 @@ class TestValidateCriticalSecretsGate:
         _validate_critical_secrets()
 
     def test_baldur_init_in_production_without_audit_key_raises(self, monkeypatch):
-        # Given production with audit_signing_key unset
+        # Given production, audit on, audit_signing_key unset. Wiring and the
+        # idempotency steps are stubbed: they need a Redis URL in production
+        # and are not what this case pins.
         _seed(monkeypatch, production=True, audit_signing_key=None)
+        monkeypatch.setattr(bootstrap, "_wire_registry_defaults", lambda: None)
+        monkeypatch.setattr(
+            bootstrap, "_validate_idempotency_cache_in_production", lambda: None
+        )
+        monkeypatch.setattr(bootstrap, "_install_idempotency_gate", lambda: None)
 
         # Then the full init() path aborts — the gate is wired into init()
-        # before the heavy startup steps (SC #8: ConfigurationError from baldur.init()
-        # on the central, non-Django path).
-        with pytest.raises(ConfigurationError, match="CRITICAL secrets"):
+        # (SC #8: ConfigurationError from baldur.init() on the central,
+        # non-Django path).
+        with pytest.raises(
+            ConfigurationError, match="BALDUR_SECRETS_AUDIT_SIGNING_KEY"
+        ):
             bootstrap.init()

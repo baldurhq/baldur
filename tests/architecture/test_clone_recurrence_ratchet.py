@@ -98,7 +98,13 @@ _ROOT_BUDGETS: dict[str, int] = {
     # member of the lazy-barrel ``__getattr__`` family — a mandated pattern
     # whose every member the lazy-barrel resolution suite pins one by one, so
     # a change to its contract cannot miss a copy.
-    "baldur": 576,
+    # +1: the security service's repository / cache and the session
+    # registry's cache now resolve through ``resolve_with_fallback`` (801 D5)
+    # instead of three copies of their own try/except fallback, so the trio
+    # takes the lazy-property shape of ``DLQCaptureService.repository`` and
+    # that family grows 3 -> 4. The logic the copies shared moved into the
+    # canonical helper; what remains per member is the call itself.
+    "baldur": 577,
 }
 
 # The budget half needs the OSS source on disk; the fixture half below is pure

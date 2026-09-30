@@ -5,10 +5,13 @@ On the shipped default (``/var/log/baldur/wal``) a non-root install used to log
 run with no WAL protection at all. Resolution now lives in ``WriteAheadLog``,
 so the default relocates and the WAL actually initializes.
 
-The production boot gate keeps its exact prior meaning — production refuses to
-start unless the WAL is on its *configured* directory — but now reads a
-predicate that says so, which a fallback deliberately does not satisfy. Runtime
-write paths keep using ``_wal_initialized``: a fallback WAL is a working WAL.
+The production boot gate refuses only a WAL that did not start at all
+(801 D3): an unwritable operator-chosen directory, or no writable directory
+anywhere. A WAL that started on a fallback of the shipped default boots
+production with one WARNING naming both paths and
+``BALDUR_RESILIENT_STORAGE_WAL_DIR`` — the fallback is the same durability class
+as the default it replaces. Runtime write paths keep using
+``_wal_initialized``: a fallback WAL is a working WAL.
 """
 
 from __future__ import annotations
@@ -134,28 +137,6 @@ class TestResilientWALDirFallbackBehavior:
         assert backend._wal_initialized is True
         assert backend._wal_on_fallback_dir is False
 
-    @pytest.mark.parametrize(
-        ("initialized", "on_fallback", "expected"),
-        [
-            (True, False, True),
-            (True, True, False),
-            (False, False, False),
-            (False, True, False),
-        ],
-        ids=["configured_dir", "fallback_dir", "wal_dead", "wal_dead_after_fallback"],
-    )
-    def test_honors_configured_dir_requires_both_initialized_and_no_fallback(
-        self, writable_dir_chain, tmp_path, initialized, on_fallback, expected
-    ):
-        """The boot gate's predicate is stricter than ``_wal_initialized`` alone."""
-        backend = ResilientStorageBackend(
-            settings=ResilientStorageSettings(wal_dir=str(tmp_path / "wal"))
-        )
-        backend._wal_initialized = initialized
-        backend._wal_on_fallback_dir = on_fallback
-
-        assert backend._wal_honors_configured_dir is expected
-
     def test_get_stats_reports_the_fallback_alongside_initialization(
         self, writable_dir_chain, deny_dir
     ):
@@ -170,7 +151,7 @@ class TestResilientWALDirFallbackBehavior:
 
 
 class TestProductionWALBootGateBehavior:
-    """``_install_resilient_storage_backend``'s fail-closed durability promise."""
+    """``_install_resilient_storage_backend``'s production WAL gate (801 D3)."""
 
     @pytest.fixture
     def install_backend(self, monkeypatch):
@@ -203,7 +184,8 @@ class TestProductionWALBootGateBehavior:
 
         backend = install_backend(is_production=True)
 
-        assert backend._wal_honors_configured_dir is True
+        assert backend._wal_initialized is True
+        assert backend._wal_on_fallback_dir is False
 
     def test_production_refuses_to_boot_when_an_operator_dir_is_unwritable(
         self, writable_dir_chain, deny_dir, install_backend, monkeypatch, tmp_path
@@ -216,35 +198,39 @@ class TestProductionWALBootGateBehavior:
         with pytest.raises(ConfigurationError):
             install_backend(is_production=True)
 
-    def test_production_refuses_to_boot_on_a_fallback_wal(
+    def test_production_boots_on_a_fallback_wal(
         self, writable_dir_chain, deny_dir, install_backend, monkeypatch
     ):
-        """Case (iii) — the negative that keeps the guarantee honest.
+        """Case (iii): an unwritable default relocates and production boots.
 
-        A fallback WAL is initialized and usable, so the old
-        ``_wal_initialized`` predicate would have let production boot with an
-        ephemeral WAL satisfying a durability promise it cannot keep.
+        The fallback is the same durability class as the default path it
+        replaces, and a root container writes that default onto its own
+        ephemeral layer anyway — the gate never tested for a volume.
         """
         monkeypatch.delenv(WAL_DIR_ENV_VAR, raising=False)
         deny_dir(Path(DEFAULT_WAL_DIR))
 
-        with pytest.raises(ConfigurationError):
-            install_backend(is_production=True)
+        backend = install_backend(is_production=True)
 
-    def test_production_gate_message_names_the_paths_and_the_break_glass(
+        assert backend._wal_initialized is True
+        assert backend._wal_on_fallback_dir is True
+
+    def test_production_fallback_warning_names_the_paths_and_the_variable(
         self, writable_dir_chain, deny_dir, install_backend, monkeypatch
     ):
-        """The operator must learn why boot stopped and how to proceed."""
+        """The operator learns where the WAL went and how to move it."""
         monkeypatch.delenv(WAL_DIR_ENV_VAR, raising=False)
         deny_dir(Path(DEFAULT_WAL_DIR))
 
-        with pytest.raises(ConfigurationError) as exc_info:
-            install_backend(is_production=True)
+        with capture_logs() as logs:
+            backend = install_backend(is_production=True)
 
-        message = str(exc_info.value)
-        assert DEFAULT_WAL_DIR in message
-        assert "fell back to" in message
-        assert WAL_DIR_ENV_VAR in message
+        records = log_events(logs, "baldur.resilient_storage_wal_dir_relocated")
+        assert len(records) == 1
+        assert records[0]["log_level"] == "warning"
+        assert records[0]["configured_dir"] == DEFAULT_WAL_DIR
+        assert records[0]["wal_dir"] == str(backend._wal.wal_dir)
+        assert records[0]["env_var"] == WAL_DIR_ENV_VAR
 
     def test_non_production_boots_with_a_working_fallback_wal(
         self, writable_dir_chain, deny_dir, install_backend, monkeypatch

@@ -220,7 +220,9 @@ class TestValidatorCallSiteOrdering:
         with (
             patch.object(bootstrap, "_validate_startup_config", _track("validate_cfg")),
             patch.object(
-                bootstrap, "_validate_critical_secrets", _track("validate_secrets")
+                bootstrap,
+                "_enforce_post_hook_requirements",
+                _track("post_hook_requirements"),
             ),
             patch.object(
                 bootstrap,
@@ -300,13 +302,10 @@ class TestValidatorCallSiteOrdering:
         bootstrap.reset_init_state()
 
         # Sidestep heavy upstream steps so the test reaches the validator.
-        # _validate_critical_secrets (632 D7) is one of those upstream steps:
-        # under production it would raise on the (here-ambient/unset) CRITICAL
-        # secrets and short-circuit init() before the idempotency validator, so
-        # it must be stubbed like every other pre-validator step.
+        # The production secret requirement runs after the PRO hook (801 D1),
+        # downstream of this validator, so it needs no stub here.
         with (
             patch.object(bootstrap, "_validate_startup_config"),
-            patch.object(bootstrap, "_validate_critical_secrets"),
             patch.object(bootstrap, "_register_default_event_handlers"),
             patch.object(bootstrap, "_init_bridge_instrumentation"),
             patch.object(bootstrap, "_register_shutdown_handlers"),

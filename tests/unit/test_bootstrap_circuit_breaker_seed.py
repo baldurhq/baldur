@@ -43,7 +43,6 @@ from baldur.services.circuit_breaker.config import (
 # a cheap, deterministic ordering harness rather than a real startup.
 _NEIGHBOUR_STEPS = (
     "_validate_startup_config",
-    "_validate_critical_secrets",
     "_register_default_event_handlers",
     "_init_bridge_instrumentation",
     "_instrument_otel_if_enabled",
@@ -53,6 +52,7 @@ _NEIGHBOUR_STEPS = (
     "_install_idempotency_gate",
     "_emit_tier_setting_warnings",
     "_run_pro_extensions",
+    "_enforce_post_hook_requirements",
     "_warn_unknown_env_vars",
     "_apply_audit_default_provider",
     "_start_audit_pipeline_if_enabled",

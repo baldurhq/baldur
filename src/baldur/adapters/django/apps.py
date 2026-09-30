@@ -152,7 +152,7 @@ class BaldurConfig(AppConfig):
             self._start_all_background_threads()
 
         # 632 D7 — required-secret validation is centralized in baldur.init()
-        # (the _validate_critical_secrets step), invoked above at the
+        # (the _enforce_post_hook_requirements step), invoked above at the
         # baldur.init() call, so the prod boot-abort gate fires on every
         # framework adapter. This adapter no longer runs its own Django-only
         # secret-validation step.

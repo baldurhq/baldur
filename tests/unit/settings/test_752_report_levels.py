@@ -52,6 +52,20 @@ def runtime_environment(monkeypatch):
     reset_runtime()
 
 
+@pytest.fixture(autouse=True)
+def keyed_chain_writer(monkeypatch):
+    """Pin the condition under which the signing key is CRITICAL (801 D1).
+
+    The key is CRITICAL only while a keyed audit chain can be written —
+    audit on, or a PRO entitlement active. These cases are about the level
+    split of a CRITICAL report, so they hold that condition true rather than
+    inherit whatever the environment and the entitlement fixture say.
+    """
+    monkeypatch.setattr(
+        "baldur.settings.secrets._audit_signing_key_required", lambda: True
+    )
+
+
 @pytest.fixture
 def empty_secrets():
     """The zero-config state: every field at its empty default."""
@@ -96,7 +110,7 @@ class TestSecretReportLevelBehavior:
             except ConfigurationError:
                 pass  # production aborts — the per-secret lines are already out
 
-        assert _levels(logs, _CRITICAL_EVENT) == [critical_level] * 2
+        assert _levels(logs, _CRITICAL_EVENT) == [critical_level]
         assert _levels(logs, _IMPORTANT_EVENT) == [important_level] * 2
 
     def test_optional_secrets_report_at_info_in_every_environment(
@@ -118,9 +132,10 @@ class TestSecretReportLevelBehavior:
 
         result = validate_required_secrets(empty_secrets)
 
-        assert result["critical"] == ["encryption_key", "audit_signing_key"]
+        assert result["critical"] == ["audit_signing_key"]
         assert result["warning"] == ["database_password", "redis_password"]
-        assert len(result["info"]) == 6
+        assert len(result["info"]) == 7
+        assert "encryption_key" in result["info"]
 
     def test_production_still_aborts_on_a_missing_critical_secret(
         self, runtime_environment, empty_secrets
@@ -128,7 +143,9 @@ class TestSecretReportLevelBehavior:
         """The hard gate the demotion must not touch."""
         runtime_environment("production")
 
-        with pytest.raises(ConfigurationError, match="encryption_key"):
+        with pytest.raises(
+            ConfigurationError, match="BALDUR_SECRETS_AUDIT_SIGNING_KEY"
+        ):
             validate_required_secrets(empty_secrets)
 
     def test_a_configured_secret_is_not_reported_at_all(self, runtime_environment):
@@ -165,7 +182,7 @@ class TestBootstrapSecretAggregateLevelBehavior:
         with (
             patch(
                 "baldur.settings.secrets.validate_required_secrets",
-                return_value={"critical": ["encryption_key"], "warning": []},
+                return_value={"critical": ["audit_signing_key"], "warning": []},
             ),
             capture_logs() as logs,
         ):

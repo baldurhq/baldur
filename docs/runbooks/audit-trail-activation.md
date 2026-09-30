@@ -20,13 +20,13 @@ An explicit `BALDUR_AUDIT_ENABLED` value is **sovereign in both directions**: `f
 | Setting | Default | What it does |
 |---|---|---|
 | `BALDUR_AUDIT_ENABLED` | `false` — **raised to `true` by the PRO hook when unset** | Master switch. When off, `bootstrap.init()` wires the `null` audit provider — no WAL, no files, no sync worker, no directories created. When on, it starts `AuditSyncWorker`; under PRO the hook has already promoted `file_hashchain`. |
-| `BALDUR_SECRETS_AUDIT_SIGNING_KEY` | _(unset)_ | Keys the HMAC-SHA256 hash chain. A **CRITICAL** secret — production boot aborts if it is missing. |
+| `BALDUR_SECRETS_AUDIT_SIGNING_KEY` | _(unset)_ | Keys the HMAC-SHA256 hash chain. A **CRITICAL** secret while the trail is on — production boot aborts if it is missing. |
 | `BALDUR_AUDIT_LOG_DIR` | `logs/audit` | Where `audit_{date}.jsonl` + `.hash_chain_state.json` are written. |
 | `BALDUR_AUDIT_DISTRIBUTED_HASH_CHAIN` | `false` — **raised to `true` by the PRO hook when a chain Redis URL is named** | Redis-backed hash chain — file locks do not span hosts. Set it yourself only to override; an explicit `true` also makes an unbuildable Redis client a startup error. |
 
 Audit does real I/O (WAL writes, hash-chain files, a background sync worker), so Baldur never creates audit artifacts an operator did not ask for — but under PRO the **entitlement is the request**, which is why the trail is on with nothing set. Either way it is **startup-wired, not a runtime toggle**: changing the switch takes a restart. Single-host file mode needs no external infrastructure.
 
-**The single most important rule**: **provision the signing key first.** In production a missing CRITICAL secret aborts the boot, and that gate runs at the top of `init()` — before the audit switch is read — so it fires whether or not audit is on. Under PRO, where the trail needs no flag, the key is the one thing you must actively sequence.
+**The single most important rule**: **provision the signing key first.** In production a missing signing key aborts the boot whenever the trail is on — `BALDUR_AUDIT_ENABLED=true`, or an active PRO entitlement, which turns the trail on by itself. The gate runs after the PRO startup hook, so it sees the switch the process actually runs with. Under PRO, where the trail needs no flag, the key is the one thing you must actively sequence.
 
 ---
 
@@ -60,7 +60,7 @@ On an install with no PRO entitlement, `BALDUR_AUDIT_ENABLED=true` turns the sub
 
 ## Phase 1 — Provision the signing key (do this first)
 
-`BALDUR_SECRETS_AUDIT_SIGNING_KEY` is the HMAC-SHA256 key for the audit hash chain: each entry's `current_hash` is keyed by this secret, so an actor who cannot read the key cannot forge a chain that still verifies. It is classified **CRITICAL** — in production (`BALDUR_ENVIRONMENT=production`) a missing CRITICAL secret raises `ConfigurationError` at boot.
+`BALDUR_SECRETS_AUDIT_SIGNING_KEY` is the HMAC-SHA256 key for the audit hash chain: each entry's `current_hash` is keyed by this secret, so an actor who cannot read the key cannot forge a chain that still verifies. It is classified **CRITICAL** while the trail is on — in production (`BALDUR_ENVIRONMENT=production`) a missing key then raises `ConfigurationError` at boot.
 
 ### Step 1.1 — Generate the key
 
@@ -69,7 +69,7 @@ On an install with no PRO entitlement, `BALDUR_AUDIT_ENABLED=true` turns the sub
 python -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
-Store it in your secret manager and inject it as an env var — never commit it. See `docs/runbooks/secure-deployment.md` (the CRITICAL-secrets phase) for the full secrets workflow, including the recoverable-PII `encryption_key` you will likely set at the same time.
+Store it in your secret manager and inject it as an env var — never commit it. See `docs/runbooks/secure-deployment.md` (the CRITICAL-secrets phase) for the full secrets workflow.
 
 **Next step go/no-go**: `BALDUR_SECRETS_AUDIT_SIGNING_KEY` is set in the deployment environment → proceed to Phase 2.
 
@@ -196,7 +196,7 @@ curl -s http://127.0.0.1:9090/audit/integrity/state    # current chain head
 
 ### Mistake 1 — Deploy without the signing key
 
-In production, a missing `BALDUR_SECRETS_AUDIT_SIGNING_KEY` is a CRITICAL-secret boot abort — and that gate is **unconditional**: it runs before the audit switch is read, so it hits a PRO deployment that never touched the flag just as hard as one that set it. Provision the key (Phase 1) *before* the deploy.
+In production, a missing `BALDUR_SECRETS_AUDIT_SIGNING_KEY` is a CRITICAL-secret boot abort whenever the trail is on — and an active PRO entitlement turns it on, so the gate hits a PRO deployment that never touched the flag just as hard as one that set it. Provision the key (Phase 1) *before* the deploy, and restart a running deployment after installing a licence: the requirement is checked at startup.
 
 ### Mistake 2 — Log directory on ephemeral container storage
 

@@ -9,7 +9,7 @@
 ## TL;DR
 
 1. Copy `.env.template` from the repo root to `.env` (gitignored) and fill in the placeholders.
-2. Populate the two CRITICAL secrets — `BALDUR_SECRETS_ENCRYPTION_KEY` and `BALDUR_SECRETS_AUDIT_SIGNING_KEY`. Boot aborts in production if either is missing.
+2. Populate the CRITICAL secret — `BALDUR_SECRETS_AUDIT_SIGNING_KEY`. Boot aborts in production when it is missing while the audit trail is on (`BALDUR_AUDIT_ENABLED`) or a PRO entitlement is active, which turns the trail on. `BALDUR_SECRETS_ENCRYPTION_KEY` is optional.
 3. Enable TLS by setting `BALDUR_TLS_ENABLED=true` and the certificate paths.
 4. Run `python -c "from baldur.settings.secrets import validate_required_secrets; print(validate_required_secrets())"` and confirm the `critical` list is empty.
 5. Review **Phase 5** to understand the audit / DLQ data-masking boundary before routing regulated data (PAN, SSN, etc.) through a Baldur-protected path.
@@ -27,15 +27,15 @@ Baldur classifies secrets into three tiers (`src/baldur/settings/secrets.py`):
 
 | Tier | Secrets | Boot behavior when missing |
 |------|---------|---------------------------|
-| **CRITICAL** | `encryption_key`, `audit_signing_key` | `ConfigurationError` raised in production (`BALDUR_ENVIRONMENT=production`); ERROR-level log in non-production |
+| **CRITICAL** | `audit_signing_key` — while the audit trail is on (`BALDUR_AUDIT_ENABLED`) or a PRO entitlement is active | `ConfigurationError` raised in production (`BALDUR_ENVIRONMENT=production`); INFO-level log in non-production |
 | **IMPORTANT** | `database_password`, `redis_password` | WARNING log; boot continues |
-| **OPTIONAL** | `toss_secret_key`, `slack_webhook_token`, `slack_bot_token`, `pagerduty_api_key`, `aws_access_key_id`, `aws_secret_access_key` | INFO log; boot continues |
+| **OPTIONAL** | `encryption_key`; `audit_signing_key` while nothing writes a keyed chain; `toss_secret_key`, `slack_webhook_token`, `slack_bot_token`, `pagerduty_api_key`, `aws_access_key_id`, `aws_secret_access_key` | INFO log; boot continues |
 
-Production deployments MUST provide the two CRITICAL secrets. Other tiers depend on which integrations the deployment enables.
+Production deployments that run the audit trail — every PRO deployment, since an active entitlement turns it on — MUST provide `audit_signing_key`. The requirement is checked at startup, after the licence is validated, so restart the process after installing a licence. Other tiers depend on which integrations the deployment enables.
 
-### Step 1.2 — Generate the CRITICAL secrets
+### Step 1.2 — Generate the secrets
 
-`encryption_key` is a Fernet-compatible URL-safe base64 key used for recoverable PII encryption. `audit_signing_key` is an opaque high-entropy string used to sign audit hash-chain blocks — each chain entry's `current_hash` is an HMAC-SHA256 keyed by this secret, so an actor who cannot read the key cannot forge a chain that still verifies.
+`encryption_key` is a Fernet-compatible URL-safe base64 key read only by the forensic masking level, which no shipped path selects; production never requires it. `audit_signing_key` is an opaque high-entropy string used to sign audit hash-chain blocks — each chain entry's `current_hash` is an HMAC-SHA256 keyed by this secret, so an actor who cannot read the key cannot forge a chain that still verifies.
 
 <!-- verified-by: tests/unit/audit/integrity — keyed signing + forge rejection (test_forge_without_key_fails) -->
 
@@ -105,8 +105,8 @@ Production deployments SHOULD enable TLS for every outbound connection that cros
 Once the secrets are generated and TLS cert paths are known, the typical production env block is:
 
 ```bash
-# CRITICAL secrets — missing values abort startup in production
-export BALDUR_SECRETS_ENCRYPTION_KEY="<fernet-key-from-step-1.2>"
+# CRITICAL secret — aborts startup in production while the audit trail is on
+# (every PRO deployment)
 export BALDUR_SECRETS_AUDIT_SIGNING_KEY="<token-urlsafe-key-from-step-1.2>"
 
 # TLS hardening
@@ -122,7 +122,7 @@ export BALDUR_ADMIN_READONLY_KEY="<readonly-secret>"  # VIEWER — read-only adm
 export BALDUR_ENVIRONMENT=production
 ```
 
-`BALDUR_ENVIRONMENT=production` is the single canonical production signal (`src/baldur/runtime.py`). Without it, missing CRITICAL secrets only emit ERROR logs and do not abort startup — fine for local development, but every prod / staging-as-prod deployment MUST set it explicitly.
+`BALDUR_ENVIRONMENT=production` is the single canonical production signal (`src/baldur/runtime.py`). Without it, a missing CRITICAL secret is only reported at INFO and does not abort startup — fine for local development, but every prod / staging-as-prod deployment MUST set it explicitly.
 
 Both admin keys ride the same `X-Baldur-Admin-Key` header: `BALDUR_ADMIN_KEY` resolves to **OPERATOR** (and to **ADMIN** when `BALDUR_ADMIN_UNLOCK=1`) — it can trip breakers and purge the DLQ — while `BALDUR_ADMIN_READONLY_KEY` resolves to **VIEWER** (read-only). Give read-only integrations (AI operators, Grafana, status pages) the read-only key, never the operator key. A non-localhost bind still requires `BALDUR_ADMIN_KEY`; the read-only key is additive and never substitutes for it as the bind-safety gate.
 
@@ -151,7 +151,7 @@ Expected output:
 {'critical': [], 'warning': [...], 'info': [...]}
 ```
 
-If `critical` is non-empty, the listed secrets MUST be populated before boot. If `BALDUR_ENVIRONMENT=production`, the same check also raises `ConfigurationError` and aborts startup — running it manually first gives a friendly preview of the same gate.
+Run it with the application's environment: the audit switch and the licence decide whether `audit_signing_key` is CRITICAL. If `critical` is non-empty, the listed secrets MUST be populated before boot. If `BALDUR_ENVIRONMENT=production`, the same check also raises `ConfigurationError` and aborts startup — running it manually first gives a friendly preview of the same gate.
 
 `warning` and `info` lists are informational only; populate them only when the corresponding integration is enabled.
 
@@ -187,8 +187,7 @@ Baldur deliberately does not attempt free-text PII scrubbing: regex-based scrubb
 
 1. **Stop sensitive data at the source.** Configure payment-gateway, database, and third-party clients so they do not echo PANs, full account numbers, or other regulated data inside exception messages. This is the only reliable control for free text.
 2. **Use sensitive key names.** When attaching diagnostic context to a protected call, name regulated fields with the conventional keys (`card_number`, `cvv`, `tax_id`, …) so structural masking applies. Extend `DEFAULT_SENSITIVE_KEYS`, or pass an explicit `sensitive_keys` list, for domain-specific identifiers.
-3. **Encrypt the recoverable PII path.** Populate `BALDUR_SECRETS_ENCRYPTION_KEY` (Phase 1) so the recoverable-PII and on-disk DLQ fallback paths are encrypted at rest.
-4. **Restrict DLQ / audit read access.** The DLQ admin console and audit store expose persisted failure context; gate them behind operator RBAC and network policy.
+3. **Restrict DLQ / audit read access.** The DLQ admin console and audit store expose persisted failure context; gate them behind operator RBAC and network policy.
 
 ---
 

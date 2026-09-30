@@ -567,11 +567,6 @@ class ResilientStorageBackend:
             # WAL failure is serious but we continue with memory-only
             self._wal_initialized = False
 
-    @property
-    def _wal_honors_configured_dir(self) -> bool:
-        """Whether the WAL runs on the directory it was configured with."""
-        return self._wal_initialized and not self._wal_on_fallback_dir
-
     def _init_shadow_logger(self) -> None:
         """Initialize Shadow Logger for forensic logging."""
         try:

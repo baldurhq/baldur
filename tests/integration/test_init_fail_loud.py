@@ -46,16 +46,14 @@ def patched_eager_backend(tmp_path, monkeypatch):
     """Replace ``ResilientStorageBackend`` + ``configure_storage_backend``.
 
     The mock backend reports a writable ``wal_dir`` (``tmp_path``) and a WAL
-    that honors it, so the production WAL fail-fast path does NOT trip in the
+    running on it, so the production WAL fail-fast path does NOT trip in the
     trigger-matrix happy paths. WAL-failure scenarios override this fixture
-    inline. The derived ``_wal_honors_configured_dir`` — the attribute the
-    boot gate actually reads — is set explicitly rather than left to
-    MagicMock's always-truthy auto-resolution.
+    inline. The attributes the boot gate reads are set explicitly rather than
+    left to MagicMock's always-truthy auto-resolution.
     """
     backend = MagicMock()
     backend._wal_initialized = True
     backend._wal_on_fallback_dir = False
-    backend._wal_honors_configured_dir = True
     backend.config = MagicMock(wal_dir=str(tmp_path))
 
     backend_cls = MagicMock(return_value=backend)
@@ -241,15 +239,13 @@ class TestInitProductionWalFailFastIntegration:
         monkeypatch.setenv("BALDUR_ENVIRONMENT", "production")
         monkeypatch.setenv("BALDUR_REDIS_URL", "redis://prod:6379/0")
 
-        # Backend reports WAL init failure. The boot gate reads the derived
-        # ``_wal_honors_configured_dir``, so it is set explicitly — an
-        # auto-resolved MagicMock attribute is always truthy and the gate
-        # would never fire.
+        # Backend reports WAL init failure. The gate's attributes are set
+        # explicitly — an auto-resolved MagicMock attribute is always truthy
+        # and the gate would never fire.
         backend = MagicMock()
         backend._wal_initialized = False
         backend._wal_on_fallback_dir = False
         backend._wal = None
-        backend._wal_honors_configured_dir = False
         backend.config = MagicMock(wal_dir="/nonexistent/baldur-wal")
 
         settings_stub = MagicMock(url="redis://prod:6379/0")
@@ -266,9 +262,7 @@ class TestInitProductionWalFailFastIntegration:
             patch("baldur.adapters.resilient.backend.configure_storage_backend"),
             _scaffold_init_subdeps(),
         ):
-            with pytest.raises(
-                ConfigurationError, match="WAL initialization did not honor"
-            ):
+            with pytest.raises(ConfigurationError, match="WAL initialization failed"):
                 bootstrap.init()
 
 
@@ -368,29 +362,67 @@ class TestInitGroupBIntegration:
     applies directly.
     """
 
-    def test_production_with_redis_set_but_sql_django_unset_raises(
-        self, monkeypatch, patched_eager_backend
-    ):
-        """prod + Redis set + neither SQL/Django → ConfigurationError on Group B.
+    @staticmethod
+    def _seed_production_without_sql_or_django(monkeypatch, *, entitled: bool):
+        """prod + Redis set + neither SQL nor Django, with a pinned verdict.
 
-        Group A and Group B verdicts run independently; satisfying one
-        does not exempt the other.
+        The suite-wide fixture reports an ACTIVE entitlement wherever PRO is
+        installed, and the public CI runs with PRO absent, so the verdict the
+        post-hook requirement reads is pinned here. The signing key is set so
+        the key check — which runs first — passes.
         """
-        from baldur import bootstrap
+        from baldur.settings.secrets import reset_secrets_settings
 
         monkeypatch.delenv("BALDUR_TEST_MODE", raising=False)
         monkeypatch.setenv("BALDUR_ENVIRONMENT", "production")
         monkeypatch.setenv("BALDUR_REDIS_URL", "redis://prod:6379/0")
+        monkeypatch.setenv("BALDUR_SECRETS_AUDIT_SIGNING_KEY", "audit-signing-key")
         monkeypatch.delenv("BALDUR_SQL_DSN", raising=False)
         monkeypatch.delenv("DJANGO_SETTINGS_MODULE", raising=False)
+        monkeypatch.setattr(
+            "baldur.core.entitlement.is_entitlement_active", lambda: entitled
+        )
+        reset_secrets_settings()
+
+    def test_production_entitled_without_sql_or_django_raises(
+        self, monkeypatch, patched_eager_backend
+    ):
+        """prod + entitled + neither SQL/Django → ConfigurationError (801 D2).
+
+        An active PRO entitlement writes postmortems and security incidents
+        to this store, so production requires one; the requirement is
+        checked after the PRO hook, not by wiring.
+        """
+        from baldur import bootstrap
+
+        self._seed_production_without_sql_or_django(monkeypatch, entitled=True)
 
         with _scaffold_init_subdeps():
             with pytest.raises(ConfigurationError) as exc_info:
                 bootstrap.init()
 
         message = str(exc_info.value)
-        assert "BALDUR_SQL_DSN" in message
-        assert "Django DATABASES" in message
+        assert "Neither BALDUR_SQL_DSN nor Django DATABASES" in message
+        assert "PRO entitlement" in message
+
+    def test_production_not_entitled_without_sql_or_django_boots_on_memory(
+        self, monkeypatch, patched_eager_backend
+    ):
+        """prod + not entitled + neither SQL/Django → boots, Group B on memory.
+
+        On OSS nothing writes these stores automatically, so the published
+        two-variable production block boots (801 D2).
+        """
+        from baldur import bootstrap
+        from baldur.factory.registry import ProviderRegistry
+
+        self._seed_production_without_sql_or_django(monkeypatch, entitled=False)
+
+        with _scaffold_init_subdeps():
+            bootstrap.init()
+
+        for attr in ("recovery_session_repo", "security_repo", "postmortem_repo"):
+            assert getattr(ProviderRegistry, attr).get_default_name() == "memory"
 
     def test_production_with_sql_dsn_wires_group_b_rows_to_sql(
         self, monkeypatch, patched_eager_backend

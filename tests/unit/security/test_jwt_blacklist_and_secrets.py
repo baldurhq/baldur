@@ -159,7 +159,7 @@ class TestValidateCriticalSecretsBehavior:
             patch(
                 "baldur.settings.secrets.validate_required_secrets",
                 return_value={
-                    "critical": ["encryption_key"],
+                    "critical": ["audit_signing_key"],
                     "warning": [],
                     "info": [],
                 },
@@ -181,7 +181,7 @@ class TestValidateCriticalSecretsBehavior:
             patch(
                 "baldur.settings.secrets.validate_required_secrets",
                 return_value={
-                    "critical": ["encryption_key"],
+                    "critical": ["audit_signing_key"],
                     "warning": [],
                     "info": [],
                 },
@@ -239,11 +239,11 @@ class TestValidateCriticalSecretsBehavior:
         with patch(
             "baldur.settings.secrets.validate_required_secrets",
             side_effect=ConfigurationError(
-                "CRITICAL secrets not configured in production"
+                "BALDUR_SECRETS_AUDIT_SIGNING_KEY is required in production"
             ),
         ):
             with pytest.raises(
-                ConfigurationError, match="CRITICAL secrets not configured"
+                ConfigurationError, match="AUDIT_SIGNING_KEY is required in production"
             ):
                 _validate_critical_secrets()
 
@@ -251,7 +251,9 @@ class TestValidateCriticalSecretsBehavior:
         """ConfigurationError path logs a critical resolution line before re-raising."""
         with patch(
             "baldur.settings.secrets.validate_required_secrets",
-            side_effect=ConfigurationError("CRITICAL secrets not configured"),
+            side_effect=ConfigurationError(
+                "BALDUR_SECRETS_AUDIT_SIGNING_KEY is required in production"
+            ),
         ):
             with patch("baldur.bootstrap.logger") as mock_logger:
                 with pytest.raises(ConfigurationError):

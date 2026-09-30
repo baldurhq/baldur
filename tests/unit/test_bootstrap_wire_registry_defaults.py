@@ -33,6 +33,7 @@ Verification techniques (per UNIT_TEST_GUIDELINES §8):
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -81,16 +82,18 @@ def _patch_eager_backend(
     was called exactly once. The constructed backend exposes the WAL
     attributes the production boot gate reads.
 
-    ``_wal_honors_configured_dir`` is set explicitly rather than left to
-    MagicMock: an auto-resolved attribute is always truthy, so the gate
-    would silently never fire and the fail-fast assertion would pass for
-    the wrong reason.
+    ``_wal_initialized`` / ``_wal_on_fallback_dir`` are set explicitly
+    rather than left to MagicMock: an auto-resolved attribute is always
+    truthy, so the gate would silently never fire and the fail-fast
+    assertion would pass for the wrong reason.
     """
     backend_instance = MagicMock()
     backend_instance._wal_initialized = wal_initialized
     backend_instance._wal_on_fallback_dir = wal_on_fallback_dir
-    backend_instance._wal_honors_configured_dir = (
-        wal_initialized and not wal_on_fallback_dir
+    backend_instance._wal = (
+        SimpleNamespace(wal_dir="/var/tmp/baldur-fallback-wal")
+        if wal_initialized
+        else None
     )
     backend_instance.config = MagicMock(wal_dir="/tmp/baldur-wal-test")
 
@@ -255,7 +258,7 @@ class TestWireCacheAndStorageWalFailFastBehavior:
         cm, _configure, _backend = _patch_eager_backend(wal_initialized=False)
 
         with cm:
-            with pytest.raises(ConfigurationError, match="did not honor"):
+            with pytest.raises(ConfigurationError, match="WAL initialization failed"):
                 bootstrap._wire_registry_defaults()
 
     def test_non_production_with_wal_init_failure_does_not_raise(
@@ -302,14 +305,14 @@ class TestWireCacheAndStorageWalFailFastBehavior:
 
         configure_fn.assert_called_once()
 
-    def test_production_with_a_fallback_wal_still_raises(
-        self, monkeypatch, isolated_cache_default
+    def test_production_with_a_fallback_wal_boots_with_a_warning(
+        self, monkeypatch, isolated_cache_default, caplog
     ):
-        """A usable WAL on a fallback dir must not satisfy the durability gate.
+        """A WAL that started on a fallback dir boots production (801 D3).
 
-        The gate promises the WAL is on its *configured* directory, so a
-        fallback fails it even though ``_wal_initialized`` is True — the old
-        predicate would have let production boot on a possibly-ephemeral WAL.
+        The default directory's fallback is the same durability class as
+        the default itself, so the gate no longer refuses it; it announces
+        it at WARNING, naming the variable that moves the WAL to a volume.
         """
         from baldur import bootstrap
 
@@ -320,15 +323,21 @@ class TestWireCacheAndStorageWalFailFastBehavior:
         bootstrap.reset_init_state()
 
         _stub_redis_settings(monkeypatch)
-        cm, _configure, backend = _patch_eager_backend(
+        cm, configure_fn, _backend = _patch_eager_backend(
             wal_initialized=True, wal_on_fallback_dir=True
         )
 
-        with cm:
-            with pytest.raises(ConfigurationError, match="did not honor"):
-                bootstrap._wire_registry_defaults()
+        with cm, caplog.at_level("WARNING"):
+            bootstrap._wire_registry_defaults()
 
-        assert backend._wal_initialized is True
+        configure_fn.assert_called_once()
+        relocated = [
+            r.message
+            for r in caplog.records
+            if "resilient_storage_wal_dir_relocated" in r.message
+        ]
+        assert len(relocated) == 1
+        assert "BALDUR_RESILIENT_STORAGE_WAL_DIR" in relocated[0]
 
     def test_non_production_with_a_fallback_wal_boots(
         self, monkeypatch, isolated_cache_default
@@ -688,11 +697,16 @@ class TestWireRegistryDefaultsGroupBBehavior:
             registry = getattr(ProviderRegistry, attr)
             assert registry.get_default_name() == "memory"
 
-    def test_production_with_neither_signal_set_raises_naming_sql_dsn(
+    def test_production_with_neither_signal_set_keeps_memory_without_raising(
         self, monkeypatch, isolated_all_wired_registries
     ):
-        """prod + neither DSN nor Django+DATABASES → ConfigurationError on Group B."""
+        """prod + neither DSN nor Django+DATABASES → every Group B row on memory.
+
+        801 D2: wiring no longer refuses; production requires a SQL or Django
+        store only under a PRO entitlement, enforced after the PRO hook.
+        """
         from baldur import bootstrap
+        from baldur.factory.registry import ProviderRegistry
 
         monkeypatch.delenv("BALDUR_TEST_MODE", raising=False)
         monkeypatch.setenv("BALDUR_ENVIRONMENT", "production")
@@ -705,14 +719,10 @@ class TestWireRegistryDefaultsGroupBBehavior:
         cm, _configure, _backend = _patch_eager_backend(wal_initialized=True)
 
         with cm:
-            with pytest.raises(ConfigurationError) as exc_info:
-                bootstrap._wire_registry_defaults()
+            bootstrap._wire_registry_defaults()
 
-        message = str(exc_info.value)
-        assert "BALDUR_SQL_DSN" in message
-        assert "Django DATABASES" in message
-        # recovery_session_repo is the first Group B row.
-        assert "ProviderRegistry.recovery_session_repo" in message
+        for attr in GROUP_B_REGISTRY_ATTRS:
+            assert getattr(ProviderRegistry, attr).get_default_name() == "memory"
 
     def test_production_with_sql_dsn_set_wires_sql_for_every_group_b_row(
         self, monkeypatch, isolated_all_wired_registries
@@ -1046,12 +1056,14 @@ class TestWireRegistryDefaultsEventJournalBehavior:
 
         assert ProviderRegistry.event_journal_repo.get_default_name() == "memory"
 
-    def test_env_override_forces_event_journal_backend_without_redis_url(
-        self, monkeypatch, isolated_all_wired_registries
+    def test_env_override_of_an_unbuildable_redis_journal_demotes_with_a_warning(
+        self, monkeypatch, isolated_all_wired_registries, caplog
     ):
-        """``BALDUR_EVENT_JOURNAL_BACKEND=redis`` forces redis even when
-        ``BALDUR_REDIS_URL`` is unset — the public operator knob (570 D1/D3)
-        is preserved and beats the priority chain."""
+        """``BALDUR_EVENT_JOURNAL_BACKEND=redis`` with ``BALDUR_REDIS_URL``
+        unset selects redis, and boot validation then constructs it (801 D6:
+        an operator-chosen name is always constructed). With no URL it cannot
+        be built, so outside production the row demotes to memory, announced
+        at WARNING, instead of keeping a default that fails every lookup."""
         from baldur import bootstrap
         from baldur.factory.registry import ProviderRegistry
 
@@ -1062,9 +1074,15 @@ class TestWireRegistryDefaultsEventJournalBehavior:
         monkeypatch.setenv("BALDUR_EVENT_JOURNAL_BACKEND", "redis")
         bootstrap.reset_init_state()
 
-        bootstrap._wire_registry_defaults()
+        with caplog.at_level("WARNING"):
+            bootstrap._wire_registry_defaults()
 
-        assert ProviderRegistry.event_journal_repo.get_default_name() == "redis"
+        assert ProviderRegistry.event_journal_repo.get_default_name() == "memory"
+        assert any(
+            "registry_backend_demoted" in r.message
+            and "event_journal_repo" in r.message
+            for r in caplog.records
+        )
 
     def test_env_override_beats_priority_chain(
         self, monkeypatch, isolated_all_wired_registries
@@ -1265,12 +1283,13 @@ class TestWireRegistryDefaultsPostmortemBehavior:
 
         assert ProviderRegistry.postmortem_repo.get_default_name() == "django"
 
-    def test_production_neither_signal_raises_at_first_row_postmortem_stays_memory(
+    def test_production_neither_signal_wires_postmortem_to_memory_without_raising(
         self, monkeypatch, isolated_all_wired_registries
     ):
-        """prod + neither SQL nor Django → ConfigurationError at the FIRST
-        Group B row (``recovery_session_repo``), so postmortem adds no new crash
-        condition and stays at the memory baseline (570 D5 rationale)."""
+        """prod + neither SQL nor Django → postmortem on memory, no raise.
+
+        801 D2: the SQL/Django requirement follows the PRO entitlement and is
+        enforced after the PRO hook, not by wiring."""
         from baldur import bootstrap
         from baldur.factory.registry import ProviderRegistry
 
@@ -1291,13 +1310,11 @@ class TestWireRegistryDefaultsPostmortemBehavior:
         _stub_redis_settings(monkeypatch)
         cm, _configure, _backend = _patch_eager_backend(wal_initialized=True)
 
-        with cm:
-            with pytest.raises(ConfigurationError) as exc_info:
-                bootstrap._wire_registry_defaults()
+        ProviderRegistry.postmortem_repo.set_default("django")
 
-        # recovery_session_repo is the first Group B row to evaluate the verdict.
-        assert "ProviderRegistry.recovery_session_repo" in str(exc_info.value)
-        # postmortem's row was never reached; default unchanged.
+        with cm:
+            bootstrap._wire_registry_defaults()
+
         assert ProviderRegistry.postmortem_repo.get_default_name() == "memory"
 
 
@@ -2011,14 +2028,14 @@ class TestEagerBackendValidationBehavior:
         assert "BALDUR_DLQ_BACKEND" in message
         assert "psycopg2" in message
 
-    def test_failed_op_repo_constructs_eagerly_while_a_flagless_row_does_not(
+    def test_flagged_rows_construct_eagerly_while_a_flagless_row_does_not(
         self, monkeypatch, dlq_wiring_env, isolated_all_wired_registries
     ):
         """The flag is opt-in, and the opt-out keeps lazy first-use behavior.
 
-        Both hybrids resolve ``"sql"`` in this environment; only the
-        dead-letter row — the one that carries the durability promise — pays
-        an eager construction for it.
+        Both hybrids resolve ``"sql"`` in this environment and, since 801 D6,
+        both carry the flag, so both pay an eager construction. The same
+        journal row with the flag switched off is left to first use.
         """
         from baldur import bootstrap
         from baldur.adapters.memory import (
@@ -2049,6 +2066,22 @@ class TestEagerBackendValidationBehavior:
         assert ProviderRegistry.failed_op_repo.get_default_name() == "sql"
         assert ProviderRegistry.event_journal_repo.get_default_name() == "sql"
         assert dlq_built == [1]
+        assert journal_built == [1]
+
+        # Opt-out: the journal row without the flag keeps lazy first use.
+        flagless = tuple(
+            w._replace(eager_validate=False)
+            if w.registry_attr == "event_journal_repo"
+            else w
+            for w in bootstrap._REGISTRIES_TO_WIRE
+        )
+        monkeypatch.setattr(bootstrap, "_REGISTRIES_TO_WIRE", flagless)
+        ProviderRegistry.event_journal_repo.clear_instances()
+        journal_built.clear()
+
+        bootstrap._wire_registry_defaults()
+
+        assert ProviderRegistry.event_journal_repo.get_default_name() == "sql"
         assert journal_built == []
 
 

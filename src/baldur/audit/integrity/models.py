@@ -65,10 +65,13 @@ def compute_hash(
     When ``audit_signing_key`` is configured, the hash is an HMAC-SHA256 keyed
     by that secret, so an actor without the key cannot forge a matching hash —
     rewriting the whole stored chain is detected on recompute. When the key is
-    unset (development / non-production), it degrades to keyless SHA-256, which
-    is tamper-evident only against actors who cannot rewrite the entire store.
-    Production always has the key (enforced by the boot-time CRITICAL-secret
-    gate), so production chains are uniformly keyed.
+    unset, it degrades to keyless SHA-256, which is tamper-evident only against
+    actors who cannot rewrite the entire store. In production the boot gate
+    requires the key whenever a keyed writer can run — the audit trail is on
+    (``BALDUR_AUDIT_ENABLED``) or a PRO entitlement is active — so the chains
+    production writes are keyed. A production process with neither at boot
+    writes no chain and needs no key; a licence installed after boot is
+    held to the requirement at the next restart.
 
     Uses fast_canonical_dumps (compact separators, sort_keys, ensure_ascii=False)
     to match canonical_json_bytes() output, so the hash is stable across key
