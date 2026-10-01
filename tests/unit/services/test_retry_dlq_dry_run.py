@@ -4,9 +4,9 @@ Two ``standard_pipeline`` intervention sites gated on the shared
 ``intervention_suppressed`` predicate (D5):
 
 - ``RetryPolicy.execute`` — under observe-only takes the single-attempt path
-  (``_single_attempt``), so the business call runs exactly once and the FAILURE
-  result carries no ``should_dlq`` flag (the downstream DLQ sink stays
-  observe-only too).
+  (``_single_attempt``), so the business call runs exactly once; the FAILURE
+  result still carries the stage's ``should_dlq`` verdict, and the downstream
+  DLQ sink's own guard withholds the store.
 - ``DLQSink.handle_failure`` — under observe-only suppresses the DLQ write and
   returns None as if nothing stored, logging the would-store decision.
 
@@ -65,14 +65,23 @@ class TestRetryPolicyDryRun:
         assert result.outcome == PolicyOutcome.FAILURE
         assert result.total_attempts == 1
 
-    def test_failure_metadata_has_no_should_dlq_under_dry_run(self):
-        # The single-attempt path sets no should_dlq, so the DLQ sink also stays
-        # observe-only downstream.
+    def test_failure_verdict_present_and_store_withheld_under_dry_run(self):
+        # The single-attempt path states the stage's verdict; the DLQ sink's
+        # observe-only guard is what withholds the store.
         fn, _ = _counting(raises=ConnectionError("boom"))
         policy = self._policy()
-        with dry_run_active():
+        with (
+            patch(
+                "baldur.services.retry_handler.sinks.store_to_dlq", autospec=True
+            ) as mock_store,
+            dry_run_active(),
+        ):
             result = policy.execute(fn)
-        assert "should_dlq" not in result.metadata
+            out = DLQSink().handle_failure(result.error, None, result)
+        assert result.metadata["should_dlq"] is True
+        assert result.metadata["max_attempts"] == 1
+        assert out is None
+        mock_store.assert_not_called()
 
     def test_success_returns_immediately_under_dry_run(self):
         fn, state = _counting(returns="ok")

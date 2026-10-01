@@ -1,21 +1,28 @@
 """
 Retry Policy Sinks — DLQ (Dead Letter Queue) terminal-failure handling.
 
-Sink implementation that stores a terminal failure to the DLQ. Two terminals
-reach it, each with its own store shape:
+Sink implementation that stores a terminal failure to the DLQ. Two lanes,
+each with its own store shape:
 
-- final failure — the call ran and failed for good; the ``should_dlq`` flag
-  decides whether to store (Dumb Sink pattern). A retry stage writes it when
-  its attempts run out; on a chain without one, a composer armed for unretried
-  failures writes it on the single attempt's failure or timeout.
-- open-circuit rejection — the call never ran because its breaker was OPEN.
-  The composer delivers it only when armed for open-circuit capture, and this
-  sink gates it on ``DLQSettings.open_circuit_capture_enabled``.
+- verdict lane — every terminal except an open-circuit rejection: a failure,
+  a timeout, or a refusal that carries an error (a full bulkhead). The
+  ``should_dlq`` flag decides whether to store (Dumb Sink pattern). A retry
+  stage writes it on each of its exits; a composer armed for failure capture
+  writes it when no stage did, and files a placeholder-domain verdict under
+  the call site's name.
+- open-circuit lane — the call never ran because its breaker was OPEN. The
+  composer delivers it only when armed for open-circuit capture, and this sink
+  gates it on ``DLQSettings.open_circuit_capture_enabled``.
+
+Every exit that stores nothing logs why: ``dlq_sink.capture_skipped`` (DEBUG,
+with a ``reason``) for an opt-out, ``execution_mode.intervention_suppressed``
+under observe-only, and ``dlq_sink.create_dlq_entry_failed`` (ERROR) when the
+store did not keep the entry.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -27,6 +34,9 @@ from baldur.interfaces.resilience_policy import (
     PolicyResult,
 )
 from baldur.models.dlq import OPEN_CIRCUIT_FAILURE_TYPE, POLICY_CHAIN_CAPTURE_SOURCE
+
+if TYPE_CHECKING:
+    from baldur.services.circuit_breaker.exceptions import CircuitBreakerOpenError
 
 logger = structlog.get_logger()
 
@@ -46,11 +56,11 @@ class DLQSink:
     """
     Sink that stores a terminal failure to the DLQ (Dead Letter Queue).
 
-    On a final-failure terminal it checks only the
+    On every terminal but an open-circuit rejection it checks only the
     PolicyResult.metadata["should_dlq"] flag: stores if True, skips if False
     (Dumb Sink pattern). RetryPolicy marks the store decision via
-    config.enable_dlq; on a chain with no retry stage, a composer armed via
-    ``capture_unretried_failures`` marks it instead.
+    config.enable_dlq; a composer armed via ``capture_failures`` marks it when
+    no stage did.
 
     On the open-circuit rejection terminal there is no such flag — the call
     never ran — so the store is gated on
@@ -76,19 +86,38 @@ class DLQSink:
         Store a terminal failure to the DLQ.
 
         Args:
-            error: Terminal exception — a final failure (retry-exhausted, or
-                the single attempt's error or timeout when no retry stage
-                ran), or the ``CircuitBreakerOpenError`` of a rejected call
+            error: Terminal exception — a final failure (retry-exhausted, a
+                single attempt's error, a timeout, or a refusal such as a full
+                bulkhead), or the ``CircuitBreakerOpenError`` of a call an
+                open circuit rejected
             context: PolicyContext (order_id, user_id, etc.)
             policy_result: Whole-pipeline result
 
         Returns:
             DLQ record ID string, or None (when not stored)
         """
-        if policy_result.outcome == PolicyOutcome.REJECTED:
+        from baldur.services.circuit_breaker.exceptions import CircuitBreakerOpenError
+
+        if policy_result.outcome == PolicyOutcome.REJECTED and isinstance(
+            error, CircuitBreakerOpenError
+        ):
             return self._handle_open_circuit_rejection(error, context, policy_result)
 
-        if not policy_result.metadata.get("should_dlq", False):
+        if "should_dlq" not in policy_result.metadata:
+            # A composer no call site armed (a caller's own compose()).
+            logger.debug(
+                "dlq_sink.capture_skipped",
+                reason="no_verdict",
+                error_type=type(error).__name__,
+            )
+            return None
+        if not policy_result.metadata["should_dlq"]:
+            logger.debug(
+                "dlq_sink.capture_skipped",
+                reason="stage_declined",
+                domain=policy_result.metadata.get("domain"),
+                error_type=type(error).__name__,
+            )
             return None
 
         # Observe-only (dry-run / shadow / evaluation): suppress the DLQ write,
@@ -105,7 +134,7 @@ class DLQSink:
 
     def _handle_open_circuit_rejection(
         self,
-        error: Exception,
+        error: CircuitBreakerOpenError,
         context: PolicyContext | None,
         policy_result: PolicyResult,
     ) -> str | None:
@@ -118,26 +147,43 @@ class DLQSink:
         with the policy-chain source: an entry stored under a path-inferred
         domain names a different circuit and must not be swept on this one.
 
+        One rejection is parked once per process. The rejection instance
+        propagates out through every enclosing call site, so a site that finds
+        it already marked — an inner ``dlq=True`` call parked it — skips its
+        own store. The mark is set once the capture service took custody: an
+        entry dispatched, or a local fallback record written when the store's
+        backend failed. A store that kept nothing leaves it unset, and the
+        enclosing site tries again.
+
         Fails open end to end. A settings read that raises skips the capture,
         never the rejection, and a store that fails is logged and swallowed —
         the caller still receives the original ``CircuitBreakerOpenError``.
         """
-        from baldur.services.circuit_breaker.exceptions import CircuitBreakerOpenError
-
-        if not isinstance(error, CircuitBreakerOpenError):
-            # Bulkhead-full and guard vetoes are rejections too; which of those
-            # represent parkable work is a separate decision.
+        if error.dlq_capture_dispatched:
+            logger.debug(
+                "dlq_sink.capture_skipped",
+                reason="already_captured",
+                healing_domain=error.service_name,
+                result=error.dlq_id,
+            )
             return None
 
         try:
             from baldur.settings.dlq import get_dlq_settings
 
-            if not get_dlq_settings().open_circuit_capture_enabled:
-                return None
+            capture_enabled = get_dlq_settings().open_circuit_capture_enabled
         except Exception as settings_error:
             logger.debug(
-                "dlq_sink.open_circuit_capture_skipped",
+                "dlq_sink.capture_skipped",
+                reason="settings_unreadable",
                 error=str(settings_error),
+            )
+            return None
+        if not capture_enabled:
+            logger.debug(
+                "dlq_sink.capture_skipped",
+                reason="open_circuit_capture_disabled",
+                healing_domain=error.service_name,
             )
             return None
 
@@ -184,7 +230,12 @@ class DLQSink:
             logger.error(
                 "dlq_sink.create_dlq_entry_failed",
                 result=result.error,
+                fallback_path=result.fallback_path,
             )
+            if result.is_fallback:
+                # The local fallback record holds the entry: custody was
+                # taken, so an enclosing site must not write a second copy.
+                error.mark_dlq_capture_dispatched()
             return None
 
         dlq_id = str(result.dlq_id) if result.dlq_id is not None else None

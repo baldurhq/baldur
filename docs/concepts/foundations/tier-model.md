@@ -61,10 +61,10 @@ survive a dependency failing, with zero infrastructure to start:
 - [Health Check](../oss/health-check.md) and [Graceful Shutdown](../oss/graceful-shutdown.md) — tell
   a load balancer the truth and drain in-flight work cleanly when the process restarts.
 - [DLQ + Replay](dlq-replay.md) — at a `dlq=True` call site, a call that raises and fails for good
-  is captured with the context needed to run it again, unless a `fallback=` answered it or Baldur's
-  own `timeout=` cut it off mid-retry. With a replay handler registered for that work, the backlog
-  can be replayed once the dependency recovers, automatically when its on-recovery prerequisites
-  (a Celery worker among them) are in place.
+  is captured with the context needed to run it again, unless a `fallback=` answered it or another
+  [stated rule](dlq-replay.md#how-it-works-in-baldur) excludes it. With a replay handler registered
+  for that work, the backlog can be replayed once the dependency recovers, automatically when its
+  on-recovery prerequisites (a Celery worker among them) are in place.
 - [Metrics](../oss/metrics.md), [System Control](../oss/system-control.md), and
   [Precomputed Cache](../oss/precomputed-cache.md) — see what's happening and switch protection on
   or off at runtime.

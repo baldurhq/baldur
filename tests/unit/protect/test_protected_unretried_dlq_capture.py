@@ -1,8 +1,8 @@
 """``@protected(name, dlq=True)`` without a retry stage parks its final failure.
 
 Target: ``baldur.protect_facade`` — both composer builders arm the composer for
-unretried failures when ``dlq`` is on and no retry stage was composed — through
-``PolicyComposer`` / ``AsyncPolicyComposer`` to ``DLQSink``.
+failure capture whenever ``dlq`` is on — through ``PolicyComposer`` /
+``AsyncPolicyComposer`` to ``DLQSink``.
 
 Seam: ``baldur.services.retry_handler.sinks.store_to_dlq``. Without the arming
 the sink drops the terminal and the store is never called, so each positive
@@ -271,10 +271,12 @@ class TestProtectedUnretriedDlqCaptureBehavior:
     @pytest.mark.parametrize(
         "prebuilt", [False, True], ids=["retry_config", "prebuilt_retry_policy"]
     )
-    def test_sync_retry_stage_cut_off_by_the_bound_parks_nothing(self, store, prebuilt):
+    def test_sync_retry_stage_cut_off_by_the_bound_parks_one_entry(
+        self, store, prebuilt
+    ):
         """With a retry stage the bound cuts the retry sequence off before it
-        can reach a verdict, and the composer is not armed to supply one —
-        whichever form of ``retry=`` composed the stage."""
+        can reach a verdict; the armed composer supplies one, filed under the
+        call site's name — whichever form of ``retry=`` composed the stage."""
         config = _retry_config("svc.retried_slow")
         release = threading.Event()
 
@@ -295,11 +297,13 @@ class TestProtectedUnretriedDlqCaptureBehavior:
         finally:
             release.set()
 
-        store.assert_not_called()
+        assert store.call_count == 1
+        assert store.call_args.kwargs["domain"] == "svc.retried_slow"
+        assert _failure_types(store) == ["MAX_RETRIES_TIMEOUTPOLICYERROR"]
 
-    def test_async_retry_stage_cut_off_by_the_bound_parks_nothing(self, store):
+    def test_async_retry_stage_cut_off_by_the_bound_parks_one_entry(self, store):
         """``aprotect`` accepts no pre-built ``RetryPolicy``, so the async half
-        pins the same arming condition through the retry-present timeout."""
+        pins the retry-present timeout through a config."""
 
         @protected(
             "svc.aretried_slow",
@@ -315,7 +319,9 @@ class TestProtectedUnretriedDlqCaptureBehavior:
         with pytest.raises(TimeoutPolicyError):
             asyncio.run(call("doc-1"))
 
-        store.assert_not_called()
+        assert store.call_count == 1
+        assert store.call_args.kwargs["domain"] == "svc.aretried_slow"
+        assert _failure_types(store) == ["MAX_RETRIES_TIMEOUTPOLICYERROR"]
 
     # --- (e) the breaker opens mid-outage -----------------------------------
 

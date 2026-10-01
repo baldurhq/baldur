@@ -23,9 +23,14 @@ Sink handling:
 - Runs synchronously (blocking), per the FailureSink Protocol
 - Reached by the FAILURE terminal, and — on a composer armed via
   ``capture_open_circuit_rejections()`` — by an open-circuit rejection too
-- A composer armed via ``capture_unretried_failures(domain)`` (a chain with no
-  retry stage to decide) marks its own FAILURE / TIMEOUT terminal for storage
-  under ``domain``, and lets the TIMEOUT terminal reach the sinks as well
+- A composer armed via ``capture_failures(name)`` treats every terminal that
+  carries an error as a failed call: FAILURE, TIMEOUT, and a rejection other
+  than an open circuit's (a full bulkhead). It completes the store verdict on
+  that terminal — writing one when no stage did, and filing a stage's verdict
+  that names only the placeholder domain under ``name`` — and lets the
+  TIMEOUT and rejection terminals reach the sinks as well. A stage's explicit
+  "do not store" is kept. A guard's refusal carries no error and is never
+  delivered: the guard logs it
 - Cost depends on the sink's own store mode: the DLQ sink's default async
   outbox path still masks and serializes the payload on this thread before
   handing it over, and a sync-store configuration additionally pays the write
@@ -249,8 +254,8 @@ def _is_open_circuit_rejection(result: PolicyResult) -> bool:
     """True when this terminal is a call an OPEN circuit refused to run.
 
     Narrower than ``outcome == REJECTED``: a guard veto carries no error at all,
-    and a bulkhead-full or timeout terminal is a different kind of loss whose
-    capture semantics are not decided here.
+    and a bulkhead-full rejection is a call that failed for want of capacity,
+    parked like any other failure rather than under the breaker's name.
     """
     if result.outcome != PolicyOutcome.REJECTED or result.error is None:
         return False
@@ -259,11 +264,29 @@ def _is_open_circuit_rejection(result: PolicyResult) -> bool:
     return isinstance(result.error, CircuitBreakerOpenError)
 
 
+def _is_failed_call(result: PolicyResult) -> bool:
+    """True when this terminal is a call that failed and was not refused by
+    an open circuit: FAILURE, TIMEOUT, or a rejection that carries an error.
+
+    The rejections in that set are a full bulkhead, and a stage that ended
+    without an error object (the composer synthesizes the rejection). A
+    rejection with no error at all is a guard's refusal, and an open-circuit
+    rejection has its own lane.
+    """
+    if result.outcome in (PolicyOutcome.FAILURE, PolicyOutcome.TIMEOUT):
+        return True
+    return (
+        result.outcome == PolicyOutcome.REJECTED
+        and result.error is not None
+        and not _is_open_circuit_rejection(result)
+    )
+
+
 def _terminal_reaches_sinks(
     result: PolicyResult,
     *,
     captures_open_circuit_rejections: bool,
-    captures_unretried_failures: bool,
+    captures_failures: bool,
 ) -> bool:
     """Whether a non-success terminal is delivered to the sink channel.
 
@@ -271,40 +294,49 @@ def _terminal_reaches_sinks(
     terminal joins it only on a composer wired for open-circuit capture: the
     breaker rejects in microseconds and drops whatever the call carried, so
     without this the work is lost precisely during the outage the DLQ exists
-    for. Every other rejection shape keeps the original "REJECTED never reaches
-    a sink" behavior.
+    for.
 
-    A TIMEOUT terminal joins only on a composer armed for unretried failures:
-    with no retry stage in the chain, the call the wall-clock bound cut off is
-    that call's final failure. On a chain with a retry stage the bound cuts the
-    retry sequence off before it can reach a verdict, so TIMEOUT stays out.
+    A TIMEOUT terminal, and a rejection that carries any other error, join
+    only on a composer armed for failure capture: each is a call that failed
+    — cut off by the wall-clock bound, or refused for want of capacity — and
+    the caller receives that error. A rejection with no error is a guard's
+    refusal and never reaches a sink; the guard logs it.
     """
     if result.outcome == PolicyOutcome.FAILURE:
         return True
-    if result.outcome == PolicyOutcome.TIMEOUT:
-        return captures_unretried_failures
-    return captures_open_circuit_rejections and _is_open_circuit_rejection(result)
+    if _is_open_circuit_rejection(result):
+        return captures_open_circuit_rejections
+    return captures_failures and _is_failed_call(result)
 
 
-def _arm_unretried_failure(result: PolicyResult, domain: str) -> None:
-    """Mark a FAILURE / TIMEOUT terminal for storage when no stage decided.
+def _arm_failure_verdict(result: PolicyResult, name: str) -> None:
+    """Complete the store verdict on a failed call's terminal under ``name``.
 
-    Writes the same verdict a retry stage writes when its attempts run out,
-    sized for a call that ran once — so the sink stores it under ``domain``
-    as ``MAX_RETRIES_<ERROR_TYPE>`` with ``max_attempts=1`` visible in the
-    entry. A terminal that already carries a ``should_dlq`` verdict is left
-    as it is: a stage in the chain decided, and its decision wins. Any other
-    outcome is left untouched.
+    Acts only on a terminal ``_is_failed_call`` accepts. When no stage wrote a
+    ``should_dlq`` verdict, writes the one a retry stage writes when its
+    attempts run out, sized for the attempts the call made — 1 for an
+    unretried or cut-off call, a bridge's own count for a caller-supplied
+    retry stage — so the sink stores it under ``name`` as
+    ``MAX_RETRIES_<ERROR_TYPE>``. When a stage did, its decision is kept,
+    including a decision not to store; only a verdict that names the retry
+    stages' placeholder domain (or none) is filed under ``name``, the domain
+    replay by the call site's name looks in.
     """
-    if result.outcome not in (PolicyOutcome.FAILURE, PolicyOutcome.TIMEOUT):
+    if not _is_failed_call(result):
         return
     if "should_dlq" in result.metadata:
+        # Def-body import, as for the breaker error above: the retry_handler
+        # package stays out of this module's import-time graph.
+        from baldur.services.retry_handler.models import PLACEHOLDER_DOMAIN
+
+        if result.metadata.get("domain") in (None, PLACEHOLDER_DOMAIN):
+            result.metadata["domain"] = name
         return
     result.metadata.update(
         {
             "should_dlq": True,
-            "domain": domain,
-            "max_attempts": 1,
+            "domain": name,
+            "max_attempts": max(result.total_attempts, 1),
             "retry_history": [],
             "reason": "max_attempts",
         }
@@ -477,8 +509,8 @@ class PolicyComposer(Generic[T]):
         self._hooks: list[PolicyHook] = []
         self._sinks: list[FailureSink] = []
         self._captures_open_circuit_rejections = False
-        # 796 D5: armed <=> not None; the domain is the only state arming needs.
-        self._unretried_failure_domain: str | None = None
+        # Armed <=> not None; the call-site name is the only state arming needs.
+        self._failure_capture_name: str | None = None
 
     # === Builder API ===
 
@@ -521,18 +553,20 @@ class PolicyComposer(Generic[T]):
         self._captures_open_circuit_rejections = True
         return self
 
-    def capture_unretried_failures(self, domain: str) -> PolicyComposer[T]:
-        """Store a failed or timed-out call when no retry stage decides to.
+    def capture_failures(self, name: str) -> PolicyComposer[T]:
+        """Park every failed call under ``name``, the call site's name.
 
-        On a chain without a retry stage nothing writes the ``should_dlq``
-        verdict a sink reads, so a failure would reach the sink and be
-        dropped. Armed, the composer writes that verdict itself onto a
-        FAILURE or TIMEOUT terminal — filed under ``domain``, the name the
-        call is protected under — and delivers the TIMEOUT terminal to the
-        sinks too. A verdict a stage already wrote is kept as it is. Per
+        A sink stores an ordinary failure only on a ``should_dlq`` verdict,
+        and only a retry stage's own exits write one — so without arming, a
+        chain with no retry stage, a caller-supplied retry stage, a timeout
+        that cut a retry sequence off and a full bulkhead all reach the sink
+        with no verdict, or not at all. Armed, the composer completes the
+        verdict on each FAILURE, TIMEOUT and error-carrying rejection terminal
+        (see ``_arm_failure_verdict``) and delivers the TIMEOUT and rejection
+        terminals to the sinks too. A stage's own "do not store" is kept. Per
         composer for the same reason as ``capture_open_circuit_rejections``.
         """
-        self._unretried_failure_domain = domain
+        self._failure_capture_name = name
         return self
 
     # === Execution ===
@@ -607,8 +641,8 @@ class PolicyComposer(Generic[T]):
             self._notify_hooks_success(result, context=context)
         else:
             # Complete the terminal before anything observes it.
-            if self._unretried_failure_domain is not None:
-                _arm_unretried_failure(result, self._unretried_failure_domain)
+            if self._failure_capture_name is not None:
+                _arm_failure_verdict(result, self._failure_capture_name)
 
             self._notify_hooks_failure(result, context=context)
 
@@ -618,9 +652,7 @@ class PolicyComposer(Generic[T]):
                 captures_open_circuit_rejections=(
                     self._captures_open_circuit_rejections
                 ),
-                captures_unretried_failures=(
-                    self._unretried_failure_domain is not None
-                ),
+                captures_failures=self._failure_capture_name is not None,
             ):
                 self._process_sinks(result, context, args, kwargs)
 
@@ -861,8 +893,8 @@ class AsyncPolicyComposer(Generic[T]):
         self._hooks: list[AsyncPolicyHook] = []
         self._sinks: list[AsyncFailureSink] = []
         self._captures_open_circuit_rejections = False
-        # 796 D5: armed <=> not None (sync-symmetric).
-        self._unretried_failure_domain: str | None = None
+        # Armed <=> not None (sync-symmetric).
+        self._failure_capture_name: str | None = None
 
     # === Builder API ===
 
@@ -898,15 +930,16 @@ class AsyncPolicyComposer(Generic[T]):
         self._captures_open_circuit_rejections = True
         return self
 
-    def capture_unretried_failures(self, domain: str) -> AsyncPolicyComposer[T]:
-        """Store a failed or timed-out call when no retry stage decides to.
+    def capture_failures(self, name: str) -> AsyncPolicyComposer[T]:
+        """Park every failed call under ``name`` (sync-symmetric).
 
-        Sync-symmetric: the composer writes the ``should_dlq`` verdict onto a
-        FAILURE or TIMEOUT terminal that carries none, filed under ``domain``,
-        and delivers the TIMEOUT terminal to the sinks. The store travels the
-        normalized sink channel, so a sync store runs off the event loop.
+        The composer completes the ``should_dlq`` verdict on each FAILURE,
+        TIMEOUT and error-carrying rejection terminal, filed under ``name``,
+        and delivers the TIMEOUT and rejection terminals to the sinks. The
+        store travels the normalized sink channel, so a sync store runs off
+        the event loop.
         """
-        self._unretried_failure_domain = domain
+        self._failure_capture_name = name
         return self
 
     # === Execution ===
@@ -993,22 +1026,21 @@ class AsyncPolicyComposer(Generic[T]):
                 await self._notify_hooks_success(result, context=context)
         else:
             # Complete the terminal before anything observes it.
-            if self._unretried_failure_domain is not None:
-                _arm_unretried_failure(result, self._unretried_failure_domain)
+            if self._failure_capture_name is not None:
+                _arm_failure_verdict(result, self._failure_capture_name)
 
             if self._hooks:
                 await self._notify_hooks_failure(result, context=context)
 
             # Sink processing — the FAILURE terminal, plus an armed
-            # open-circuit rejection and an armed unretried TIMEOUT.
+            # open-circuit rejection and, armed for failure capture, a TIMEOUT
+            # or an error-carrying rejection.
             if self._sinks and _terminal_reaches_sinks(
                 result,
                 captures_open_circuit_rejections=(
                     self._captures_open_circuit_rejections
                 ),
-                captures_unretried_failures=(
-                    self._unretried_failure_domain is not None
-                ),
+                captures_failures=self._failure_capture_name is not None,
             ):
                 await self._process_sinks(result, context, args, kwargs)
 

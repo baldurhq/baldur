@@ -865,13 +865,12 @@ class TestAsyncRetryFromPolicyConfigContract:
             (1, 0),  # off-by-one: 1 total attempt → 0 additional retries
             (3, 2),
             (5, 4),
-            (0, 0),  # max(0 - 1, 0) floors at 0
         ],
     )
     def test_max_attempts_maps_to_max_retries_off_by_one(
         self, max_attempts, expected_max_retries
     ):
-        """max_retries = max(cfg.max_attempts - 1, 0) — the load-bearing off-by-one."""
+        """max_retries = cfg.max_attempts - 1 — the load-bearing off-by-one."""
         from baldur.services.retry_handler.models import RetryPolicyConfig
 
         cfg = RetryPolicyConfig(max_attempts=max_attempts, domain="d")
@@ -1115,8 +1114,8 @@ class TestAsyncRetryObserveOnlyBehavior:
         clear_execution_mode_override()
 
     @pytest.mark.asyncio
-    async def test_observe_only_runs_single_attempt_without_should_dlq(self):
-        """Shadow mode → the business call runs exactly once, no re-execution, no DLQ arm."""
+    async def test_observe_only_runs_single_attempt_with_the_stage_verdict(self):
+        """Shadow mode → the business call runs exactly once; the stage states its verdict."""
         from baldur.core.execution_mode import ExecutionMode, set_execution_mode
 
         calls = {"n": 0}
@@ -1132,8 +1131,10 @@ class TestAsyncRetryObserveOnlyBehavior:
         assert calls["n"] == 1  # single attempt — retry suppressed
         assert result.outcome == PolicyOutcome.FAILURE
         assert result.total_attempts == 1
-        # Observe-only must NOT arm DLQ (the single-attempt result has no metadata).
-        assert "should_dlq" not in (result.metadata or {})
+        # The single attempt states the stage's verdict; the DLQ sink's own
+        # observe-only guard is what withholds the store.
+        assert result.metadata["should_dlq"] is True
+        assert result.metadata["max_attempts"] == 1
 
     @pytest.mark.asyncio
     async def test_observe_only_consults_intervention_suppressed(self):

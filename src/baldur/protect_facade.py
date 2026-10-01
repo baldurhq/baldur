@@ -102,7 +102,7 @@ ComposerProfile = Literal["default", "dlq_protect"]
 # Populated when ``_build_sync_composer`` is called with a cacheable
 # profile. Key is ``(name, timeout_seconds, profile)`` where ``profile``
 # is one of ``"default"`` (CB-only, post-#481/#482 canonical) or
-# ``"dlq_protect"`` (CB + Retry + DLQ-sink, the canonical zero-message-loss
+# ``"dlq_protect"`` (CB + Retry + DLQ-sink, the canonical ``@dlq_protect``
 # decorator profile from #499). ``timeout_seconds`` may be a float
 # (``TimeoutPolicy`` included in chain) or ``None`` (omitted).
 # Non-cacheable profiles fall through to per-call construction untouched.
@@ -122,22 +122,19 @@ _DLQ_SINK = DLQSink()
 def _attach_dlq_capture(
     composer: PolicyComposer[Any] | AsyncPolicyComposer[Any],
     name: str,
-    *,
-    retry_stage_composed: bool,
 ) -> None:
     """Attach what ``dlq=True`` means to a composer being built.
 
-    The shared DLQ sink and open-circuit capture always; unretried-failure
-    capture under ``name`` when no retry stage was composed, since nothing
-    else would write the store verdict for the single attempt's failure or
-    timeout. Called only for a ``dlq`` profile, so a sink-less composer is
-    never armed.
+    The shared DLQ sink, open-circuit capture, and failure capture under
+    ``name`` — whatever retry stage was composed, if any: a caller-supplied
+    stage writes no store verdict, a timeout cuts a retry sequence off before
+    its verdict returns, and a stage's verdict may name only the placeholder
+    domain, so the composer completes the verdict on every failed call. Called
+    only for a ``dlq`` profile, so a sink-less composer is never armed.
     """
     composer.add_sink(_DLQ_SINK)
     composer.capture_open_circuit_rejections()
-    if not retry_stage_composed:
-        # 796 D3: the retry stage's exhaustion verdict has no writer here.
-        composer.capture_unretried_failures(name)
+    composer.capture_failures(name)
 
 
 def _get_or_build_cb_policy(name: str) -> CircuitBreakerPolicy:
@@ -221,7 +218,7 @@ def _get_or_build_dlq_protect_composer(
     ``(name, timeout_seconds, "dlq_protect")``, building once.
 
     Profile pinned to ``dlq=True, retry=settings-derived, circuit_breaker=True,
-    fallback=None`` — the canonical zero-message-loss decorator shape from
+    fallback=None`` — the canonical decorator shape from
     ``@dlq_protect`` (`decorators/dlq_protect.py`). Same DCL pattern as
     ``_get_or_build_default_composer``: dependency construction happens
     BEFORE the lock to prevent reentrant ``_cb_policy_lock`` acquisition.
@@ -258,7 +255,7 @@ def _get_or_build_dlq_protect_composer(
         if timeout_policy is not None:
             composer.add(timeout_policy)
         composer.add(retry_policy)
-        _attach_dlq_capture(composer, name, retry_stage_composed=True)
+        _attach_dlq_capture(composer, name)
         _composer_cache[key] = composer
         logger.debug(
             "protect.composer_built",
@@ -755,9 +752,8 @@ def _build_sync_composer(
     as a guard+hook bracket and forces the slow path — an idempotency-enabled
     call must never return a cached idempotency-less composer.
 
-    ``dlq`` without a retry stage arms the composer for unretried failures
-    under ``name``: the single attempt's failure or timeout is stored, where a
-    retry stage would otherwise have written the store verdict on exhaustion.
+    ``dlq`` arms the composer to park every failed call under ``name``, with
+    or without a retry stage — see :func:`_attach_dlq_capture`.
     """
     # Default-kwargs fast-path: 5 conditions match the canonical
     # ``protect("name", fn)`` profile → return the per-(name, timeout)
@@ -779,7 +775,7 @@ def _build_sync_composer(
         return _get_or_build_default_composer(name, timeout_seconds)  # type: ignore[return-value]
 
     # ``@dlq_protect`` fast-path (#499 D3+D4): matches the canonical
-    # zero-message-loss decorator profile. Eligibility requires the retry
+    # ``@dlq_protect`` decorator profile. Eligibility requires the retry
     # config to be settings-derived so explicit ``RetryPolicyConfig`` callers
     # do not collide with ``@dlq_protect("X")`` on the same cache key.
     if (
@@ -813,11 +809,7 @@ def _build_sync_composer(
     elif retry_cfg is not None:
         composer.add(RetryPolicy(config=retry_cfg))
     if dlq:
-        _attach_dlq_capture(
-            composer,
-            name,
-            retry_stage_composed=retry_cfg is not None or retry_policy is not None,
-        )
+        _attach_dlq_capture(composer, name)
     logger.debug(
         "protect.composer_built",
         name=name,
@@ -895,8 +887,8 @@ def _build_async_composer(
     ``AsyncPolicyComposer`` — the async guard drives the awaitable
     ``AsyncIdempotencyGate`` with zero thread hop.
 
-    ``dlq`` without a retry stage arms the composer for unretried failures
-    under ``name``, exactly as the sync builder does.
+    ``dlq`` arms the composer to park every failed call under ``name``,
+    exactly as the sync builder does.
     """
     composer: AsyncPolicyComposer[T] = AsyncPolicyComposer()
     if idempotency_stage is not None:
@@ -934,11 +926,7 @@ def _build_async_composer(
 
         composer.add(AsyncRetryPolicy.from_policy_config(retry_cfg))
     if dlq:
-        _attach_dlq_capture(
-            composer,
-            name,
-            retry_stage_composed=retry_cfg is not None or retry_policy is not None,
-        )
+        _attach_dlq_capture(composer, name)
     logger.debug(
         "protect.composer_built",
         name=name,
@@ -1146,8 +1134,14 @@ def protect(  # verified-by: test_concurrent_duplicates_run_side_effect_exactly_
             (``fallback(error)`` — the absorbed exception, so it can branch on
             failure type and re-raise to decline). Runs OUTSIDE the timeout
             clock, so keep it cheap and local.
-        dlq: When True, final failures flow into the DLQ repository resolved
-            via ``ProviderRegistry``. ``None`` uses ``ProtectSettings.default_dlq``.
+        dlq: When True, a call whose failure reaches the caller is parked in
+            the DLQ repository resolved via ``ProviderRegistry``, filed under
+            ``name`` — a final failure, a timeout, and a refusal that carries
+            an error (a full bulkhead, or an open breaker's rejection, parked
+            as ``CIRCUIT_BREAKER_OPEN``), with or without ``retry``. A
+            guard's refusal, such as a blocked duplicate, is logged by the
+            guard and not parked. ``None`` uses
+            ``ProtectSettings.default_dlq``.
         retry: ``True`` uses ``RetryPolicyConfig.from_settings(domain=name)``;
             pass a ``RetryPolicyConfig`` for explicit control;
             pass a pre-built ``ResiliencePolicy`` (e.g.
@@ -1373,8 +1367,8 @@ async def aprotect(  # verified-by: test_concurrent_duplicates_run_side_effect_e
     one exhausted retry-sequence is a single CB failure, and the timeout bounds
     the whole sequence (a global, not per-attempt, timeout). The fallback is the
     last resort covering retry exhaustion, timeout, AND CB-open. Async
-    ``dlq=True`` routes an exhausted failure to the DLQ sink (the async retry
-    stage arms ``should_dlq``).
+    ``dlq=True`` parks what it parks on ``protect()``: every call whose
+    failure reaches the caller, under ``name``, except a guard's refusal.
 
     A pre-built ``TenacityBridgePolicy`` passed as ``retry=`` is auto-converted
     to ``AsyncTenacityBridgePolicy`` and runs under ``tenacity.AsyncRetrying``.

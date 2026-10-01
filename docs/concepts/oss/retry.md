@@ -138,9 +138,10 @@ That loop is the easy half. What decides whether retrying is *safe* is everythin
 - **DLQ routing is opt-in, not automatic.** Retry and backoff run on their own; the Dead Letter
   Queue captures an exhausted operation only where you asked for it (`dlq=True`). Without that flag,
   an exhausted retry still surfaces the error to the caller, and the pipeline doesn't capture the
-  operation for replay. Even with it, two failures never reach the queue: one your fallback
-  answered, and one a `timeout=` cut off mid-retry (nor does the abandoned ladder's final failure).
-  See [DLQ + Replay](../foundations/dlq-replay.md).
+  operation for replay. Even with it, a failure your fallback answered never reaches the queue; a
+  call a `timeout=` cuts off mid-retry is parked once, at the bound, and the abandoned ladder's
+  later failure adds no second entry. The other calls that stay out, each by a stated rule, are
+  listed in [DLQ + Replay](../foundations/dlq-replay.md).
 
 | What you observe | When it happens |
 |------------------|-----------------|

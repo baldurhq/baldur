@@ -35,6 +35,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `enable()`, `disable()` and the dry-run toggles return `SystemControlChange`, not `SystemState`.
 - `get_execution_mode()` reports `shadow` while the kill switch is pulled.
 - The disable response describes what steps aside instead of claiming every operation stopped.
+- `max_attempts` below 1 raises `ValueError` in code (use 1 for no retry); settings warn, fall back.
+- A DLQ capture that stores nothing logs `dlq_sink.capture_skipped` with a `reason` (DEBUG).
 
 ### Added
 
@@ -62,6 +64,11 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Two processes writing the file state store at once no longer corrupt it.
 - A process holding a stale switch state no longer overwrites a newer flip.
 - `baldur_system_control_enabled` no longer reads 0 (disabled) while the kill switch is not pulled.
+- `dlq=True` now parks a call with retry off, a tenacity `retry=`, or `timeout=` cutting retry.
+- A `dlq=True` call a full bulkhead refuses is parked, and so are a preset's open-breaker refusals.
+- A `RetryPolicyConfig` without `domain=` files DLQ entries under the call's name, not `default`.
+- An enclosing `dlq=True` call no longer parks a breaker rejection an inner one already parked.
+- A `domain_configs` retry overlay that is not a mapping no longer fails every `retry=True` call.
 
 ## [1.16.0] - 2026-09-28
 

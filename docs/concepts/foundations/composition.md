@@ -160,11 +160,16 @@ how many attempts?) without catching an exception, reach one level down for
   dependency recovers, with no PRO required. A replay runs the work again, so the safe-to-repeat
   rule above applies to it as well. PRO adds the operate-at-scale surface: one-click batch replay,
   adaptive pacing, and archive/purge retention.
-  Two limits: with `retry=` and `timeout=` together, a call the bound cuts off mid-retry is not
-  captured; and a second capture layer that fires for the same failure records its own entry as
-  well (the Django middleware on the resulting 5xx, or the Celery signal hook on the attempt Celery
-  gives up on, which skips only a breaker rejection the call already parked), so use one layer per
-  failure. See [what reaches the queue and how a replay re-runs it](dlq-replay.md).
+  Limits: a second capture layer that fires for the same failure records its own entry as well —
+  the Django middleware on the resulting 5xx, the Celery signal hook on the attempt Celery gives up
+  on, or an enclosing call with `dlq=True` around another `dlq=True` call, where each site parks
+  its own entry for the same work. The Celery hook and an enclosing `dlq=True` call skip only a
+  breaker rejection an inner site already parked, so use one layer per failure. Inside a task that Celery retries itself, each execution's
+  failure is parked, so one task can leave several entries for the same work. A sync call the
+  bound cut off may still be running when it is parked, and when it is replayed; on the sync path
+  `idempotency_key=` does not refuse that replay, because the key is released at the timeout (see
+  [Idempotency](../oss/idempotency.md#how-it-works-in-baldur)). See
+  [what reaches the queue and how a replay re-runs it](dlq-replay.md).
 - **The fallback runs *outside* the timeout clock, so keep it cheap and local.** The timeout bounds
   the inner call; when it fires, the fallback is what runs *next*, so it cannot be bounded by the
   same clock. Serve something fast — a cached value, a static default — not a second network call.

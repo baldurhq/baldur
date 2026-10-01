@@ -57,6 +57,15 @@ FALLBACK_BACKOFF_STRATEGY: str = "exponential"
 #: ladders on a cached policy cannot interleave each other's previous delay.
 STATEFUL_BACKOFF_STRATEGY: str = "decorrelated_jitter"
 
+#: Characters of an attempt's error message kept in a retry history entry.
+ATTEMPT_ERROR_MESSAGE_LIMIT: int = 500
+
+#: The domain a retry config carries when its caller named none. It identifies
+#: no downstream: 429 coordination resolves no coordinator for it, the metrics
+#: registry refuses it as a label, and a composer armed for DLQ capture files a
+#: verdict carrying it under the call site's own name instead.
+PLACEHOLDER_DOMAIN: str = "default"
+
 
 class RetryAction(str, Enum):
     """Actions that can be taken after a failure."""
@@ -131,7 +140,7 @@ class RetryPolicyConfig:
     non_retryable_exceptions: tuple[type[Exception], ...] = field(
         default_factory=non_retryable_exceptions  # from core.exceptions
     )
-    domain: str = "default"
+    domain: str = PLACEHOLDER_DOMAIN
     enable_dlq: bool = True
 
     # Result-predicate retry (constructor/decorator-only, synchronous callable)
@@ -162,7 +171,7 @@ class RetryPolicyConfig:
     config_source: str = field(default="direct", compare=False)
 
     @classmethod
-    def from_settings(cls, domain: str = "default") -> RetryPolicyConfig:
+    def from_settings(cls, domain: str = PLACEHOLDER_DOMAIN) -> RetryPolicyConfig:
         """
         Load only the pure retry settings from Settings.
 
@@ -216,14 +225,17 @@ class RetryPolicyConfig:
             # fields, so the backoff *shape* dials (multiplier, jitter width,
             # linear increment) fall through to BackoffSettings on this branch
             # too — that is what makes the two branches resolve alike.
-            backoff_settings = get_config().core.backoff
+            settings_tree = get_config()
+            backoff_settings = settings_tree.core.backoff
 
             # ``RetrySettings`` exposes the backoff base under ``base_delay``.
             # Looking up ``backoff_base`` first preserves an explicit
             # RuntimeConfigManager override using that key, then falls through to
             # the actual field so BALDUR_RETRY_BASE_DELAY takes effect.
             return cls(
-                max_attempts=retry_config.get("max_attempts", STANDARD_RETRY_COUNT),
+                max_attempts=_resolve_max_attempts(
+                    retry_config, settings_tree.core.retry.max_attempts, domain
+                ),
                 backoff_base=retry_config.get(
                     "backoff_base",
                     retry_config.get("base_delay", STANDARD_BASE_DELAY),
@@ -255,10 +267,12 @@ class RetryPolicyConfig:
         retry_settings = config.core.retry
         backoff_settings = config.core.backoff
         dlq_settings = config.services_group.dlq
-        domain_config = config.domain_configs.get(domain, {}).get("retry", {})
+        domain_config = _domain_retry_overlay(config.domain_configs, domain)
 
         return cls(
-            max_attempts=domain_config.get("max_attempts", retry_settings.max_attempts),
+            max_attempts=_resolve_max_attempts(
+                domain_config, retry_settings.max_attempts, domain
+            ),
             backoff_base=_resolve_domain_backoff_base(
                 domain_config, retry_settings.base_delay, domain
             ),
@@ -354,6 +368,82 @@ def _resolve_domain_backoff_base(
             return fallback
         return value
     return fallback
+
+
+def failed_attempt_entry(attempt: int, error: Exception) -> dict[str, Any]:
+    """The retry history entry for an attempt that raised.
+
+    One shape for both retry stages and both of their exits — the loop and
+    the single attempt — since a stored DLQ entry carries the history as is.
+    """
+    return {
+        "attempt": attempt,
+        "error_type": type(error).__name__,
+        "error_message": str(error)[:ATTEMPT_ERROR_MESSAGE_LIMIT],
+    }
+
+
+def _domain_retry_overlay(
+    domain_configs: Mapping[str, Mapping[str, Any]],
+    domain: str,
+) -> Mapping[str, Any]:
+    """This domain's ``retry`` overlay, or an empty one.
+
+    ``domain_configs`` validates each domain's entry as a mapping but not the
+    families inside it, so ``{"svc": {"retry": None}}`` loads. Read as a
+    mapping, it would raise ``AttributeError`` out of every ``retry=True``
+    call for that name; it degrades to no overlay with a WARNING instead.
+    """
+    overlay = domain_configs.get(domain, {}).get("retry", {})
+    if isinstance(overlay, Mapping):
+        return overlay
+    logger.warning(
+        "retry.domain_override_coercion_failed",
+        domain=domain,
+        key="retry",
+        value=repr(overlay),
+        fallback={},
+    )
+    return {}
+
+
+def _resolve_max_attempts(
+    retry_values: Mapping[str, Any],
+    fallback: int,
+    domain: str,
+) -> int:
+    """Resolve the total attempt count from an unvalidated mapping.
+
+    Both settings routes read ``max_attempts`` from a mapping no model
+    validates — a domain overlay, or the runtime store's retry family — so the
+    ``ge=1`` bound on ``RetrySettings.max_attempts`` never sees it. A bool, a
+    value with no integral form, or a count below 1 degrades to ``fallback``
+    with a WARNING: a count of 0 would run the function zero times and store
+    nothing, and a deployment's typo must not fail every call instead. An
+    integral float or a numeric string is accepted, as the backoff-base
+    overlay accepts them.
+    """
+    if "max_attempts" not in retry_values:
+        return fallback
+    raw = retry_values["max_attempts"]
+    count: int | None = None
+    if not isinstance(raw, bool):
+        try:
+            number = float(raw)
+        except (TypeError, ValueError, OverflowError):
+            number = None
+        if number is not None and number.is_integer():
+            count = int(number)
+    if count is None or count < 1:
+        logger.warning(
+            "retry.domain_override_coercion_failed",
+            domain=domain,
+            key="max_attempts",
+            value=repr(raw),
+            fallback=fallback,
+        )
+        return fallback
+    return count
 
 
 # Strategy name -> constructor, over the same vocabulary RetrySettings

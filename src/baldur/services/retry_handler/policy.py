@@ -46,6 +46,7 @@ from .models import (
     STATEFUL_BACKOFF_STRATEGY,
     MaxRetriesExceededError,
     RetryPolicyConfig,
+    failed_attempt_entry,
 )
 
 if TYPE_CHECKING:
@@ -97,6 +98,16 @@ class RetryPolicy(ResiliencePolicy[T]):
     ):
         from baldur.settings.retry import get_retry_settings
 
+        # Every code route converges here — a config passed as ``retry=``, the
+        # presets, the cached ``@dlq_protect`` build and ``@retry``, which
+        # assigns its override to the config before building this stage. A
+        # count below 1 would run the function zero times and end in a
+        # terminal with no error, so it is refused before any call is made.
+        if config.max_attempts < 1:
+            raise ValueError(
+                f"max_attempts must be >= 1, got {config.max_attempts}: it counts "
+                "every attempt; use 1 for a single attempt with no retry"
+            )
         self._globally_enabled = get_retry_settings().enabled
         self._config = config
         # Result predicate must be synchronous: an ``async def`` returns a
@@ -200,8 +211,10 @@ class RetryPolicy(ResiliencePolicy[T]):
 
         # Observe-only (dry-run / shadow / evaluation): suppress the retry
         # intervention — take the single-attempt path (no re-execution),
-        # mirroring the globally-disabled branch above. No ``should_dlq`` is
-        # set on FAILURE, so the downstream DLQ sink also stays observe-only.
+        # mirroring the globally-disabled branch above. The FAILURE still
+        # carries this stage's ``should_dlq`` verdict; the DLQ sink's own
+        # observe-only guard withholds the store and logs the would-store
+        # decision.
         if intervention_suppressed(
             service_name=self._config.domain or "retry",
             action="retry",
@@ -324,13 +337,7 @@ class RetryPolicy(ResiliencePolicy[T]):
                 last_error = e
                 last_result = None
                 result_rejected = False
-                retry_history.append(
-                    {
-                        "attempt": attempt,
-                        "error_type": type(e).__name__,
-                        "error_message": str(e)[:500],
-                    }
-                )
+                retry_history.append(failed_attempt_entry(attempt, e))
 
                 # 429 detected → feed the cascade and request a cooldown from
                 # RateLimitCoordinator. Fail-open: a fault here must never
@@ -531,6 +538,11 @@ class RetryPolicy(ResiliencePolicy[T]):
         terminal, so they must record the matching attempt start too: leaving
         them out would shrink the pressure ratio's denominator only, inflating
         the retry share on any deployment that runs with retries disabled.
+
+        A FAILURE states this stage's store verdict as the loop's exit does,
+        sized for the one attempt that ran: a stage built with
+        ``enable_dlq=False`` declines the store here too, and one built to
+        store is stored — under observe-only the DLQ sink withholds it.
         """
         self._record_attempt_started(1)
         try:
@@ -549,6 +561,13 @@ class RetryPolicy(ResiliencePolicy[T]):
                 error=e,
                 total_attempts=1,
                 executed_policies=["retry"],
+                metadata={
+                    "max_attempts": 1,
+                    "domain": self._config.domain,
+                    "should_dlq": self._config.enable_dlq,
+                    "retry_history": [failed_attempt_entry(1, e)],
+                    "reason": "max_attempts",
+                },
             )
 
     def _emit_exhausted_event(

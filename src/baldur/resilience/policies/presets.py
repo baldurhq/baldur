@@ -120,6 +120,12 @@ def standard_pipeline(
     ``CircuitBreakerError`` is in Retry's non_retryable default, so CB-open
     errors stop retry immediately (1 attempt), then Fallback activates.
 
+    DLQ capture: every call whose failure reaches the caller is parked under
+    ``service_name`` — retry exhaustion as ``MAX_RETRIES_<ERROR_TYPE>``, a call
+    the open breaker refused as ``CIRCUIT_BREAKER_OPEN`` (replayed when the
+    breaker recovers) — with or without a ``retry_policy``. A call the
+    error-budget guard refuses is logged by the audit hook, not parked.
+
     Shared contract with the ``protect()`` facade: both satisfy the single
     published composition contract — retry runs first, CB-open degrades to the
     fallback, and the breaker counts failures absorbed by the fallback. The one
@@ -193,6 +199,8 @@ def standard_pipeline(
         .add_guard(ErrorBudgetGuard())
         .add_hook(AuditHook())
         .add_sink(DLQSink())
+        .capture_open_circuit_rejections()
+        .capture_failures(service_name)
     )
 
 
@@ -214,6 +222,11 @@ def ha_pipeline(
 
     Execution order (outermost → innermost):
       Fallback(Retry(Bulkhead(Hedging(func))))
+
+    DLQ capture: every call whose failure reaches the caller is parked under
+    ``service_name``, including one the full bulkhead refused after the retry
+    stage gave up on it. A call the error-budget guard refuses is logged by the
+    audit hook, not parked.
 
     Args:
         service_name: Service identifier
@@ -318,6 +331,8 @@ def ha_pipeline(
         .add_hook(AuditHook())
         .add_hook(MetricsHook())
         .add_sink(DLQSink())
+        .capture_open_circuit_rejections()
+        .capture_failures(service_name)
     )
 
 

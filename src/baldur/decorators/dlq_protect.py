@@ -1,10 +1,13 @@
-"""``@dlq_protect`` — zero-message-loss preset of ``@protected``.
+"""``@dlq_protect`` — the capture preset of ``@protected``.
 
-Thin wrapper around ``baldur.protect_facade.protected()`` that pins the
-"zero message loss" defaults: ``dlq=True``, ``retry=True``,
-``circuit_breaker=True``. Other kwargs (``fallback``, ``timeout``,
-``context``) pass through unchanged. Capture works on a plain OSS install;
-PRO overlays the operate-at-scale surface on the same queue.
+Thin wrapper around ``baldur.protect_facade.protected()`` that pins
+``dlq=True``, ``retry=True``, ``circuit_breaker=True``: every call whose
+failure reaches the caller is parked in the dead letter queue under the
+decorator's name, except the exclusions the DLQ guide lists (a fallback
+answered it, a guard refused it, observe-only mode, or capture switched off).
+Other kwargs (``fallback``, ``timeout``, ``context``) pass through unchanged.
+Capture works on a plain OSS install; PRO overlays the operate-at-scale
+surface on the same queue.
 """
 
 # Reference: 458 §D4.
@@ -34,10 +37,13 @@ def dlq_protect(
     | None
     | Literal[False] = _CONTEXT_FROM_UNSET,  # type: ignore[assignment]
 ) -> Callable[[Callable[..., T]], Callable[..., T]]:
-    """``@protected`` with zero-message-loss defaults pinned.
+    """``@protected`` with DLQ capture, retry and the circuit breaker pinned on.
 
     Equivalent to ``@protected(name, dlq=True, retry=True, circuit_breaker=True)``
-    but states the intent at the decoration site.
+    but states the intent at the decoration site. Every call whose failure
+    reaches the caller — retries exhausted, retry switched off, a timeout, or
+    an open breaker's rejection — is parked under ``name``; the DLQ guide lists
+    the exclusions.
 
     Args:
         name: Identifier used for metrics/logging (passed to ``protect()``).

@@ -32,7 +32,7 @@ from baldur.interfaces.resilience_policy import (
 from baldur.resilience.policies.composer import (
     AsyncPolicyComposer,
     PolicyComposer,
-    _arm_unretried_failure,
+    _arm_failure_verdict,
     _classify_exception_outcome,
     _FallbackApplied,
     _is_open_circuit_rejection,
@@ -1626,13 +1626,14 @@ def _throwing(exc: BaseException) -> Callable[[], Any]:
 class TestSinkTerminalRoutingBehavior:
     """``_terminal_reaches_sinks`` / ``_is_open_circuit_rejection`` decision table.
 
-    Each arming flag is the boundary for one terminal only: an open-circuit
-    rejection crosses on open-circuit arming, a TIMEOUT crosses on
-    unretried-failure arming, and neither flag widens the other's terminal.
+    Each arming flag is the boundary for its own terminals only: an
+    open-circuit rejection crosses on open-circuit arming; a TIMEOUT and a
+    rejection carrying any other error cross on failure arming; neither flag
+    widens the other's terminals, and a guard veto never crosses.
     """
 
     @pytest.mark.parametrize(
-        ("outcome", "error", "armed_oc", "armed_unretried", "expected"),
+        ("outcome", "error", "armed_oc", "armed_failures", "expected"),
         [
             # FAILURE is the historical sink terminal — arming is irrelevant.
             (PolicyOutcome.FAILURE, RuntimeError("boom"), False, False, True),
@@ -1653,7 +1654,7 @@ class TestSinkTerminalRoutingBehavior:
                 False,
                 True,
             ),
-            # Unretried arming does not widen rejection capture.
+            # Failure arming does not widen open-circuit capture.
             (
                 PolicyOutcome.REJECTED,
                 CircuitBreakerOpenError("payment_api"),
@@ -1661,9 +1662,11 @@ class TestSinkTerminalRoutingBehavior:
                 True,
                 False,
             ),
-            # Guard veto — REJECTED with no error at all.
+            # Guard veto — REJECTED with no error at all, under either arming.
             (PolicyOutcome.REJECTED, None, True, False, False),
-            # Other rejection shapes keep the original "never reaches a sink".
+            (PolicyOutcome.REJECTED, None, False, True, False),
+            # Other error-carrying rejections: open-circuit arming leaves them
+            # out, failure arming lets them cross.
             (
                 PolicyOutcome.REJECTED,
                 BulkheadFullError("payment_api", 2, 2),
@@ -1673,13 +1676,27 @@ class TestSinkTerminalRoutingBehavior:
             ),
             (
                 PolicyOutcome.REJECTED,
+                BulkheadFullError("payment_api", 2, 2),
+                False,
+                True,
+                True,
+            ),
+            (
+                PolicyOutcome.REJECTED,
                 PolicyRejectedException("blocked"),
                 True,
                 False,
                 False,
             ),
-            # The TIMEOUT boundary: the retry-present shape (open-circuit armed
-            # only) stays out; the unretried-armed shape crosses.
+            (
+                PolicyOutcome.REJECTED,
+                PolicyRejectedException("blocked"),
+                False,
+                True,
+                True,
+            ),
+            # The TIMEOUT boundary: open-circuit arming alone leaves it out;
+            # failure arming lets it cross.
             (PolicyOutcome.TIMEOUT, TimeoutPolicyError(5.0), True, False, False),
             (PolicyOutcome.TIMEOUT, TimeoutPolicyError(5.0), False, True, True),
             # A served fallback answered the caller — no flag routes it.
@@ -1689,21 +1706,24 @@ class TestSinkTerminalRoutingBehavior:
         ids=[
             "failure_unarmed",
             "failure_oc_armed",
-            "failure_unretried_armed",
+            "failure_failures_armed",
             "open_circuit_unarmed",
             "open_circuit_oc_armed",
-            "open_circuit_not_widened_by_unretried_arming",
-            "guard_veto",
-            "bulkhead_full",
-            "policy_rejected",
-            "timeout_retry_present_shape",
-            "timeout_unretried_armed",
+            "open_circuit_not_widened_by_failure_arming",
+            "guard_veto_oc_armed",
+            "guard_veto_failures_armed",
+            "bulkhead_full_oc_armed",
+            "bulkhead_full_failures_armed",
+            "policy_rejected_oc_armed",
+            "policy_rejected_failures_armed",
+            "timeout_oc_armed",
+            "timeout_failures_armed",
             "served_fallback_fully_armed",
             "success",
         ],
     )
     def test_terminal_routing_depends_on_outcome_error_and_arming(
-        self, outcome, error, armed_oc, armed_unretried, expected
+        self, outcome, error, armed_oc, armed_failures, expected
     ):
         result = PolicyResult(value=None, outcome=outcome, error=error)
 
@@ -1711,7 +1731,7 @@ class TestSinkTerminalRoutingBehavior:
             _terminal_reaches_sinks(
                 result,
                 captures_open_circuit_rejections=armed_oc,
-                captures_unretried_failures=armed_unretried,
+                captures_failures=armed_failures,
             )
             is expected
         )
@@ -1736,9 +1756,10 @@ class TestSinkTerminalRoutingBehavior:
         assert _is_open_circuit_rejection(result) is expected
 
 
-class TestArmUnretriedFailureContract:
-    """``_arm_unretried_failure`` writes the retry stage's exhaustion verdict,
-    sized for a call that ran once — the spec values are the entry's shape."""
+class TestArmFailureVerdictContract:
+    """``_arm_failure_verdict`` writes the retry stage's exhaustion verdict,
+    sized for the attempts the call made — the spec values are the entry's
+    shape."""
 
     @pytest.mark.parametrize(
         ("outcome", "error"),
@@ -1753,7 +1774,7 @@ class TestArmUnretriedFailureContract:
     ):
         result = PolicyResult(value=None, outcome=outcome, error=error)
 
-        _arm_unretried_failure(result, "summarize")
+        _arm_failure_verdict(result, "summarize")
 
         assert result.metadata == {
             "should_dlq": True,
@@ -1772,7 +1793,7 @@ class TestArmUnretriedFailureContract:
             metadata={"timeout_seconds": 5.0},
         )
 
-        _arm_unretried_failure(result, "summarize")
+        _arm_failure_verdict(result, "summarize")
 
         assert result.metadata == {
             "timeout_seconds": 5.0,
@@ -1799,7 +1820,7 @@ class TestArmUnretriedFailureContract:
             metadata=dict(stage_metadata),
         )
 
-        _arm_unretried_failure(result, "summarize")
+        _arm_failure_verdict(result, "summarize")
 
         assert result.metadata == stage_metadata
 
@@ -1816,7 +1837,7 @@ class TestArmUnretriedFailureContract:
     def test_other_outcomes_are_left_untouched(self, outcome, error):
         result = PolicyResult(value=None, outcome=outcome, error=error)
 
-        _arm_unretried_failure(result, "summarize")
+        _arm_failure_verdict(result, "summarize")
 
         assert result.metadata == {}
 
@@ -2098,7 +2119,7 @@ class TestComposerUnretriedCaptureBehavior:
     def test_armed_composer_delivers_failure_marked_for_its_domain(self, composer):
         # Given an armed composer with no stage — the empty-chain terminal
         sink = MockSink()
-        composer.add_sink(sink).capture_unretried_failures("summarize")
+        composer.add_sink(sink).capture_failures("summarize")
 
         # When the call raises
         result = composer.execute(_throwing(RuntimeError("upstream 500")))
@@ -2115,7 +2136,7 @@ class TestComposerUnretriedCaptureBehavior:
         # terminal; an empty chain reports every raise as FAILURE.
         sink = MockSink()
         composer.add(MockPolicy("wrapper")).add_sink(sink)
-        composer.capture_unretried_failures("summarize")
+        composer.capture_failures("summarize")
 
         result = composer.execute(_throwing(TimeoutPolicyError(5.0)))
 
@@ -2139,7 +2160,7 @@ class TestComposerUnretriedCaptureBehavior:
     def test_armed_composer_keeps_a_stage_verdict_that_declines(self, composer):
         sink = MockSink()
         composer.add(_VerdictStage(should_dlq=False)).add_sink(sink)
-        composer.capture_unretried_failures("summarize")
+        composer.capture_failures("summarize")
 
         composer.execute(_throwing(RuntimeError("upstream 500")))
 
@@ -2153,7 +2174,7 @@ class TestComposerUnretriedCaptureBehavior:
 
         sink = MockSink()
         composer.add(FallbackPolicy(default_value="degraded")).add_sink(sink)
-        composer.capture_unretried_failures("summarize")
+        composer.capture_failures("summarize")
 
         result = composer.execute(_throwing(RuntimeError("upstream 500")))
 
@@ -2169,7 +2190,7 @@ class TestComposerUnretriedCaptureBehavior:
         sink = MockSink()
         composer.add(_CircuitOpenPolicy()).add_sink(sink)
         composer.capture_open_circuit_rejections()
-        composer.capture_unretried_failures("summarize")
+        composer.capture_failures("summarize")
 
         result = composer.execute(lambda: "never runs")
 
@@ -2177,8 +2198,8 @@ class TestComposerUnretriedCaptureBehavior:
         assert len(sink.calls) == 1
         assert "should_dlq" not in result.metadata
 
-    def test_capture_unretried_failures_returns_self_for_chaining(self, composer):
-        assert composer.capture_unretried_failures("summarize") is composer
+    def test_capture_failures_returns_self_for_chaining(self, composer):
+        assert composer.capture_failures("summarize") is composer
 
 
 class TestAsyncComposerUnretriedCaptureBehavior:
@@ -2192,7 +2213,7 @@ class TestAsyncComposerUnretriedCaptureBehavior:
             raise RuntimeError("upstream 500")
 
         sink = MockSink()
-        async_composer.add_sink(sink).capture_unretried_failures("asummarize")
+        async_composer.add_sink(sink).capture_failures("asummarize")
 
         result = asyncio.run(async_composer.execute(_fails))
 
@@ -2207,7 +2228,7 @@ class TestAsyncComposerUnretriedCaptureBehavior:
 
         sink = MockSink()
         async_composer.add(MockAsyncPolicy("wrapper")).add_sink(sink)
-        async_composer.capture_unretried_failures("asummarize")
+        async_composer.capture_failures("asummarize")
 
         result = asyncio.run(async_composer.execute(_times_out))
 
@@ -2238,7 +2259,7 @@ class TestAsyncComposerUnretriedCaptureBehavior:
 
         sink = MockSink()
         async_composer.add(_AsyncVerdictStage(should_dlq=False)).add_sink(sink)
-        async_composer.capture_unretried_failures("asummarize")
+        async_composer.capture_failures("asummarize")
 
         asyncio.run(async_composer.execute(_fails))
 
@@ -2254,7 +2275,7 @@ class TestAsyncComposerUnretriedCaptureBehavior:
 
         sink = MockSink()
         async_composer.add(AsyncFallbackPolicy(default_value="degraded"))
-        async_composer.add_sink(sink).capture_unretried_failures("asummarize")
+        async_composer.add_sink(sink).capture_failures("asummarize")
 
         result = asyncio.run(async_composer.execute(_fails))
 
@@ -2262,10 +2283,8 @@ class TestAsyncComposerUnretriedCaptureBehavior:
         assert sink.calls == []
         assert "should_dlq" not in result.metadata
 
-    def test_capture_unretried_failures_returns_self_for_chaining(self, async_composer):
-        assert async_composer.capture_unretried_failures("asummarize") is (
-            async_composer
-        )
+    def test_capture_failures_returns_self_for_chaining(self, async_composer):
+        assert async_composer.capture_failures("asummarize") is (async_composer)
 
 
 # =============================================================================

@@ -28,8 +28,8 @@ DLQ + Replay turns that permanent loss into a recoverable backlog:
   captured together with the forensic context (what was being done, the request data, the failure
   reason, the per-attempt retry history) needed to understand and re-run it. That includes the calls
   an already-open circuit breaker rejected before they ran, and the entries still buffered in memory
-  when a worker process exits. The few failures that skip the queue are named under *How it works
-  in Baldur*.
+  when a worker process exits. The failures that skip the queue, each by a stated rule that leaves
+  a log record, are listed under *How it works in Baldur*.
 - **Recover on your schedule.** When the dependency comes back, replay the backlog instead of
   rebuilding lost work from log files.
 - **Catch-up can be automatic.** Once its prerequisites are in place (see *Closing the loop*),
@@ -45,14 +45,36 @@ DLQ + Replay turns that permanent loss into a recoverable backlog:
 ## How it works in Baldur
 
 When an operation Baldur protects with `dlq=True` fails for good, it is captured as an **entry** in
-the dead letter queue, recording the context needed to replay it later. A few failures skip the
-queue even there: one a `fallback=` answered (the caller got a value, so the call counts as
-handled), one that Baldur's own `timeout=` cut off while retry was still running, and the final
-failure of a call whose `retry=` is a `TenacityBridgePolicy`. A call that never ran because its
-circuit breaker was already open is captured as well: the breaker rejects it in microseconds, but
-the work that call carried is parked under the breaker's own name with the failure type
+the dead letter queue, recording the context needed to replay it later. That holds whatever ended
+the call: retries that ran out, retry switched off (`BALDUR_RETRY_ENABLED=false`), a
+`TenacityBridgePolicy` as `retry=`, Baldur's own `timeout=` cutting the call off (retry or not), or
+a full bulkhead refusing it. The entry is filed under the name the call is protected under; the one
+exception is a `RetryPolicyConfig` that names its own `domain=`, whose retry stage files the
+failures it ends under that domain. A call that never ran because
+its circuit breaker was already open is captured as well: the breaker rejects it in microseconds,
+but the work that call carried is parked under the breaker's own name with the failure type
 `CIRCUIT_BREAKER_OPEN`, so an outage's fast-rejected calls are recoverable alongside the ones that
-failed. (This capture is on by default and can be switched off.) Capturing a failure is designed to
+failed. (This capture is on by default and can be switched off.)
+
+Some calls are not parked, by rule. Each one leaves a log record, and several of those records sit
+below the default `BALDUR_LOG_LEVEL=WARNING`, so each rule names the record and its level — the
+level to turn on when you are looking for a call that is not in the queue:
+
+| A failed call is not parked when… | Its record |
+|---|---|
+| a `fallback=` answered it (the caller got a value) | `policy_chain.fallback_applied` (WARNING) |
+| the idempotency guard refused it — already completed, still in flight, or unverifiable | `idempotency.duplicate_blocked`, `idempotency.execution_blocked`, `idempotency.guard_check_failed` (WARNING) |
+| a preset pipeline's error-budget guard refused it | `policy_pipeline.execution_rejected` (WARNING) |
+| Baldur runs observe-only (dry-run, shadow, evaluation) | `execution_mode.intervention_suppressed` with `action="dlq_store"` (INFO) |
+| open-circuit capture is switched off (`BALDUR_DLQ_OPEN_CIRCUIT_CAPTURE_ENABLED=false`) | `dlq_sink.capture_skipped` with `reason="open_circuit_capture_disabled"` (DEBUG) |
+| its `retry=` is a `RetryPolicy` you built with `enable_dlq=False` | `dlq_sink.capture_skipped` with `reason="stage_declined"` (DEBUG) |
+| the queue is switched off (`BALDUR_DLQ_ENABLED=false`) | `dlq.store_skipped_disabled` (DEBUG) and `dlq_sink.create_dlq_entry_failed` (ERROR) |
+| the queue is full and the overflow strategy is `reject` | `dlq.store_rejected_overflow` (WARNING) |
+
+Two switches exclude every call of a process at once rather than one call, so they log no
+per-call record: the kill switch, which makes Baldur step aside and is logged once per process when
+it changes, and `BALDUR_PROTECT_ENABLED=false`, under which a protected function runs bare and
+nothing is logged. Capturing a failure is designed to
 stay off the request's critical path: by default the write to the store happens in the background,
 so the call that already failed pays only for handing the entry over. If the queue's storage
 backend is itself unreachable at capture time, the entry falls back to a local on-disk record (and,

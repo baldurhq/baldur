@@ -88,10 +88,12 @@ class AsyncRetryPolicy:
 
     DLQ arming:
         When constructed via :meth:`from_policy_config` with a config whose
-        ``enable_dlq`` is True, the exhaustion FAILURE result carries
-        ``metadata["should_dlq"]=True`` so a composed DLQ sink stores the final
-        failure — mirroring the synchronous RetryPolicy. A bare
-        ``AsyncRetryPolicy(...)`` defaults ``enable_dlq=False`` (no DLQ arming).
+        ``enable_dlq`` is True, every FAILURE result — the loop's exhaustion
+        and the single attempt run with retry disabled or observe-only —
+        carries ``metadata["should_dlq"]=True`` so a composed DLQ sink stores
+        the final failure — mirroring the synchronous RetryPolicy. A bare
+        ``AsyncRetryPolicy(...)`` defaults ``enable_dlq=False`` and states that
+        it declines the store.
 
     Outbound 429 coordination:
         Like the synchronous policy, this stage resolves the shared
@@ -188,9 +190,12 @@ class AsyncRetryPolicy:
         Mirrors the synchronous ``RetryPolicy.__init__`` mapping so the async
         and sync retry stages behave identically off the fields listed below:
 
-        - ``max_retries = max(cfg.max_attempts - 1, 0)`` — sync ``max_attempts``
-          counts *total* attempts; async ``max_retries`` counts *additional*
-          attempts (``range(max_retries + 1)``). The off-by-one is load-bearing.
+        - ``max_retries = cfg.max_attempts - 1`` — sync ``max_attempts`` counts
+          *total* attempts; async ``max_retries`` counts *additional* attempts
+          (``range(max_retries + 1)``). The off-by-one is load-bearing. A
+          ``max_attempts`` below 1 raises ``ValueError``, as the sync stage's
+          constructor does: this method is where every async code route — a
+          config passed as ``retry=`` and ``@retry`` — builds the stage.
         - ``backoff`` defaults to the strategy the config itself builds, so the
           async ladder honors the same resolved base, multiplier, increment,
           jitter width and strategy name as the sync one. The stateful
@@ -209,9 +214,14 @@ class AsyncRetryPolicy:
         # this module's import-time graph (see the TYPE_CHECKING block above).
         from baldur.services.retry_handler.models import STATEFUL_BACKOFF_STRATEGY
 
+        if cfg.max_attempts < 1:
+            raise ValueError(
+                f"max_attempts must be >= 1, got {cfg.max_attempts}: it counts "
+                "every attempt; use 1 for a single attempt with no retry"
+            )
         stateful = cfg.backoff_strategy == STATEFUL_BACKOFF_STRATEGY
         return cls(
-            max_retries=max(cfg.max_attempts - 1, 0),
+            max_retries=cfg.max_attempts - 1,
             backoff=backoff or (None if stateful else cfg.build_backoff()),
             backoff_factory=cfg.build_backoff if stateful else None,
             retryable_exceptions=cfg.retryable_exceptions,
@@ -434,8 +444,10 @@ class AsyncRetryPolicy:
 
         # Observe-only (dry-run / shadow / evaluation): suppress the retry
         # intervention — take the single-attempt path (no re-execution),
-        # mirroring the synchronous RetryPolicy dry-run guard. No ``should_dlq``
-        # is set on FAILURE, so the downstream DLQ sink also stays observe-only.
+        # mirroring the synchronous RetryPolicy dry-run guard. The FAILURE
+        # still carries this stage's ``should_dlq`` verdict; the DLQ sink's own
+        # observe-only guard withholds the store and logs the would-store
+        # decision.
         if intervention_suppressed(
             service_name=self._domain,
             action="retry",
@@ -450,6 +462,7 @@ class AsyncRetryPolicy:
         # bus/metrics source-module test patches intercepting. Imported here,
         # past the single-attempt guards, so the disabled/observe-only paths
         # (which record via _single_attempt) do not pay for it.
+        from baldur.services.retry_handler.models import failed_attempt_entry
         from baldur.services.retry_handler.observability import (
             REASON_TO_OUTCOME,
             emit_retry_exhausted_event,
@@ -551,13 +564,7 @@ class AsyncRetryPolicy:
                 last_error = e
                 last_result = None
                 result_rejected = False
-                retry_history.append(
-                    {
-                        "attempt": attempt + 1,
-                        "error_type": type(e).__name__,
-                        "error_message": str(e)[:500],
-                    }
-                )
+                retry_history.append(failed_attempt_entry(attempt + 1, e))
 
                 # 429 detected → feed the cascade and request a cooldown from
                 # the coordinator. Fail-open: a fault here must never replace
@@ -822,14 +829,16 @@ class AsyncRetryPolicy:
         business call exactly once and never re-executes. Mirrors the
         synchronous ``RetryPolicy._single_attempt``: it records the terminal
         outcome to the Prometheus retry series but emits **no** bus event (a
-        single attempt is not an exhaustion), and the FAILURE result carries no
-        ``should_dlq`` so the downstream DLQ sink stays observe-only.
+        single attempt is not an exhaustion), and the FAILURE result states
+        this stage's store verdict as the loop's exit does, sized for the one
+        attempt that ran — under observe-only the DLQ sink withholds the store.
         ``asyncio.CancelledError`` re-raises without recording — a cancellation
         is not a terminal (sync parity, by the exception hierarchy). The
         attempt start is recorded for the same reason the terminal is: these
         paths contribute the pressure ratio's denominator, so omitting them
         would inflate the retry share wherever retries run disabled.
         """
+        from baldur.services.retry_handler.models import failed_attempt_entry
         from baldur.services.retry_handler.observability import (
             record_retry_attempt_started,
             record_retry_outcome,
@@ -857,6 +866,13 @@ class AsyncRetryPolicy:
                 error=e,
                 total_attempts=1,
                 executed_policies=["retry"],
+                metadata={
+                    "should_dlq": self._enable_dlq,
+                    "domain": self._domain,
+                    "max_attempts": 1,
+                    "retry_history": [failed_attempt_entry(1, e)],
+                    "reason": "max_attempts",
+                },
             )
 
 
@@ -884,7 +900,8 @@ def _unwrap_or_raise(result: PolicyResult, func_name: str, max_attempts: int) ->
     here: the loop's own deferral (or an inner surface's, passed through as a
     non-retryable exit) already *is* the error, and is re-raised as-is by type
     — independent of metadata, because the retry-disabled and observe-only
-    single-attempt paths return a FAILURE with no metadata at all; and a
+    single-attempt paths record ``reason="max_attempts"`` whatever the error
+    was; and a
     deferral that followed a real failure on an earlier attempt keeps that
     failure as ``result.error`` (the breaker must keep counting it), so the
     deferral is synthesised from the metadata with the earlier error as its

@@ -605,14 +605,24 @@ class TestDLQSinkOpenCircuitBehavior:
         assert ret is None
         mock_store.assert_not_called()
 
-    def test_non_circuit_rejection_stores_nothing(self):
-        """A bulkhead-full rejection is a REJECTED terminal too — not captured."""
-        ret, mock_store = self._run(
-            BulkheadFullError("payment_api", max_concurrent=2, active_count=2)
+    def test_non_circuit_rejection_takes_the_verdict_lane(self):
+        """A bulkhead-full rejection is a failed call: stored on its verdict,
+        under its domain, never as an open-circuit capture."""
+        error = BulkheadFullError("payment_api", max_concurrent=2, active_count=2)
+        verdict = PolicyResult(
+            outcome=PolicyOutcome.REJECTED,
+            error=error,
+            total_attempts=1,
+            metadata={"should_dlq": True, "domain": "payment_api"},
         )
+        _ret, mock_store = self._run(error, result=verdict)
 
-        assert ret is None
-        mock_store.assert_not_called()
+        assert mock_store.call_count == 1
+        assert mock_store.call_args.kwargs["domain"] == "payment_api"
+        assert (
+            mock_store.call_args.kwargs["failure_type"]
+            == "MAX_RETRIES_BULKHEADFULLERROR"
+        )
 
     def test_settings_read_failure_skips_capture_not_the_rejection(self):
         """Fail-open: an unreadable settings singleton must not raise."""
@@ -644,7 +654,10 @@ class TestDLQSinkOpenCircuitBehavior:
             )
 
         assert [
-            e for e in logs if e.get("event") == "dlq_sink.open_circuit_capture_skipped"
+            e
+            for e in logs
+            if e.get("event") == "dlq_sink.capture_skipped"
+            and e.get("reason") == "settings_unreadable"
         ]
 
     def test_store_exception_does_not_propagate(self):
