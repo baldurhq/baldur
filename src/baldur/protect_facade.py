@@ -677,6 +677,22 @@ def _build_idempotency_stage(
     )
 
 
+def _close_scope_on_raise(
+    idempotency_stage: tuple[Any, Any] | None, context: PolicyContext | None
+) -> None:
+    """A keyed call that left the composer by a raise closes its work scope.
+
+    Only a ``BaseException`` (an outside cancel) skips the idempotency hook;
+    without this the scope its guard opened stays current in the caller's
+    context. The claim is left as it is.
+    """
+    if idempotency_stage is None:
+        return
+    from baldur.resilience.policies.idempotency import _close_unsettled_call_scope
+
+    _close_unsettled_call_scope(context)
+
+
 def _build_async_idempotency_stage(
     name: str,
     idempotency_key: str | Callable[[PolicyContext], str] | None,
@@ -1244,7 +1260,11 @@ def protect(  # verified-by: test_concurrent_duplicates_run_side_effect_exactly_
     )
 
     start = time.perf_counter()
-    result: PolicyResult[T] = composer.execute(fn, context=context)
+    try:
+        result: PolicyResult[T] = composer.execute(fn, context=context)
+    except BaseException:
+        _close_scope_on_raise(idempotency_stage, context)
+        raise
     duration = time.perf_counter() - start
     _record_metrics(name, result, duration, mode="sync")
     return _finalize_value(result)
@@ -1324,7 +1344,11 @@ def protect_with_meta(
     )
 
     start = time.perf_counter()
-    result: PolicyResult[T] = composer.execute(fn, context=context)
+    try:
+        result: PolicyResult[T] = composer.execute(fn, context=context)
+    except BaseException:
+        _close_scope_on_raise(idempotency_stage, context)
+        raise
     duration = time.perf_counter() - start
     _record_metrics(name, result, duration, mode="sync")
     return _to_protect_result(result, duration)
@@ -1431,7 +1455,11 @@ async def aprotect(  # verified-by: test_concurrent_duplicates_run_side_effect_e
     )
 
     start = time.perf_counter()
-    result: PolicyResult[T] = await composer.execute(fn, context=context)
+    try:
+        result: PolicyResult[T] = await composer.execute(fn, context=context)
+    except BaseException:
+        _close_scope_on_raise(idempotency_stage, context)
+        raise
     duration = time.perf_counter() - start
     _record_metrics(name, result, duration, mode="async")
     return _finalize_value(result)
@@ -1515,7 +1543,11 @@ async def aprotect_with_meta(
     )
 
     start = time.perf_counter()
-    result: PolicyResult[T] = await composer.execute(fn, context=context)
+    try:
+        result: PolicyResult[T] = await composer.execute(fn, context=context)
+    except BaseException:
+        _close_scope_on_raise(idempotency_stage, context)
+        raise
     duration = time.perf_counter() - start
     _record_metrics(name, result, duration, mode="async")
     return _to_protect_result(result, duration)

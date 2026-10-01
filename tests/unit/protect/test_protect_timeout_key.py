@@ -16,6 +16,8 @@ in-process ledger:
   also when the inner one is cancelled from outside.
 - A late outcome never changes a later claim's record, nor another key claimed
   on a reused ``PolicyContext``.
+- A keyed call ended by a ``BaseException`` (cancelled from outside) leaves no
+  work scope current in the caller's thread or task.
 
 Verification techniques applied: scenario-style behavior, parametrize over
 fallback x work outcome x nesting hop, mark-signal synchronization (the late
@@ -31,9 +33,11 @@ import time
 from collections.abc import Callable, Generator
 from typing import Any
 from unittest.mock import patch
+from uuid import uuid4
 
 import pytest
 
+from baldur.core.abandoned_work import current_work_scope
 from baldur.core.exceptions import (
     AdapterNotFoundError,
     IdempotencyDuplicateError,
@@ -41,7 +45,13 @@ from baldur.core.exceptions import (
 )
 from baldur.decorators.idempotent import _reset_fallback_cache, idempotent
 from baldur.interfaces.resilience_policy import PolicyContext
-from baldur.protect_facade import aprotect, protect, reset_protect_caches
+from baldur.protect_facade import (
+    aprotect,
+    aprotect_with_meta,
+    protect,
+    protect_with_meta,
+    reset_protect_caches,
+)
 from baldur.resilience.policies.idempotency import (
     _ensure_async_policy_gate,
     _ensure_policy_gate,
@@ -769,3 +779,72 @@ class TestAprotectNestedSyncWorkKeyBehavior:
         assert not work.exited.is_set()
         assert await call() == "charged"
         assert calls["n"] == 2
+
+
+# =============================================================================
+# A keyed call ended by a BaseException leaves no scope current
+# =============================================================================
+
+
+class _Interrupt(BaseException):
+    """Stands in for a gevent timeout or another BaseException exit."""
+
+
+class TestProtectBaseExceptionExitBehavior:
+    """A keyed facade call that skips its hook still closes its work scope."""
+
+    @pytest.mark.parametrize(
+        "facade", [protect, protect_with_meta], ids=["protect", "protect_with_meta"]
+    )
+    def test_interrupted_calls_leave_no_scope_on_the_thread(self, facade):
+        """No chain grows on a long-lived thread, one scope per interrupted call."""
+
+        # Given
+        def interrupted() -> None:
+            raise _Interrupt
+
+        before = current_work_scope()
+
+        # When — keyed calls on one thread end by a BaseException.
+        for _ in range(3):
+            with pytest.raises(_Interrupt):
+                facade(
+                    "svc.interrupted",
+                    interrupted,
+                    idempotency_key="order_id",
+                    context=PolicyContext(order_id=uuid4().hex),
+                    **_BARE,
+                )
+
+        # Then
+        assert current_work_scope() is before
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "facade",
+        [aprotect, aprotect_with_meta],
+        ids=["aprotect", "aprotect_with_meta"],
+    )
+    async def test_cancelled_calls_leave_no_scope_in_the_task(self, facade):
+        """No chain grows in a long-lived task, one scope per cancelled call."""
+
+        # Given
+        async def never_returns() -> None:
+            await asyncio.Event().wait()
+
+        before = current_work_scope()
+
+        # When — keyed calls in one task are cancelled from outside.
+        for _ in range(3):
+            with pytest.raises(TimeoutError):
+                async with asyncio.timeout(_TIMEOUT_FIRES_S):
+                    await facade(
+                        "svc.cancelled",
+                        never_returns,
+                        idempotency_key="order_id",
+                        context=PolicyContext(order_id=uuid4().hex),
+                        **_BARE,
+                    )
+
+        # Then
+        assert current_work_scope() is before

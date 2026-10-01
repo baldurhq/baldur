@@ -35,7 +35,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 from structlog.testing import capture_logs
 
-from baldur.core.abandoned_work import record_abandoned
+from baldur.core.abandoned_work import (
+    WorkSummary,
+    close_work_scope,
+    current_work_scope,
+    record_abandoned,
+)
 from baldur.core.exceptions import TimeoutPolicyError
 from baldur.core.idempotency_gate import IdempotencyDecision, IdempotencyGate
 from baldur.interfaces.resilience_policy import (
@@ -48,9 +53,12 @@ from baldur.resilience.policies.idempotency import (
     AsyncIdempotencyHook,
     IdempotencyGuard,
     IdempotencyHook,
+    _close_unsettled_call_scope,
     _ensure_async_policy_gate,
     _ensure_policy_gate,
+    _read_keyed_call,
     _reset_policy_gate,
+    _write_keyed_call,
 )
 
 # =============================================================================
@@ -1795,3 +1803,53 @@ class TestAsyncIdempotencyHookAbandonedWorkBehavior:
         assert len(failed) == 1
         assert failed[0]["log_level"] == "warning"
         assert failed[0]["error_type"] == "RuntimeError"
+
+
+# =============================================================================
+# The facade's raise-exit closes a scope left open, never one the hook closed
+# =============================================================================
+
+
+class TestCloseUnsettledCallScopeBehavior:
+    """A call that skipped its hook closes its scope; a hook-closed one is kept."""
+
+    def test_scope_left_open_is_closed_and_leaves_the_context(self):
+        # Given — the guard opened the call's scope and no hook ran.
+        context = PolicyContext(order_id="o-1")
+        before = current_work_scope()
+        _write_keyed_call(context, "k-open", 0, None, "claim-1")
+        opened = current_work_scope()
+
+        # When
+        _close_unsettled_call_scope(context)
+
+        # Then
+        assert opened is not before
+        assert opened.closed
+        assert current_work_scope() is before
+
+    def test_scope_the_hook_closed_keeps_its_late_settle(self):
+        """Closing it again would drop the late mark the hook handed over."""
+        # Given — the hook closed the scope while a piece of its own work runs.
+        context = PolicyContext(order_id="o-1")
+        _write_keyed_call(context, "k-held", 0, None, "claim-1")
+        piece: Future = Future()
+        record_abandoned(piece, origin=context)
+        call = _read_keyed_call(context)
+        settled: list[WorkSummary] = []
+        assert close_work_scope(call.scope, call.token, settled.append) is None
+
+        # When — the raise-exit runs, then the piece ends.
+        _close_unsettled_call_scope(context)
+        piece.set_result("done")
+
+        # Then — the late settle ran once, with the piece's outcome.
+        assert settled == [WorkSummary(own_finished=True, own_failed=False)]
+
+    def test_context_without_a_keyed_call_is_untouched(self):
+        before = current_work_scope()
+
+        _close_unsettled_call_scope(PolicyContext(order_id="o-1"))
+        _close_unsettled_call_scope(None)
+
+        assert current_work_scope() is before

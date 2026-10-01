@@ -269,6 +269,22 @@ def _close_call_scope(
     return close_work_scope(call.scope, call.token, on_settled)
 
 
+def _close_unsettled_call_scope(context: PolicyContext | None) -> None:
+    """Close the work scope a keyed call left open; mark nothing.
+
+    The hooks run only when the call ends by an ``Exception`` or a result. A
+    call ended by a ``BaseException`` (cancelled from outside, a gevent
+    timeout) leaves the scope its guard opened current in the caller's
+    context, where a long-lived task or thread would chain one more scope per
+    such exit. The claim is left as it is. A scope the hook already closed is
+    untouched — it may still be holding for a late mark.
+    """
+    call = _read_keyed_call(context)
+    if call is None or call.scope is None or call.scope.closed:
+        return
+    close_work_scope(call.scope, call.token)
+
+
 def _timed_out_trigger(result: PolicyResult) -> bool:
     """True when a fallback answered a timeout in the function's place."""
     return result.metadata.get("fallback_trigger") == PolicyOutcome.TIMEOUT.value

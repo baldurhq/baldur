@@ -110,6 +110,11 @@ class WorkScope:
         """True once the scope settled; it then refuses every entry."""
         return self._sealed
 
+    @property
+    def closed(self) -> bool:
+        """True once the call that opened the scope closed it."""
+        return self._closed
+
     def _is_own(self, origin: Any) -> bool:
         return self._origin is not None and origin is self._origin
 
