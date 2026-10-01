@@ -2,7 +2,8 @@
 Security Violation Service.
 
 Handles security violations that should NEVER self-heal.
-Security incidents are immediately blocked and routed to the security team.
+An incident is recorded and gets the protective action its violation type
+calls for; an incident notification is delivered only with PRO active.
 
 Audit integration:
 - Security violation handling: log_security_violation_audit
@@ -42,10 +43,15 @@ class SecurityViolationService:
     """
     Service for handling security violations.
 
-    Security violations are NEVER auto-recovered. They are:
-    1. Immediately blocked
-    2. Logged with full forensic context
-    3. Routed to security team for investigation
+    Security violations are NEVER auto-recovered. Handling one:
+
+    1. Records it with full forensic context.
+    2. Takes the protective action its violation type calls for, such as an
+       IP ban. A ban is stored in the cache and enforced by the Django
+       ``IPBanMiddleware``; on other frameworks, check ``is_ip_banned()``
+       before serving a request.
+    3. Raises an incident notification, delivered to your channels only with
+       PRO active.
 
     Usage:
         service = SecurityViolationService()

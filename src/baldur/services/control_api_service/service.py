@@ -100,9 +100,10 @@ class ControlAPIService:
     """
     Baldur Control API Service.
 
-    Provides a unified, auditable, reversible, and governed control surface
-    to manage reliability behaviors across testing, chaos experimentation,
-    and real production operations.
+    Provides one control surface to manage reliability behaviors across
+    testing, chaos experimentation, and real production operations. Each
+    executed action is logged as a ``control_api.audit`` event; it writes no
+    audit-trail entry, and there is no undo.
 
     Usage:
         service = ControlAPIService()
@@ -117,9 +118,6 @@ class ControlAPIService:
 
         # Get current status
         status = service.get_status(environment="ops")
-
-        # Get audit logs
-        logs = service.get_audit_logs(service_name="payment")
     """
 
     def __init__(self):
