@@ -36,6 +36,7 @@ from __future__ import annotations
 from baldur.api.middleware.admission import (
     AdmissionDecision,
     check_admission,
+    check_admission_async,
 )
 from baldur.api.middleware.backpressure import (
     apply_backpressure_headers,
@@ -71,6 +72,7 @@ __all__ = [
     "record_rtt_sample",
     "record_http_red",
     "check_admission",
+    "check_admission_async",
     "AdmissionDecision",
     "check_emergency_shedding",
 ]

@@ -14,7 +14,7 @@ Processing order:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -25,6 +25,9 @@ from baldur.scaling.rate_controller import (
     RateController,
     get_rate_controller,
 )
+
+if TYPE_CHECKING:
+    from baldur.services.bulkhead.base import Bulkhead
 
 logger = structlog.get_logger()
 
@@ -80,6 +83,11 @@ class TrafficDecision:
     bulkhead_name: str | None = None
     """Name of the acquired bulkhead."""
 
+    bulkhead: Any | None = None
+    """The compartment the seat was taken from (release it there with
+    ``TrafficGate.release_acquired``, even if the name was registered again
+    meanwhile)."""
+
 
 class TrafficGate:
     """
@@ -109,8 +117,10 @@ class TrafficGate:
                 process_item()
             finally:
                 # Note: when the bulkhead is acquired, release it
-                if decision.bulkhead_acquired:
-                    gate.release_bulkhead("database")
+                gate.release_acquired(decision)
+
+        # From a coroutine — the bulkhead wait never blocks the event loop
+        decision = await gate.should_allow_async(priority=5, bulkhead_name="database")
     """
 
     def __init__(
@@ -126,14 +136,8 @@ class TrafficGate:
         self._rate_controller = rate_controller or get_rate_controller()
         self._load_shedding = load_shedding
 
-    def _check_bulkhead(
-        self,
-        bulkhead_name: str,
-        current_level: BackpressureLevel,
-        metadata: dict[str, Any] | None,
-        timeout: float | None = None,
-    ) -> tuple[bool, TrafficDecision | None]:
-        """Check the bulkhead. Returns acquisition status and a rejection decision.
+    def _resolve_bulkhead(self, bulkhead_name: str) -> Bulkhead | None:
+        """Resolve a compartment by name; None skips the bulkhead step.
 
         Fail-open on every failure class (the request proceeds ungated), but the
         log severity distinguishes expected unavailability from unexpected errors:
@@ -141,6 +145,52 @@ class TrafficGate:
         contract was violated and is logged loudly so the next contract-class
         bug surfaces instead of hiding. The resolution chain always yields a
         registry, so there is no registry-absent branch.
+        """
+        try:
+            from baldur.services.bulkhead.registry import get_bulkhead_registry
+
+            return get_bulkhead_registry().get(bulkhead_name)
+        except KeyError:
+            logger.debug(
+                "traffic_gate.bulkhead_found_skipping",
+                bulkhead_name=bulkhead_name,
+            )
+            return None
+        except Exception as e:
+            logger.exception(
+                "traffic_gate.bulkhead_error",
+                bulkhead_name=bulkhead_name,
+                error=e,
+            )
+            return None
+
+    def _bulkhead_full_decision(
+        self,
+        bulkhead_name: str,
+        current_level: BackpressureLevel,
+        metadata: dict[str, Any] | None,
+    ) -> TrafficDecision:
+        return TrafficDecision(
+            allowed=False,
+            reason=f"Bulkhead '{bulkhead_name}' is full",
+            level=current_level,
+            gate="Bulkhead",
+            metadata=metadata,
+            bulkhead_acquired=False,
+            bulkhead_name=bulkhead_name,
+        )
+
+    def _check_bulkhead(
+        self,
+        bulkhead_name: str,
+        current_level: BackpressureLevel,
+        metadata: dict[str, Any] | None,
+        timeout: float | None = None,
+    ) -> tuple[Bulkhead | None, TrafficDecision | None]:
+        """Take a seat in the named compartment.
+
+        Returns the compartment the seat was taken from (None when skipped)
+        and a rejection decision (None unless the compartment is full).
 
         Args:
             bulkhead_name: bulkhead name
@@ -151,35 +201,49 @@ class TrafficGate:
                 compartments honor it; thread-pool compartments return an
                 immediate verdict regardless (their bounded queue absorbs bursts).
         """
+        bulkhead = self._resolve_bulkhead(bulkhead_name)
+        if bulkhead is None:
+            return None, None
         try:
-            from baldur.services.bulkhead.registry import get_bulkhead_registry
-
-            bulkhead = get_bulkhead_registry().get(bulkhead_name)
-
-            if not bulkhead.try_acquire(timeout=timeout):
-                return False, TrafficDecision(
-                    allowed=False,
-                    reason=f"Bulkhead '{bulkhead_name}' is full",
-                    level=current_level,
-                    gate="Bulkhead",
-                    metadata=metadata,
-                    bulkhead_acquired=False,
-                    bulkhead_name=bulkhead_name,
-                )
-            return True, None
-        except KeyError:
-            logger.debug(
-                "traffic_gate.bulkhead_found_skipping",
-                bulkhead_name=bulkhead_name,
-            )
-            return False, None
+            acquired = bulkhead.try_acquire(timeout=timeout)
         except Exception as e:
             logger.exception(
                 "traffic_gate.bulkhead_error",
                 bulkhead_name=bulkhead_name,
                 error=e,
             )
-            return False, None
+            return None, None
+        if not acquired:
+            return None, self._bulkhead_full_decision(
+                bulkhead_name, current_level, metadata
+            )
+        return bulkhead, None
+
+    async def _check_bulkhead_async(
+        self,
+        bulkhead_name: str,
+        current_level: BackpressureLevel,
+        metadata: dict[str, Any] | None,
+        timeout: float | None = None,
+    ) -> tuple[Bulkhead | None, TrafficDecision | None]:
+        """Async twin of :meth:`_check_bulkhead` — awaits the seat on the loop."""
+        bulkhead = self._resolve_bulkhead(bulkhead_name)
+        if bulkhead is None:
+            return None, None
+        try:
+            acquired = await bulkhead.try_acquire_async(timeout=timeout)
+        except Exception as e:
+            logger.exception(
+                "traffic_gate.bulkhead_error",
+                bulkhead_name=bulkhead_name,
+                error=e,
+            )
+            return None, None
+        if not acquired:
+            return None, self._bulkhead_full_decision(
+                bulkhead_name, current_level, metadata
+            )
+        return bulkhead, None
 
     def _check_load_shedding(
         self,
@@ -240,13 +304,79 @@ class TrafficGate:
 
         Note:
             When bulkhead_name is set and the result is allowed=True with
-            bulkhead_acquired=True, the caller must invoke release_bulkhead()
+            bulkhead_acquired=True, the caller must invoke release_acquired()
             after the operation completes.
         """
         current_level = self._rate_controller.get_state().level
-        bulkhead_acquired = False
+        deadline_decision = self._check_deadline(current_level, metadata)
+        if deadline_decision is not None:
+            return deadline_decision
 
-        # Step 0: Deadline expiry + Dynamic Fast-Fail
+        bulkhead = None
+        if bulkhead_name is not None:
+            bulkhead, decision = self._check_bulkhead(
+                bulkhead_name,
+                current_level,
+                metadata,
+                timeout=bulkhead_timeout,
+            )
+            if decision is not None:
+                return decision
+
+        return self._decide_after_bulkhead(
+            priority, current_level, metadata, bulkhead_name, bulkhead
+        )
+
+    async def should_allow_async(
+        self,
+        priority: int = 0,
+        bulkhead_name: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        bulkhead_timeout: float | None = None,
+    ) -> TrafficDecision:
+        """
+        Decide whether to allow traffic, from a coroutine.
+
+        The same pipeline as :meth:`should_allow`; only the bulkhead step
+        differs — it awaits its seat (``try_acquire_async``), so a wait for a
+        saturated compartment never blocks the event loop.
+
+        Args:
+            priority: request priority (lower means higher priority)
+            bulkhead_name: bulkhead name (ConnectionType.value or custom)
+            metadata: additional metadata used in the decision
+            bulkhead_timeout: upper bound (seconds) on how long the bulkhead may
+                wait for capacity. None fails fast (immediate verdict).
+
+        Returns:
+            TrafficDecision
+        """
+        current_level = self._rate_controller.get_state().level
+        deadline_decision = self._check_deadline(current_level, metadata)
+        if deadline_decision is not None:
+            return deadline_decision
+
+        bulkhead = None
+        if bulkhead_name is not None:
+            bulkhead, decision = await self._check_bulkhead_async(
+                bulkhead_name,
+                current_level,
+                metadata,
+                timeout=bulkhead_timeout,
+            )
+            if decision is not None:
+                return decision
+
+        return self._decide_after_bulkhead(
+            priority, current_level, metadata, bulkhead_name, bulkhead
+        )
+
+    def _check_deadline(
+        self,
+        current_level: BackpressureLevel,
+        metadata: dict[str, Any] | None,
+    ) -> TrafficDecision | None:
+        """Step 0: deadline expiry + dynamic fast-fail. None lets the request on."""
         try:
             from baldur.scaling.deadline_context import (
                 get_estimated_processing_ms,
@@ -288,33 +418,35 @@ class TrafficGate:
                 )
         except ImportError:
             pass
+        return None
 
-        # Step 1: Bulkhead check (per-domain isolation)
-        if bulkhead_name is not None:
-            acquired, decision = self._check_bulkhead(
-                bulkhead_name,
-                current_level,
-                metadata,
-                timeout=bulkhead_timeout,
-            )
-            if decision is not None:
-                return decision
-            bulkhead_acquired = acquired
+    def _decide_after_bulkhead(
+        self,
+        priority: int,
+        current_level: BackpressureLevel,
+        metadata: dict[str, Any] | None,
+        bulkhead_name: str | None,
+        bulkhead: Bulkhead | None,
+    ) -> TrafficDecision:
+        """Steps 2-3 (load shedding, rate controller) and the allow decision.
 
+        A seat taken in step 1 is given back to the compartment it came from
+        when a later step rejects.
+        """
         # Step 2: CascadeLoadShedding check
         load_shedding_decision = self._check_load_shedding(
             priority, current_level, metadata
         )
         if load_shedding_decision is not None:
-            if bulkhead_acquired and bulkhead_name:
-                self._release_bulkhead_internal(bulkhead_name)
+            if bulkhead is not None:
+                self._release_compartment(bulkhead)
             return load_shedding_decision
 
         # Step 3: RateController check (priority-based watermark)
         tier_str = _map_priority_int_to_tier(priority)
         if not self._rate_controller.should_process(priority=tier_str):
-            if bulkhead_acquired and bulkhead_name:
-                self._release_bulkhead_internal(bulkhead_name)
+            if bulkhead is not None:
+                self._release_compartment(bulkhead)
             return TrafficDecision(
                 allowed=False,
                 reason=(
@@ -326,15 +458,28 @@ class TrafficGate:
                 metadata={**(metadata or {}), "priority": tier_str},
             )
 
+        acquired = bulkhead is not None
         return TrafficDecision(
             allowed=True,
             reason="Allowed",
             level=current_level,
             gate="TrafficGate",
             metadata=metadata,
-            bulkhead_acquired=bulkhead_acquired,
-            bulkhead_name=bulkhead_name if bulkhead_acquired else None,
+            bulkhead_acquired=acquired,
+            bulkhead_name=bulkhead_name if acquired else None,
+            bulkhead=bulkhead,
         )
+
+    @staticmethod
+    def _release_compartment(bulkhead: Bulkhead) -> None:
+        """Give a seat back to the compartment it was taken from."""
+        try:
+            bulkhead.release()
+        except Exception as e:
+            logger.warning(
+                "traffic_gate.release_bulkhead_failed",
+                error=e,
+            )
 
     def _release_bulkhead_internal(self, bulkhead_name: str) -> None:
         """Internal bulkhead release."""
@@ -351,15 +496,35 @@ class TrafficGate:
 
     def release_bulkhead(self, bulkhead_name: str) -> None:
         """
-        Release the bulkhead resource.
+        Release a seat to the compartment currently registered under a name.
 
-        Must be invoked after the operation completes when should_allow()
-        returned bulkhead_acquired=True.
+        For callers that hold only the name. A caller holding the decision
+        should use :meth:`release_acquired`, which returns the seat to the
+        compartment it was taken from even if the name was registered again
+        in between.
 
         Args:
             bulkhead_name: name of the bulkhead to release
         """
         self._release_bulkhead_internal(bulkhead_name)
+
+    def release_acquired(self, decision: TrafficDecision) -> None:
+        """
+        Release the seat a decision acquired.
+
+        Must be invoked after the operation completes when should_allow() /
+        should_allow_async() returned bulkhead_acquired=True. A no-op for a
+        decision that acquired nothing.
+
+        Args:
+            decision: the allow decision that acquired the seat
+        """
+        if not decision.bulkhead_acquired:
+            return
+        if decision.bulkhead is not None:
+            self._release_compartment(decision.bulkhead)
+        elif decision.bulkhead_name:
+            self._release_bulkhead_internal(decision.bulkhead_name)
 
     def get_level(self) -> BackpressureLevel:
         """Return the current backpressure level."""

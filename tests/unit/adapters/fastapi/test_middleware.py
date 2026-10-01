@@ -355,7 +355,9 @@ def _patch_pipeline(*, admission, rate=None, cb=None, backpressure=None, shed=No
             fastapi_mw, "check_emergency_shedding", return_value=shed
         ) as m_shed,
         patch.object(fastapi_mw, "check_rate_limit", return_value=rate) as m_rate,
-        patch.object(fastapi_mw, "check_admission", return_value=admission) as m_adm,
+        patch.object(
+            fastapi_mw, "check_admission_async", return_value=admission
+        ) as m_adm,
         patch.object(fastapi_mw, "check_cb_open", return_value=cb) as m_cb,
         patch.object(
             fastapi_mw, "check_backpressure", return_value=backpressure
@@ -619,7 +621,7 @@ class TestFastapiMiddlewareDeadline:
             ),
             patch.object(
                 fastapi_mw,
-                "check_admission",
+                "check_admission_async",
                 side_effect=_record("admission", AdmissionDecision(active=False)),
             ),
             patch.object(fastapi_mw, "check_backpressure", return_value=None),
@@ -641,7 +643,7 @@ class TestFastapiMiddlewareDeadline:
         with (
             patch.object(fastapi_mw, "check_rate_limit", return_value=None),
             patch.object(fastapi_mw, "check_deadline", return_value=rejection),
-            patch.object(fastapi_mw, "check_admission") as m_adm,
+            patch.object(fastapi_mw, "check_admission_async") as m_adm,
         ):
             _run(BaldurMiddleware(spy)(_scope(), _receive, recorder))
 

@@ -34,14 +34,20 @@ admission is the one resource-holding gate: when it allows under PRO,
 ``TrafficGate.should_allow`` *acquires* a per-tier Bulkhead slot that MUST be
 released after the request completes, or the tier fills permanently. The
 :class:`AdmissionDecision` therefore carries a ``release`` closure the adapter
-invokes in teardown.
+invokes in teardown; it returns the slot to the compartment it was taken from.
+
+Sync and async entry points
+---------------------------
+``check_admission`` (Django, Flask) and ``check_admission_async`` (ASGI) share
+every step except the gate call: the async one awaits its tier slot, so a
+saturated tier never blocks the event loop while the request waits for it.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -49,7 +55,7 @@ from baldur.interfaces.web_framework import HttpMethod, ResponseContext
 
 if TYPE_CHECKING:
     from baldur.interfaces.web_framework import RequestContext
-    from baldur.scaling.traffic_gate import TrafficGate
+    from baldur.scaling.traffic_gate import TrafficDecision, TrafficGate
 
 logger = structlog.get_logger()
 
@@ -57,6 +63,7 @@ logger = structlog.get_logger()
 __all__ = [
     "AdmissionDecision",
     "check_admission",
+    "check_admission_async",
 ]
 
 
@@ -177,12 +184,15 @@ def _maybe_force_degraded_deadline(gate: TrafficGate, tier_id: str) -> None:
             )
 
 
-def _make_release(gate: TrafficGate, bulkhead_name: str) -> Callable[[], None]:
+def _make_release(gate: TrafficGate, decision: TrafficDecision) -> Callable[[], None]:
     """Build an idempotent release closure for an acquired bulkhead slot.
 
-    A ``released`` flag short-circuits a second call so a double-invoke
-    (e.g. both the CB-reject teardown and a later finally) cannot trigger a
-    spurious ``traffic_gate.release_bulkhead_failed`` warning.
+    The slot goes back to the compartment the decision took it from, even if
+    the tier's name was registered again while the request ran. A ``released``
+    flag short-circuits a second call so a double-invoke (e.g. both the
+    CB-reject teardown and a later finally) cannot trigger a spurious
+    ``traffic_gate.release_bulkhead_failed`` warning. Never waits for a lock,
+    so it is safe to call on an event-loop thread.
     """
     released = False
 
@@ -191,7 +201,7 @@ def _make_release(gate: TrafficGate, bulkhead_name: str) -> Callable[[], None]:
         if released:
             return
         released = True
-        gate.release_bulkhead(bulkhead_name)
+        gate.release_acquired(decision)
 
     return _release
 
@@ -230,25 +240,20 @@ def _rejection_response(
     )
 
 
-def check_admission(request: RequestContext) -> AdmissionDecision:
-    """Decide whether to admit ``request`` under tier-based load shedding.
+@dataclass
+class _AdmissionPlan:
+    """Everything the gate call needs, resolved by the shared pre-gate steps."""
 
-    Pipeline:
+    gate: TrafficGate
+    tier_id: str
+    gate_kwargs: dict[str, Any]
 
-    1. ``OPTIONS`` passthrough (CORS preflight is never shed).
-    2. ``enabled`` gate (``AdmissionControlSettings.enabled``).
-    3. PRO gate — no per-tier Bulkhead registry (OSS) -> clean no-op
-       (``active=False``), no token consumed, tier registry never imported.
-    4. Classify the request into a tier.
-    5. Degraded-tier forced deadline (``non_essential`` + heavy load).
-    6. Cell-aware bulkhead naming + lazy ``get_or_create`` so the per-tier
-       (or per-cell-per-tier) Bulkhead exists for ``should_allow`` to acquire.
-    7. ``TrafficGate.should_allow`` decision.
-    8. Build the :class:`AdmissionDecision` (reject 503 / allow + release).
 
-    Fail-open: any unexpected error after the PRO gate degrades to
-    ``active=False`` so the adapter falls back to the OSS baseline rather than
-    500-ing the request.
+def _plan_admission(request: RequestContext) -> AdmissionDecision | _AdmissionPlan:
+    """Steps 1-6 of the admission pipeline — shared by both entry points.
+
+    Returns a final :class:`AdmissionDecision` for every early exit (OPTIONS,
+    disabled, OSS no-op, fail-open), or the plan for the gate call.
     """
     # 1. CORS preflight is always allowed (no body, negligible load; rejecting
     #    it would break the subsequent real request).
@@ -306,18 +311,24 @@ def check_admission(request: RequestContext) -> AdmissionDecision:
             # the rate-controller path (fail-open).
             logger.debug("admission.bulkhead_create_failed", error=str(exc))
 
-        # 7. TrafficGate decision.
-        decision = gate.should_allow(
-            priority=TIER_PRIORITY_MAP.get(tier_id, 50),
-            bulkhead_name=bulkhead_name,
-            bulkhead_timeout=settings.get_tier_bulkhead_timeout(tier_id),
-            metadata={"tier_id": tier_id},
-        )
+        gate_kwargs: dict[str, Any] = {
+            "priority": TIER_PRIORITY_MAP.get(tier_id, 50),
+            "bulkhead_name": bulkhead_name,
+            "bulkhead_timeout": settings.get_tier_bulkhead_timeout(tier_id),
+            "metadata": {"tier_id": tier_id},
+        }
     except Exception as exc:
         logger.warning("admission.check_failed", error=str(exc))
         return AdmissionDecision(active=False)
 
-    # 8. Build the decision.
+    return _AdmissionPlan(gate=gate, tier_id=tier_id, gate_kwargs=gate_kwargs)
+
+
+def _admission_outcome(
+    request: RequestContext, plan: _AdmissionPlan, decision: TrafficDecision
+) -> AdmissionDecision:
+    """Step 8 — build the :class:`AdmissionDecision` from the gate's decision."""
+    tier_id = plan.tier_id
     if not decision.allowed:
         logger.warning(
             "admission.request_rejected",
@@ -336,7 +347,7 @@ def check_admission(request: RequestContext) -> AdmissionDecision:
 
     release = None
     if decision.bulkhead_acquired and decision.bulkhead_name:
-        release = _make_release(gate, decision.bulkhead_name)
+        release = _make_release(plan.gate, decision)
 
     return AdmissionDecision(
         rejection=None,
@@ -344,3 +355,56 @@ def check_admission(request: RequestContext) -> AdmissionDecision:
         release=release,
         tier_id=tier_id,
     )
+
+
+def check_admission(request: RequestContext) -> AdmissionDecision:
+    """Decide whether to admit ``request`` under tier-based load shedding.
+
+    Pipeline:
+
+    1. ``OPTIONS`` passthrough (CORS preflight is never shed).
+    2. ``enabled`` gate (``AdmissionControlSettings.enabled``).
+    3. PRO gate — no per-tier Bulkhead registry (OSS) -> clean no-op
+       (``active=False``), no token consumed, tier registry never imported.
+    4. Classify the request into a tier.
+    5. Degraded-tier forced deadline (``non_essential`` + heavy load).
+    6. Cell-aware bulkhead naming + lazy ``get_or_create`` so the per-tier
+       (or per-cell-per-tier) Bulkhead exists for ``should_allow`` to acquire.
+    7. ``TrafficGate.should_allow`` decision.
+    8. Build the :class:`AdmissionDecision` (reject 503 / allow + release).
+
+    Fail-open: any unexpected error after the PRO gate degrades to
+    ``active=False`` so the adapter falls back to the OSS baseline rather than
+    500-ing the request.
+    """
+    plan = _plan_admission(request)
+    if isinstance(plan, AdmissionDecision):
+        return plan
+    # 7. TrafficGate decision.
+    try:
+        decision = plan.gate.should_allow(**plan.gate_kwargs)
+    except Exception as exc:
+        logger.warning("admission.check_failed", error=str(exc))
+        return AdmissionDecision(active=False)
+    return _admission_outcome(request, plan, decision)
+
+
+async def check_admission_async(request: RequestContext) -> AdmissionDecision:
+    """Async twin of :func:`check_admission` for ASGI adapters.
+
+    Every step is shared with :func:`check_admission` except step 7, which
+    awaits ``TrafficGate.should_allow_async``: a request waiting for a slot in
+    a saturated tier (up to the tier's bulkhead timeout) leaves the event loop
+    free to serve other requests. The returned ``release`` is sync and never
+    waits for a lock.
+    """
+    plan = _plan_admission(request)
+    if isinstance(plan, AdmissionDecision):
+        return plan
+    # 7. TrafficGate decision — the bulkhead wait is awaited on the loop.
+    try:
+        decision = await plan.gate.should_allow_async(**plan.gate_kwargs)
+    except Exception as exc:
+        logger.warning("admission.check_failed", error=str(exc))
+        return AdmissionDecision(active=False)
+    return _admission_outcome(request, plan, decision)

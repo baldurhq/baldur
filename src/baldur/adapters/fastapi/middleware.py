@@ -25,7 +25,7 @@ import structlog
 from baldur.api.middleware import (
     apply_backpressure_headers,
     apply_rate_limit_headers,
-    check_admission,
+    check_admission_async,
     check_backpressure,
     check_cb_open,
     check_deadline,
@@ -123,8 +123,9 @@ class BaldurMiddleware:
         # `return` MUST live inside this try so the acquired bulkhead slot is
         # released on the admission-acquired-then-CB-rejected path; the finally
         # also clears the degraded deadline (belt-and-suspenders on ASGI, which
-        # is per-Task context-isolated) and records the RTT sample.
-        admission = check_admission(request_ctx)
+        # is per-Task context-isolated) and records the RTT sample. The tier
+        # slot is awaited, so a saturated tier never blocks the event loop.
+        admission = await check_admission_async(request_ctx)
         release = admission.release
         # Initialized before the try so the outer finally can read
         # captured["started"] / captured["status"] for RTT sampling even when a

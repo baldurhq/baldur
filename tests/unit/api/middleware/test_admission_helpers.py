@@ -8,8 +8,8 @@ Scope:
       matrix, cell-aware bulkhead naming, and the fail-open guarantee.
     - ``_bulkhead_registry`` PRO gate: registry ``None`` -> no tier import, no
       TrafficGate token consumed.
-    - ``_make_release``: idempotent release closure (double-call -> single
-      ``release_bulkhead``).
+    - ``_make_release``: idempotent release closure bound to the decision
+      (double-call -> single ``release_acquired``).
 
 The admission helper resolves all heavy dependencies lazily (``get_tier_registry``
 / ``get_traffic_gate`` / ``ProviderRegistry.bulkhead_registry``), so tests patch
@@ -199,9 +199,11 @@ class TestCheckAdmissionBehavior:
         assert result.tier_id == "standard"
         assert callable(result.release)
 
-        # The release closure delegates to the gate (idempotent per _make_release).
+        # The release closure hands the gate the decision that acquired the
+        # slot, so it returns to that compartment (idempotent per _make_release).
         result.release()
-        gate.release_bulkhead.assert_called_once_with("tier:standard")
+        gate.release_acquired.assert_called_once_with(decision)
+        gate.release_bulkhead.assert_not_called()
 
     def test_pro_allow_without_bulkhead_has_no_release(self):
         """Rate-controller-only allow (no slot acquired) -> release is None."""
@@ -354,21 +356,27 @@ class TestCheckAdmissionProGate:
 class TestAdmissionReleaseIdempotency:
     """The release closure releases the slot exactly once, however often called."""
 
-    def test_release_invokes_release_bulkhead_with_name(self):
+    def test_release_returns_the_slot_the_decision_acquired(self):
         gate = MagicMock(spec=TrafficGate)
-        release = _make_release(gate, "tier:standard")
+        decision = _decision(
+            True, bulkhead_acquired=True, bulkhead_name="tier:standard"
+        )
+        release = _make_release(gate, decision)
 
         release()
 
-        gate.release_bulkhead.assert_called_once_with("tier:standard")
+        gate.release_acquired.assert_called_once_with(decision)
 
     def test_double_release_releases_slot_only_once(self):
         """A second invoke is a no-op (no spurious release_bulkhead_failed warning)."""
         gate = MagicMock(spec=TrafficGate)
-        release = _make_release(gate, "tier:critical")
+        decision = _decision(
+            True, bulkhead_acquired=True, bulkhead_name="tier:critical"
+        )
+        release = _make_release(gate, decision)
 
         release()
         release()
         release()
 
-        assert gate.release_bulkhead.call_count == 1
+        assert gate.release_acquired.call_count == 1
