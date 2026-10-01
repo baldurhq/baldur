@@ -56,20 +56,27 @@ but the work that call carried is parked under the breaker's own name with the f
 `CIRCUIT_BREAKER_OPEN`, so an outage's fast-rejected calls are recoverable alongside the ones that
 failed. (This capture is on by default and can be switched off.)
 
-Some calls are not parked, by rule. Each one leaves a log record, and several of those records sit
-below the default `BALDUR_LOG_LEVEL=WARNING`, so each rule names the record and its level — the
-level to turn on when you are looking for a call that is not in the queue:
+Some calls are not parked, by rule. Each one leaves a log record (within the rate limit described
+below the table), and several of those records sit below the default `BALDUR_LOG_LEVEL=WARNING`, so
+each rule names the record and its level — the level to turn on when you are looking for a call
+that is not in the queue:
 
 | A failed call is not parked when… | Its record |
 |---|---|
 | a `fallback=` answered it (the caller got a value) | `policy_chain.fallback_applied` (WARNING) |
-| the idempotency guard refused it — already completed, still in flight, or unverifiable | `idempotency.duplicate_blocked`, `idempotency.execution_blocked`, `idempotency.guard_check_failed` (WARNING) |
+| the call's own idempotency guard (`idempotency_key=`) refused it — already completed, still in flight, or unverifiable | `idempotency.duplicate_blocked`, `idempotency.execution_blocked`, `idempotency.guard_check_failed` (WARNING) |
 | a preset pipeline's error-budget guard refused it | `policy_pipeline.execution_rejected` (WARNING) |
 | Baldur runs observe-only (dry-run, shadow, evaluation) | `execution_mode.intervention_suppressed` with `action="dlq_store"` (INFO) |
 | open-circuit capture is switched off (`BALDUR_DLQ_OPEN_CIRCUIT_CAPTURE_ENABLED=false`) | `dlq_sink.capture_skipped` with `reason="open_circuit_capture_disabled"` (DEBUG) |
-| its `retry=` is a `RetryPolicy` you built with `enable_dlq=False` | `dlq_sink.capture_skipped` with `reason="stage_declined"` (DEBUG) |
+| its `retry=` is a `RetryPolicy` you built with `enable_dlq=False` and that stage ended it (a call `timeout=` cuts off first is parked) | `dlq_sink.capture_skipped` with `reason="stage_declined"` (DEBUG) |
 | the queue is switched off (`BALDUR_DLQ_ENABLED=false`) | `dlq.store_skipped_disabled` (DEBUG) and `dlq_sink.create_dlq_entry_failed` (ERROR) |
 | the queue is full and the overflow strategy is `reject` | `dlq.store_rejected_overflow` (WARNING) |
+
+Like every Baldur log line below ERROR, these records are rate-limited: past ten of one event in ten
+seconds, the rest of that window's are dropped, and the next one carries their count. Under
+observe-only the would-store record shares its event with the would-have records the circuit
+breaker and the retry stage write for every call, so in a dry run of more than a few calls per ten
+seconds most would-store records are among those dropped.
 
 Two switches exclude every call of a process at once rather than one call, so they log no
 per-call record: the kill switch, which makes Baldur step aside and is logged once per process when

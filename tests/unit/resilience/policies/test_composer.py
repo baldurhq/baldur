@@ -500,6 +500,27 @@ class TestComposerExecuteNoPolicyBehavior:
         assert result.outcome == PolicyOutcome.FAILURE
         assert result.error is err
 
+    @pytest.mark.parametrize(
+        ("error", "expected"),
+        [
+            (CircuitBreakerOpenError("inner_api"), PolicyOutcome.REJECTED),
+            (BulkheadFullError("inner_api", 2, 2), PolicyOutcome.REJECTED),
+            (TimeoutPolicyError(5.0), PolicyOutcome.TIMEOUT),
+        ],
+        ids=["open_circuit", "bulkhead_full", "timeout"],
+    )
+    def test_raise_without_policies_is_classified_as_a_chain_classifies_it(
+        self, composer, error, expected
+    ):
+        """An enclosing call with no stage sees the same terminal a one-stage
+        chain does — an inner site's open-circuit rejection stays a rejection,
+        so the open-circuit lane (and its custody mark) handles it."""
+        empty = composer.execute(_throwing(error))
+        chained = PolicyComposer().add(MockPolicy("wrapper")).execute(_throwing(error))
+
+        assert empty.outcome == chained.outcome == expected
+        assert empty.error is error
+
 
 # =============================================================================
 # Behavior verification — execute(): Guard checks
@@ -1084,6 +1105,26 @@ class TestAsyncComposerExecuteBehavior:
         assert result.success is False
         assert result.outcome == PolicyOutcome.FAILURE
         assert result.error is err
+
+    @pytest.mark.parametrize(
+        ("error", "expected"),
+        [
+            (CircuitBreakerOpenError("inner_api"), PolicyOutcome.REJECTED),
+            (TimeoutPolicyError(5.0), PolicyOutcome.TIMEOUT),
+        ],
+        ids=["open_circuit", "timeout"],
+    )
+    @pytest.mark.asyncio
+    async def test_raise_without_policies_is_classified_as_a_chain_classifies_it(
+        self, async_composer, error, expected
+    ):
+        async def failing():
+            raise error
+
+        result = await async_composer.execute(failing)
+
+        assert result.outcome == expected
+        assert result.error is error
 
     @pytest.mark.asyncio
     async def test_guard_rejection(self, async_composer):
@@ -2001,8 +2042,8 @@ class TestComposerRejectionCaptureBehavior:
     def test_armed_composer_skips_timeout_terminal(self, composer):
         """A TIMEOUT terminal is a different loss shape — no capture."""
         sink = MockSink()
-        # A policy in the chain is what routes the exception through the
-        # classifying terminal; an empty chain reports every raise as FAILURE.
+        # A stage in the chain makes this the shape a facade call builds; an
+        # empty chain classifies the raise the same way.
         composer.add(MockPolicy("wrapper")).add_sink(sink)
         composer.capture_open_circuit_rejections()
 
@@ -2274,8 +2315,8 @@ class TestComposerFailureCaptureBehavior:
         assert result.metadata["domain"] == "summarize"
 
     def test_armed_composer_delivers_timeout_terminal(self, composer):
-        # A stage in the chain routes the raise through the classifying
-        # terminal; an empty chain reports every raise as FAILURE.
+        # A stage in the chain makes this the shape a facade call builds; an
+        # empty chain classifies the raise the same way.
         sink = MockSink()
         composer.add(MockPolicy("wrapper")).add_sink(sink)
         composer.capture_failures("summarize")

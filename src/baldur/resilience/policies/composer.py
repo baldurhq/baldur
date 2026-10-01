@@ -681,12 +681,17 @@ class PolicyComposer(Generic[T]):
         from baldur.resilience.policies.fallback import FallbackPolicy
 
         if not self._policies:
-            # No Policy → run directly
+            # No Policy → run directly. The raise is classified as the chain's
+            # terminal classifies it, so an open-circuit rejection the call
+            # propagates from an inner call site reaches the open-circuit lane
+            # here too — where an inner site's custody mark is honoured.
             try:
                 value = func(*args, **kwargs)
                 return PolicyResult(value=value, outcome=PolicyOutcome.SUCCESS)
             except Exception as e:
-                return PolicyResult(value=None, outcome=PolicyOutcome.FAILURE, error=e)
+                return PolicyResult(
+                    value=None, outcome=_classify_exception_outcome(e), error=e
+                )
 
         # Build the nested execution (wrap in reverse order).
         def wrapped() -> T:
@@ -1065,11 +1070,14 @@ class AsyncPolicyComposer(Generic[T]):
         from baldur.resilience.policies.fallback import AsyncFallbackPolicy
 
         if not self._policies:
+            # Classified as the chain's terminal classifies it (sync-symmetric).
             try:
                 value = await func(*args, **kwargs)
                 return PolicyResult(value=value, outcome=PolicyOutcome.SUCCESS)
             except Exception as e:
-                return PolicyResult(value=None, outcome=PolicyOutcome.FAILURE, error=e)
+                return PolicyResult(
+                    value=None, outcome=_classify_exception_outcome(e), error=e
+                )
 
         # Build the async nested execution (wrap in reverse order).
         async def initial_fn() -> T:

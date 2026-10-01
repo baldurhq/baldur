@@ -427,7 +427,9 @@ async def _araise_upstream() -> str:
 
 class TestDlqCaptureDomainAndRejectionBehavior:
     """The placeholder is replaced, a named domain is not, and a stage failure
-    with no error object is still a parked call."""
+    with no error object is still a parked call. A call the bound cuts off
+    before its retry stage ends carries no decision of that stage, so it is
+    parked under the call site's name whatever the stage was built with."""
 
     def test_named_retry_domain_is_kept_on_sync_protect(self, store):
         named = RetryPolicyConfig(
@@ -492,6 +494,39 @@ class TestDlqCaptureDomainAndRejectionBehavior:
         expected_type = PolicyRejectedException.__name__.upper()
         assert kwargs["failure_type"] == f"MAX_RETRIES_{expected_type}"
         assert kwargs["metadata"]["max_attempts"] == 3
+
+    def test_declining_named_stage_cut_off_by_the_bound_is_parked_under_the_name(
+        self, store
+    ):
+        # Given a pre-built stage that names a domain and declines the store
+        body = _Body("timeout_mid_retry")
+        declining = RetryPolicy(
+            config=RetryPolicyConfig(
+                max_attempts=CONFIG_ATTEMPTS, domain="payments", enable_dlq=False
+            )
+        )
+
+        # When the bound cuts the call off while that stage runs it
+        try:
+            with pytest.raises(TimeoutPolicyError):
+                protect(
+                    "svc.cut_declining",
+                    body.sync,
+                    retry=declining,
+                    dlq=True,
+                    circuit_breaker=False,
+                    timeout=_BOUND_SECONDS,
+                )
+        finally:
+            body.release.set()
+            TimeoutPolicy.shutdown_executor()
+
+        # Then the cut-off call is parked once, under the call site's name
+        assert store.call_count == 1
+        kwargs = store.call_args.kwargs
+        assert kwargs["domain"] == "svc.cut_declining"
+        expected_type = TimeoutPolicyError.__name__.upper()
+        assert kwargs["failure_type"] == f"MAX_RETRIES_{expected_type}"
 
 
 # =============================================================================
@@ -664,8 +699,30 @@ def _nested_async() -> None:
     asyncio.run(aprotect(_OUTER, inner_call, retry=True, dlq=True, timeout=None))
 
 
+def _nested_sync_bare() -> None:
+    """The enclosing site composes no stage at all."""
+    protect(
+        _OUTER,
+        lambda: protect(_INNER, _raise_upstream, dlq=True, timeout=None),
+        dlq=True,
+        circuit_breaker=False,
+        timeout=None,
+    )
+
+
+def _nested_async_bare() -> None:
+    async def inner_call() -> str:
+        return await aprotect(_INNER, _araise_upstream, dlq=True, timeout=None)
+
+    asyncio.run(
+        aprotect(_OUTER, inner_call, dlq=True, circuit_breaker=False, timeout=None)
+    )
+
+
 _NESTED_FORMS = pytest.mark.parametrize(
-    "nested_call", [_nested_sync, _nested_async], ids=["sync", "async"]
+    "nested_call",
+    [_nested_sync, _nested_async, _nested_sync_bare, _nested_async_bare],
+    ids=["sync", "async", "sync_no_stage", "async_no_stage"],
 )
 
 
