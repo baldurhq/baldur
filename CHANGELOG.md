@@ -80,6 +80,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - The verifier CLI no longer reads the chain state file or crashes on a cp949 console.
 - The audit export's integrity check now reads the ledger's hash fields, before any filter.
 - A verifier without the signing key reports `signing_key_missing`, not every entry modified.
+- The self-healing demo no longer crashes when its output is not UTF-8 (a pipe, Git Bash).
 
 ## [1.16.0] - 2026-09-28
 

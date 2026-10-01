@@ -13,15 +13,24 @@ event each, and the passes keep landing after the first. A tally taken at the
 first batch reported a 500-charge outage as ``400/400 ... lost 100`` while the
 last pass was still running; the drain check below is what the tally now waits
 on.
+
+The narrative prints symbols (a check mark, a lightning bolt) that a legacy
+Windows code page cannot encode; on a pipe or a terminal such as Git Bash the
+banner raised ``UnicodeEncodeError`` before the story began.
 """
 
 from __future__ import annotations
 
+import io
+import sys
+
 import pytest
 
+from baldur.scripts import demo_self_healing as demo
 from baldur.scripts.demo_self_healing import (
     _batch_totals,
     _parse_args,
+    _protect_console_encoding,
     _replay_drained,
     _Tally,
 )
@@ -114,3 +123,65 @@ class TestOutageSize:
     def test_rejects_sizes_outside_one_to_five_thousand(self, value):
         with pytest.raises(SystemExit):
             _parse_args(["--outage-charges", value])
+
+
+# Symbols the narrative prints. The first one opens the banner; a legacy
+# Windows code page (cp949 here) has no encoding for it, which is how the demo
+# died on its first line.
+_SYMBOLS = "⚡ ✔ ✖ ⟳"
+
+
+def _stream(encoding: str, errors: str = "strict") -> io.TextIOWrapper:
+    return io.TextIOWrapper(
+        io.BytesIO(), encoding=encoding, errors=errors, newline="\n"
+    )
+
+
+class TestConsoleEncoding:
+    def test_a_legacy_code_page_cannot_print_the_banner_symbol(self):
+        stream = _stream("cp949")
+
+        with pytest.raises(UnicodeEncodeError):
+            stream.write(_SYMBOLS)
+
+    @pytest.mark.parametrize("encoding", ["cp949", "cp1252", "cp932"])
+    def test_a_legacy_code_page_stream_prints_the_symbols_as_utf8(
+        self, monkeypatch, encoding
+    ):
+        stream = _stream(encoding)
+        monkeypatch.setattr(sys, "stdout", stream)
+
+        _protect_console_encoding()
+        print(_SYMBOLS)
+        stream.flush()
+
+        assert stream.buffer.getvalue().decode("utf-8") == _SYMBOLS + "\n"
+
+    def test_a_utf8_stream_is_left_as_configured(self, monkeypatch):
+        stream = _stream("utf-8", errors="backslashreplace")
+        monkeypatch.setattr(sys, "stdout", stream)
+
+        _protect_console_encoding()
+
+        assert stream.errors == "backslashreplace"
+
+    def test_a_stream_that_cannot_be_reconfigured_is_skipped(self, monkeypatch):
+        stream = io.StringIO()
+        monkeypatch.setattr(sys, "stdout", stream)
+
+        _protect_console_encoding()
+        print(_SYMBOLS)
+
+        assert sys.stdout is stream
+        assert stream.getvalue() == _SYMBOLS + "\n"
+
+    def test_main_protects_the_streams_before_parsing_arguments(self, monkeypatch):
+        calls: list[str] = []
+        monkeypatch.setattr(
+            demo, "_protect_console_encoding", lambda: calls.append("protect")
+        )
+
+        with pytest.raises(SystemExit):
+            demo.main(["--outage-charges", "0"])
+
+        assert calls == ["protect"]

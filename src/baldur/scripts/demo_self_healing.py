@@ -33,6 +33,7 @@ events instead of the quiet demo narrative alone.
 from __future__ import annotations
 
 import argparse
+import codecs
 import logging
 import os
 import sys
@@ -102,6 +103,30 @@ class GatewayDownError(Exception):
 
 def _say(line: str = "") -> None:
     print(line, flush=True)
+
+
+def _protect_console_encoding() -> None:
+    """Switch a stream that is not UTF-8 to UTF-8 so the narrative's symbols print.
+
+    A Windows console window takes Unicode, but a pipe, a redirect, or a terminal
+    such as Git Bash's mintty gets the legacy code page (cp949, cp1252, cp932),
+    which has no check mark or lightning bolt: the banner's first line raised
+    ``UnicodeEncodeError``. Those destinations read UTF-8.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            is_utf8 = codecs.lookup(stream.encoding or "ascii").name == "utf-8"
+        except LookupError:
+            is_utf8 = False
+        if is_utf8:
+            continue
+        try:
+            reconfigure(encoding="utf-8")
+        except (ValueError, OSError):
+            pass
 
 
 def _now() -> str:
@@ -521,6 +546,7 @@ def _make_replay_handler(charge):
 
 
 def main(argv: list[str] | None = None) -> int:
+    _protect_console_encoding()
     args = _parse_args(argv)
     for key, value in _DEMO_ENV.items():
         os.environ.setdefault(key, value)
