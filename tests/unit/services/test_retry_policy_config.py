@@ -119,18 +119,24 @@ class TestRetryPolicyConfigContract:
         assert RetryPolicyConfig().retryable_exceptions == (Exception,)
 
     def test_non_retryable_exceptions_default(self):
-        """The default set is the breaker-open error and the cooldown deferral.
+        """The default set is the breaker-open error, the cooldown deferral and
+        a wrapped LLM client's no-endpoint error.
 
-        Both mean "the dependency was not contacted, and re-calling now cannot
-        help": CB OPEN says stop sending traffic; a deferral says the shared
-        429 cooldown outlasts the wait budget, so a retry before ``not_before``
-        can only be refused again.
+        Each means "re-calling now cannot help": CB OPEN says stop sending
+        traffic; a deferral says the shared 429 cooldown outlasts the wait
+        budget, so a retry before ``not_before`` can only be refused again; a
+        wrapped LLM client already ran every endpoint's own retries.
         """
-        from baldur.core.exceptions import CircuitBreakerError, RateLimitDeferredError
+        from baldur.core.exceptions import (
+            CircuitBreakerError,
+            LLMUnavailableError,
+            RateLimitDeferredError,
+        )
 
         assert RetryPolicyConfig().non_retryable_exceptions == (
             CircuitBreakerError,
             RateLimitDeferredError,
+            LLMUnavailableError,
         )
 
     def test_rate_limit_fields_exist_with_defaults(self):

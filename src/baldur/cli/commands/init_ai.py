@@ -95,10 +95,47 @@ def charge(order_id: str) -> dict:
 The key is a field name on the call (e.g. `"order_id"`), or a
 `Callable` for a composite key.
 
+### LLM calls
+
+Wrap the LLM SDK client once, where it is created, instead of adding retry,
+backoff or fallback code around each call. Call sites do not change:
+
+```python
+import baldur
+from openai import OpenAI
+
+client = baldur.llm.wrap(OpenAI())
+
+
+@baldur.protected("summarize-doc", replay=True)
+def summarize(doc_id: str) -> str:
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": load_document(doc_id)}],
+    )
+    return response.choices[0].message.content
+```
+
+- `baldur.llm.wrap` covers the OpenAI SDK (and OpenAI-compatible servers),
+  the Anthropic SDK and `google-genai`. Every worker waits out a provider's
+  rate limit or overload together; a request the provider rejected (400, 422)
+  is not retried; when no endpoint answers, the call raises
+  `baldur.LLMUnavailableError`.
+- Other clients of the same SDK go in the wrap's `fallbacks` list, tried in
+  order; `baldur.llm.Endpoint(client, model="...")` names the model a fallback
+  provider calls it by.
+- `replay=True` on the job parks a job no endpoint could answer, with its
+  arguments, and re-runs it when the provider recovers (a Celery worker runs
+  that replay). The job's parameters must be `str`, `int`, `float`, `bool` or
+  `None`, and the job must be safe to run twice.
+
 ### Rules for assistants
 
 - Do **not** add a new circuit-breaker / retry library or hand-roll one — Baldur
   already provides it. Wrap the call in `@baldur.protected(...)` instead.
+- Do **not** put a `baldur.llm.wrap` client's calls inside another retry loop,
+  and do not let a task queue retry a `replay=True` job — both multiply the
+  calls a refusing provider receives.
 - Reuse one stable `name` per protected dependency; do not generate random names.
 - When you add `retry=` to a call with a non-idempotent side effect, add
   `idempotency_key=` too. **Propose the key and confirm it with the human** when

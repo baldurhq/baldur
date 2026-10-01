@@ -212,6 +212,12 @@ dev = [
     # Property-based testing — generates adversarial inputs for correctness
     # invariants (e.g. idempotency key injectivity) that example tests miss.
     "hypothesis>=6.0",
+    # LLM provider SDKs — test-only. No extra installs them and nothing in the
+    # package imports them: the provider-error classifier and baldur.llm.wrap
+    # are tested against each SDK's real exceptions and clients.
+    "openai>=3.0",
+    "anthropic>=1.0",
+    "google-genai>=2.0",
     "locust>=2.0",
     "toxiproxy-python>=0.1",
     "black>=26.3.1",

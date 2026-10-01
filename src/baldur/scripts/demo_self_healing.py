@@ -171,6 +171,24 @@ def _setup_eager_celery() -> bool:
     return True
 
 
+def _start_demo_process() -> bool:
+    """Logging, the eager Celery app, and the quiet narrative — for every demo.
+
+    ``BALDUR_DEMO_VERBOSE=1`` keeps the framework's own log events. Returns
+    False, after saying what to install, when the Celery extra is missing.
+    """
+    verbose = os.environ.get("BALDUR_DEMO_VERBOSE", "").lower() in ("1", "true")
+    logging.basicConfig(
+        level=logging.INFO if verbose else logging.ERROR,
+        format="%(levelname).1s %(name)s %(message)s",
+    )
+    if not _setup_eager_celery():
+        return False
+    if not verbose:
+        _quiet_logging()
+    return True
+
+
 @dataclass
 class _Tally:
     """What the demo counts, kept apart from how it observes the framework.
@@ -551,15 +569,8 @@ def main(argv: list[str] | None = None) -> int:
     for key, value in _DEMO_ENV.items():
         os.environ.setdefault(key, value)
 
-    verbose = os.environ.get("BALDUR_DEMO_VERBOSE", "").lower() in ("1", "true")
-    logging.basicConfig(
-        level=logging.INFO if verbose else logging.ERROR,
-        format="%(levelname).1s %(name)s %(message)s",
-    )
-    if not _setup_eager_celery():
+    if not _start_demo_process():
         return 1
-    if not verbose:
-        _quiet_logging()
 
     import baldur
     import baldur.celery_tasks.dlq_tasks  # noqa: F401  # bind tasks to the eager app

@@ -8,12 +8,14 @@ Top-level re-export selection rule:
     iff it is either (a) a domain base class, or (b) a leaf class raised by code
     reachable from a top-level public surface (``protect``, decorators, ...).
 
-Re-exported at ``baldur`` top-level (12 names):
+Re-exported at ``baldur`` top-level (15 names):
     Bases — ``BaldurError``, ``AdapterError``, ``CircuitBreakerError``,
             ``DLQError``, ``ResilienceError``, ``ConfigurationError``
     Leaves — ``AdapterNotFoundError``, ``RetryExhaustedError``,
              ``TimeoutPolicyError``, ``RateLimitExceeded``,
-             ``IdempotencyDuplicateError``, ``DLQReplayError``
+             ``IdempotencyDuplicateError``, ``IdempotencyUnavailableError``,
+             ``DomainValidationError``, ``DLQReplayError``,
+             ``LLMUnavailableError``
 
 Internal / nested-only (``baldur.core.exceptions``):
     ``AdapterInitializationError``, ``AdapterConnectionError``,
@@ -60,6 +62,7 @@ __all__ = [
     "TimeoutPolicyError",
     "RateLimitExceeded",
     "RateLimitDeferredError",
+    "LLMUnavailableError",
     # Idempotency
     "IdempotencyDuplicateError",
     "IdempotencyUnavailableError",
@@ -260,8 +263,12 @@ def non_retryable_exceptions() -> tuple[type[Exception], ...]:
     can only sleep through attempts that cannot succeed before
     ``not_before`` — the refusal is a scheduling signal, not a transient
     failure.
+
+    LLMUnavailableError: a wrapped LLM client already tried every endpoint,
+    each with its own retries. Retrying the whole call would multiply those
+    attempts against providers that are refusing them.
     """
-    return (CircuitBreakerError, RateLimitDeferredError)
+    return (CircuitBreakerError, RateLimitDeferredError, LLMUnavailableError)
 
 
 # ── State Transition errors ─────────────────────────────────
@@ -431,6 +438,42 @@ class RateLimitDeferredError(ResilienceError):
 
     def extra_context(self) -> dict[str, Any]:
         return {"key": self.key, "not_before": self.not_before}
+
+
+class LLMUnavailableError(ResilienceError):
+    """Raised by a ``baldur.llm.wrap`` client when no endpoint answered the call.
+
+    Every endpoint was tried in order — each with its own waits, retries and
+    breaker — and each was rate-limited, overloaded, out of quota, refused the
+    key, failed, or stood behind an open breaker. The last endpoint's error is
+    chained as ``__cause__``.
+
+    It is the one error a job sees for "the provider could not answer right
+    now": under ``@protected(..., dlq=True)`` it is parked under the job's name,
+    and with ``replay=True`` the job is re-run when its breaker closes. It is
+    not retried by an enclosing retry stage: every endpoint already ran its own
+    retries, so running them all again would only multiply calls to providers
+    that are refusing them.
+
+    Attributes:
+        attempts: ``(endpoint name, category)`` for every endpoint tried, in
+            order — the category is the provider's answer (``rate_limited``,
+            ``overloaded``, ``quota_exhausted``, ``auth_failed``,
+            ``transient``) or what stopped the call before it was sent
+            (``breaker_open``, ``rate_limit_deferred``, ``deadline``).
+    """
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        attempts: tuple[tuple[str, str], ...] = (),
+    ):
+        super().__init__(message)
+        self.attempts = tuple(attempts)
+
+    def extra_context(self) -> dict[str, Any]:
+        return {"attempts": [list(attempt) for attempt in self.attempts]}
 
 
 # ── Idempotency errors ───────────────────────────────────────

@@ -108,6 +108,27 @@ def _truncate_field_if_oversize(
     }
 
 
+def _request_data_cap(domain: str, size_settings: Any) -> tuple[int, bool]:
+    """``(request_data byte cap, whether the domain's failures are replayable)``.
+
+    A domain with a registered replay handler is re-run from its stored
+    arguments, so it keeps up to ``replay_request_data_max_bytes`` of them —
+    a truncated payload could only be refused at replay. Decided once, here,
+    before the outbox hand-off, so the sync and async store paths agree.
+    Fail-safe: a lookup fault keeps the ordinary cap.
+    """
+    cap = int(size_settings.request_data_max_bytes)
+    try:
+        from baldur.services.replay_service.handlers import has_replay_handler
+
+        replayable = has_replay_handler(domain)
+    except Exception:
+        return cap, False
+    if not replayable:
+        return cap, False
+    return max(cap, int(size_settings.replay_request_data_max_bytes)), True
+
+
 class DLQCaptureService:
     """OSS DLQ capture backing.
 
@@ -338,9 +359,21 @@ class DLQCaptureService:
                     "dlq.masking_failed_passthrough",
                     error=str(mask_err),
                 )
-            request_data = _truncate_field_if_oversize(
-                "request_data", request_data, _size_settings.request_data_max_bytes
+            request_cap, replayable = _request_data_cap(domain, _size_settings)
+            stored_request_data = _truncate_field_if_oversize(
+                "request_data", request_data, request_cap
             )
+            if replayable and stored_request_data is not request_data:
+                # The job can only be re-run from these arguments, and they no
+                # longer fit: the entry will be refused at replay.
+                logger.warning(
+                    "dlq.replay_payload_truncated",
+                    healing_domain=domain,
+                    original_size=(stored_request_data or {}).get("original_size"),
+                    max_bytes=request_cap,
+                    setting="BALDUR_DLQ_REPLAY_REQUEST_DATA_MAX_BYTES",
+                )
+            request_data = stored_request_data
             snapshot_data = _truncate_field_if_oversize(
                 "snapshot_data", snapshot_data, _size_settings.field_max_bytes
             )

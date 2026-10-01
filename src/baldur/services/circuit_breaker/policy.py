@@ -41,6 +41,7 @@ from baldur.interfaces.resilience_policy import (
     PolicyResult,
     ResiliencePolicy,
 )
+from baldur.services.retry_handler.provider_errors import is_invalid_request
 from baldur.services.retry_handler.rate_limit_detection import (
     detect_rate_limit,
     failure_status_codes,
@@ -206,10 +207,17 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
         it must survive a caller-supplied ``ignore_exceptions=`` and must not
         hide inside a default tuple.
 
+        Neither is a provider's rejection of the request itself (an LLM SDK's
+        400, 404 or 422): the provider answered, so it is up, and the same
+        request would be rejected anywhere — counting it would let one bad
+        prompt open the breaker for every good one.
+
         If it matches ignore_exceptions, it is not counted as a failure.
         If it matches failure_exceptions, it is counted as a failure.
         """
         if _is_rate_limit_deferral(error):
+            return False
+        if is_invalid_request(error):
             return False
         if isinstance(error, self._ignore_exceptions):
             return False

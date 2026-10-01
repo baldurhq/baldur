@@ -20,30 +20,51 @@ services that don't have anyone on call.
 
 ```python
 import baldur
+from openai import OpenAI
+
+llm = baldur.llm.wrap(OpenAI(), timeout=60.0)
 
 
-@baldur.protected("summarize", dlq=True, timeout=60.0)
+@baldur.protected("summarize", replay=True)
 def summarize(doc_id: str) -> str:
-    return llm_api.summarize(doc_id)
+    response = llm.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": load_document(doc_id)}],
+    )
+    return response.choices[0].message.content
 ```
 
-No Redis, no Docker, no config to start: that decorator runs in-memory until
-you go multi-process.
+No Redis, no Docker, no config to start: those two lines run in-memory until
+you go multi-process. Not calling an LLM? The decorator alone does the same for
+[any dependency](#the-same-decorator-any-dependency).
 
-When the provider dies — or just gets slow — mid-traffic:
+When the provider rate-limits you, dies, or just gets slow — mid-traffic:
 
-- **Your app keeps answering.** A hang becomes a failure at the 60-second
-  bound, the circuit breaker opens, and calls fail fast — so a slow provider
-  doesn't take every worker down with it. The endpoints that don't need it
-  keep working.
+- **Your workers back off together.** A 429 or an "overloaded" answer installs
+  one wait every worker shares, at least as long as the provider asked: the
+  first worker is refused and the rest wait, instead of each one discovering
+  the limit alone. A request the provider rejected (400, 422) is never retried.
+- **Your app keeps answering.** A hung request fails at the 60-second bound,
+  the circuit breaker opens, and calls fail fast — so a slow provider doesn't
+  take every worker down with it. Give the wrap `fallbacks=[...]` and a call
+  moves to the next endpoint instead (OpenAI SDK, Anthropic SDK, google-genai).
 - **Failed jobs are kept, not lost.** Every call that failed for good is
   captured with its arguments and listed in the built-in console at
   `http://127.0.0.1:9090/`. In a plain Python process, call `baldur.init()`
   once at startup to start the console; the Django, FastAPI, and Flask
   integrations do that for you.
-- **They come back.** A small replay handler tells Baldur how to re-run one;
-  replay the parked jobs from the console with a click, or automatically when
-  the provider recovers — opt-in, with a Celery worker.
+- **They come back.** `replay=True` lets Baldur re-run a parked job from its
+  stored arguments: from the console with a click, or automatically once the
+  provider recovers and the job's breaker closes — with a Celery worker running
+  the replay.
+
+See it against the real `openai` SDK and a local fake provider — a rate limit,
+then an outage, then every parked job replayed:
+
+```bash
+pip install "baldur-framework[celery]" openai
+python -m baldur.scripts.demo_llm_outage
+```
 
 Django, FastAPI, Flask, and Celery adapters included.
 
@@ -62,10 +83,13 @@ pip install "baldur-framework[celery]"
 python -m baldur.scripts.demo_self_healing
 ```
 
-**Already using your SDK's retries?** Keep them. Baldur doesn't replace retry —
-it adds what retry can't: a breaker so one incident doesn't cost every request
-its retries, one wall-clock bound on what the caller waits, a fallback, and the
-capture-and-replay no retry library gives you.
+**Already using your SDK's retries?** Around a decorated call, keep them.
+Baldur doesn't replace retry — it adds what retry can't: a breaker so one
+incident doesn't cost every request its retries, one wall-clock bound on what
+the caller waits, a fallback, and the capture-and-replay no retry library gives
+you. A `baldur.llm.wrap` client is the one exception: it turns the SDK's own
+retries off on its copy of the client, because there one coordinated retry
+replaces them.
 
 ## Install
 

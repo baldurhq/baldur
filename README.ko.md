@@ -20,28 +20,49 @@
 
 ```python
 import baldur
+from openai import OpenAI
+
+llm = baldur.llm.wrap(OpenAI(), timeout=60.0)
 
 
-@baldur.protected("summarize", dlq=True, timeout=60.0)
+@baldur.protected("summarize", replay=True)
 def summarize(doc_id: str) -> str:
-    return llm_api.summarize(doc_id)
+    response = llm.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": load_document(doc_id)}],
+    )
+    return response.choices[0].message.content
 ```
 
-Redis도, Docker도, 설정도 없이 시작합니다. 저 데코레이터는 멀티 프로세스로 가기
-전까지 인메모리로 동작합니다.
+Redis도, Docker도, 설정도 없이 시작합니다. 저 두 줄은 멀티 프로세스로 가기
+전까지 인메모리로 동작합니다. LLM을 부르지 않나요? 데코레이터만으로도 [어떤
+의존성이든](#같은-데코레이터-어떤-의존성이든) 똑같이 됩니다.
 
-트래픽이 흐르는 중에 제공자가 죽거나 — 그냥 느려지기만 해도:
+트래픽이 흐르는 중에 제공자가 호출 한도를 걸거나, 죽거나, 그냥 느려지기만 해도:
 
-- **앱은 계속 응답합니다.** 60초 상한에서 매달린 호출이 실패로 바뀌고, 서킷
+- **워커들이 함께 물러섭니다.** 429나 "과부하" 응답이 오면 모든 워커가 공유하는
+  대기가 하나 걸리고, 그 길이는 제공자가 요청한 시간 이상입니다. 첫 워커만 거절당하고
+  나머지는 기다립니다 — 워커마다 따로 한도를 부딪쳐 알아내지 않습니다. 제공자가
+  거절한 요청(400, 422)은 재시도하지 않습니다.
+- **앱은 계속 응답합니다.** 매달린 요청은 60초 상한에서 실패로 바뀌고, 서킷
   브레이커가 열리며, 호출은 즉시 실패합니다 — 느려진 제공자 하나가 워커 전체를
-  끌고 내려가지 않습니다. 그 제공자가 필요 없는 엔드포인트는 계속 동작합니다.
+  끌고 내려가지 않습니다. wrap에 `fallbacks=[...]`를 주면 호출이 다음 엔드포인트로
+  넘어갑니다(OpenAI SDK, Anthropic SDK, google-genai).
 - **실패한 작업은 사라지지 않고 보관됩니다.** 끝내 실패한 호출은 전부 인자와
   함께 포착되어 내장 콘솔(`http://127.0.0.1:9090/`)에 목록으로 남습니다.
   프레임워크 없이 쓰는 파이썬 프로세스에서는 시작할 때 `baldur.init()`을 한 번
   호출해야 콘솔이 뜹니다. Django·FastAPI·Flask 연동은 이 호출을 알아서 해 줍니다.
-- **그리고 돌아옵니다.** 작은 재실행 핸들러로 하나를 어떻게 다시 실행하는지
-  알려주면, 보관된 작업을 콘솔에서 클릭 한 번으로 재실행하거나, 제공자가
-  복구되는 순간 자동으로 재실행합니다 — 옵트인이며, Celery 워커가 필요합니다.
+- **그리고 돌아옵니다.** `replay=True`면 Baldur가 보관된 작업을 저장된 인자로
+  다시 실행합니다. 콘솔에서 클릭 한 번으로, 또는 제공자가 복구되어 그 작업의
+  브레이커가 닫히는 순간 자동으로 — 재실행은 Celery 워커가 돌립니다.
+
+실제 `openai` SDK와 로컬 가짜 제공자로 직접 보세요 — 호출 한도, 이어서 장애,
+그리고 보관된 작업 전부의 재실행:
+
+```bash
+pip install "baldur-framework[celery]" openai
+python -m baldur.scripts.demo_llm_outage
+```
 
 Django, FastAPI, Flask, Celery 어댑터가 들어 있습니다.
 
@@ -60,10 +81,12 @@ pip install "baldur-framework[celery]"
 python -m baldur.scripts.demo_self_healing
 ```
 
-**SDK의 재시도를 이미 쓰고 있나요?** 그대로 두세요. Baldur는 재시도를 대체하지
-않습니다 — 재시도가 못 하는 것을 더합니다. 장애 하나에 모든 요청이 재시도 비용을
-치르지 않게 하는 브레이커, 호출자가 기다리는 시간의 단일 상한, 폴백, 그리고 어떤
-재시도 라이브러리도 주지 않는 포착·재실행.
+**SDK의 재시도를 이미 쓰고 있나요?** 데코레이터를 씌운 호출이라면 그대로 두세요.
+Baldur는 재시도를 대체하지 않습니다 — 재시도가 못 하는 것을 더합니다. 장애 하나에
+모든 요청이 재시도 비용을 치르지 않게 하는 브레이커, 호출자가 기다리는 시간의
+단일 상한, 폴백, 그리고 어떤 재시도 라이브러리도 주지 않는 포착·재실행.
+`baldur.llm.wrap` 클라이언트만은 예외입니다. 거기서는 조율된 재시도 하나가 SDK의
+재시도를 대신하므로, 클라이언트 사본에서 SDK 자체 재시도를 끕니다.
 
 ## 설치
 

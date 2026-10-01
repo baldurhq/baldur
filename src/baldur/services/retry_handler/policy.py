@@ -48,6 +48,7 @@ from .models import (
     RetryPolicyConfig,
     failed_attempt_entry,
 )
+from .provider_errors import is_non_retryable_provider_error
 
 if TYPE_CHECKING:
     from baldur.services.backoff_calculator import AdaptiveRetryBudget
@@ -636,7 +637,13 @@ class RetryPolicy(ResiliencePolicy[T]):
         an explicit loop check so an out-of-attempts stop is attributed to
         ``max_attempts`` rather than ``non_retryable`` (the polymorphic-break
         fix). A non-retryable-classification stop is the only ``non_retryable``.
+
+        A provider answer a retry cannot change — an exhausted quota, a refused
+        key, a rejected request — is never retried, ahead of the configured
+        types: re-sending it is billed and answered the same way.
         """
+        if is_non_retryable_provider_error(exception):
+            return False
         if isinstance(exception, self._config.non_retryable_exceptions):
             return False
 

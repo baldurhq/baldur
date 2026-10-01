@@ -70,13 +70,44 @@ class ProtectMetricRecorder(BaseMetricRecorder):
                 is self-limiting: Prometheus materializes only observed series, so a
                 single-mode ``name`` keeps exactly one series.
         """
+        self._record(name, mode, fallback_used, (outcome, attempts, duration_seconds))
+
+    def record_fallback(self, name: str, mode: str = "sync") -> None:
+        """Count one fallback activation, with no attempts or duration sample.
+
+        For a caller that composes its own fallback across several protected
+        calls — a wrapped LLM client moving to its next endpoint — where each
+        call already recorded its attempts and duration under its own name, so
+        recording them again here would count the work twice.
+
+        Args:
+            name: The name the fallback is counted under — the endpoint the
+                call left.
+            mode: ``"sync"`` or ``"async"``, as in :meth:`record`.
+        """
+        self._record(name, mode, True, None)
+
+    def _record(
+        self,
+        name: str,
+        mode: str,
+        fallback_used: bool,
+        call: tuple[str, int, float] | None,
+    ) -> None:
+        """The one fail-open recording path for all three series.
+
+        ``call`` is ``(outcome, attempts, duration_seconds)`` for a protect()
+        call, or ``None`` when only a fallback activation is counted.
+        """
         try:
-            self._attempts.labels(name=name, outcome=outcome, mode=mode).observe(
-                attempts
-            )
-            self._duration_seconds.labels(
-                name=name, outcome=outcome, mode=mode
-            ).observe(duration_seconds)
+            if call is not None:
+                outcome, attempts, duration_seconds = call
+                self._attempts.labels(name=name, outcome=outcome, mode=mode).observe(
+                    attempts
+                )
+                self._duration_seconds.labels(
+                    name=name, outcome=outcome, mode=mode
+                ).observe(duration_seconds)
             if fallback_used:
                 self._fallback_total.labels(name=name, mode=mode).inc()
         except Exception as e:

@@ -63,6 +63,19 @@ P = ParamSpec("P")
 R = TypeVar("R")
 
 
+def _is_non_retryable_provider_error(error: Exception) -> bool:
+    """Whether ``error`` is a provider answer a retry cannot change.
+
+    Lazy import: this module stays out of the ``baldur.services`` import-time
+    graph, which reaches back into the resilience policies.
+    """
+    from baldur.services.retry_handler.provider_errors import (
+        is_non_retryable_provider_error,
+    )
+
+    return is_non_retryable_provider_error(error)
+
+
 class AsyncRetryPolicy:
     """
     Async retry policy.
@@ -574,13 +587,16 @@ class AsyncRetryPolicy:
                 ):
                     rate_limit_signal = True
 
-                # Non-retryable check first (CB-open, etc.). The attempts bound
-                # is hoisted to the shared tail so an out-of-attempts stop is
-                # attributed to ``max_attempts``, not ``non_retryable``. An
-                # inner deferral exits with the defer vocabulary instead: the
-                # call was never made, and ``not_before`` is what a
-                # requeue-capable caller acts on.
-                if isinstance(e, self._non_retryable):
+                # Non-retryable check first (CB-open, a provider answer a retry
+                # cannot change, etc.). The attempts bound is hoisted to the
+                # shared tail so an out-of-attempts stop is attributed to
+                # ``max_attempts``, not ``non_retryable``. An inner deferral
+                # exits with the defer vocabulary instead: the call was never
+                # made, and ``not_before`` is what a requeue-capable caller
+                # acts on.
+                if isinstance(e, self._non_retryable) or (
+                    _is_non_retryable_provider_error(e)
+                ):
                     if isinstance(e, RateLimitDeferredError):
                         reason = "rate_limit_deferred"
                         not_before = e.not_before

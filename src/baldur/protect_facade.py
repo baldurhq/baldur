@@ -1625,6 +1625,47 @@ def _precompute_signature_cache(
     return sig, annotated_primitive
 
 
+def _check_replay_flags(
+    name: str,
+    replay: bool,
+    dlq: bool | None,
+    context_from: Callable[..., PolicyContext] | None | Literal[False],
+) -> None:
+    """Refuse decorator flags under which ``replay=True`` cannot keep its promise."""
+    if not replay:
+        return
+    if dlq is False:
+        raise ValueError(
+            f"replay=True on {name!r} parks failed calls to re-run them; it "
+            "cannot be combined with dlq=False."
+        )
+    if context_from is not None:
+        raise ValueError(
+            f"replay=True on {name!r} re-runs the function from the arguments "
+            "the decorator stores, and a context_from= replaces them; the two "
+            "cannot be combined."
+        )
+
+
+def _arm_replay(
+    name: str,
+    func: Callable[..., Any],
+    sig: inspect.Signature,
+    annotated_primitive: dict[str, bool],
+    **protect_options: Any,
+) -> None:
+    """Register ``func`` to be re-run from its stored arguments (``replay=True``)."""
+    from baldur.services.replay_service.function_replay import arm_function_replay
+
+    arm_function_replay(
+        name,
+        func,
+        signature=sig,
+        annotated_primitive=annotated_primitive,
+        protect_options=protect_options,
+    )
+
+
 def protected(
     name: str,
     *,
@@ -1638,6 +1679,7 @@ def protected(
     idempotency_ttl: timedelta | None = None,
     idempotency_execution_ttl: timedelta | None = None,
     context_from: Callable[..., PolicyContext] | None | Literal[False] = None,
+    replay: bool = False,
 ) -> Callable[[Callable[..., T]], Callable[..., T]]:
     """Decorator form of ``protect()``.
 
@@ -1677,10 +1719,45 @@ def protected(
             function is still running — so return copies, not objects the
             function may still change. The default auto-extract already
             snapshots its values.
+        replay: Let Baldur re-run the function from its stored arguments. Implies
+            ``dlq=True``. A call that fails because no LLM endpoint answered
+            (``LLMUnavailableError``), or that the open breaker rejected, is
+            parked with its arguments and re-run automatically when this
+            name's breaker closes — where a Celery worker runs the recovery
+            sweep; every other parked failure is replayed from the console. A
+            replay calls the undecorated function under the same retry,
+            breaker, timeout and idempotency settings, without DLQ capture or
+            the fallback. The function must be safe to run again, as with
+            ``retry=``, and must not also be retried by its task queue.
+            Checked at decoration, where ``ValueError`` names the problem:
+            every parameter must be passable by keyword and be ``str``,
+            ``int``, ``float``, ``bool`` or ``None`` (or an ``Optional`` of
+            one; an unannotated one is checked when it replays); no parameter
+            name may be one the DLQ redacts (``max_tokens``, ``author_id``);
+            the name must be one the DLQ stores as a domain of its own;
+            ``dlq=False`` and ``context_from=`` are refused; and the name must
+            not already be replayed by another function or a hand-written
+            handler.
     """
+    _check_replay_flags(name, replay, dlq, context_from)
+    dlq_flag: bool | None = True if replay else dlq
 
     def decorator(func: Callable[..., T]) -> Callable[..., T]:
         sig, annotated_primitive = _precompute_signature_cache(func)
+        if replay:
+            _arm_replay(
+                name,
+                func,
+                sig,
+                annotated_primitive,
+                retry=retry,
+                circuit_breaker=circuit_breaker,
+                timeout=timeout,
+                idempotency_key=idempotency_key,
+                idempotency_fail_open=idempotency_fail_open,
+                idempotency_ttl=idempotency_ttl,
+                idempotency_execution_ttl=idempotency_execution_ttl,
+            )
 
         if asyncio.iscoroutinefunction(func):
 
@@ -1694,7 +1771,7 @@ def protected(
                     name=name,
                     fn=bound,
                     fallback=fallback,
-                    dlq=dlq,
+                    dlq=dlq_flag,
                     retry=retry,
                     circuit_breaker=circuit_breaker,
                     timeout=timeout,
@@ -1717,7 +1794,7 @@ def protected(
                 name=name,
                 fn=bound,
                 fallback=fallback,
-                dlq=dlq,
+                dlq=dlq_flag,
                 retry=retry,
                 circuit_breaker=circuit_breaker,
                 timeout=timeout,
@@ -1748,17 +1825,21 @@ def aprotected(
     idempotency_ttl: timedelta | None = None,
     idempotency_execution_ttl: timedelta | None = None,
     context_from: Callable[..., PolicyContext] | None | Literal[False] = None,
+    replay: bool = False,
 ) -> Callable[[Callable[..., Awaitable[T]]], Callable[..., Awaitable[T]]]:
     """Decorator for ``async def`` only. Use ``@protected`` for mixed sync/async callsites;
     prefer ``@aprotected`` when you want a type-checker error on misuse
     against a sync function.
 
     ``context_from``, ``idempotency_key``, ``idempotency_fail_open``,
-    ``idempotency_ttl``, and ``idempotency_execution_ttl`` behave
+    ``idempotency_ttl``, ``idempotency_execution_ttl`` and ``replay`` behave
     identically to ``@protected`` (async parity). ``circuit_breaker`` and
     ``retry`` apply on the async path just as on the sync one (CB on by default),
-    so DLQ entries from async pipelines carry the captured context.
+    so DLQ entries from async pipelines carry the captured context. A replayed
+    coroutine runs to completion on the replaying thread.
     """
+    _check_replay_flags(name, replay, dlq, context_from)
+    dlq_flag: bool | None = True if replay else dlq
 
     def decorator(func: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:
         if not asyncio.iscoroutinefunction(func):
@@ -1767,6 +1848,20 @@ def aprotected(
                 f"Use @protected instead."
             )
         sig, annotated_primitive = _precompute_signature_cache(func)
+        if replay:
+            _arm_replay(
+                name,
+                func,
+                sig,
+                annotated_primitive,
+                retry=retry,
+                circuit_breaker=circuit_breaker,
+                timeout=timeout,
+                idempotency_key=idempotency_key,
+                idempotency_fail_open=idempotency_fail_open,
+                idempotency_ttl=idempotency_ttl,
+                idempotency_execution_ttl=idempotency_execution_ttl,
+            )
 
         @functools.wraps(func)
         async def wrapper(*args: Any, **kwargs: Any) -> T:
@@ -1778,7 +1873,7 @@ def aprotected(
                 name=name,
                 fn=bound,
                 fallback=fallback,
-                dlq=dlq,
+                dlq=dlq_flag,
                 retry=retry,
                 circuit_breaker=circuit_breaker,
                 timeout=timeout,

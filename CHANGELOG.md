@@ -48,6 +48,13 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A keyed sync call `timeout=` cut off holds its key while that work runs, then follows its end.
 - A keyed async call whose `timeout=` fired releases its key at once, with or without a fallback.
 - A keyed call that raised keeps its key while work a nested timeout cut off still runs.
+- OpenAI, Anthropic and google-genai SDK errors are classified by status, not by message words.
+- A 529 or 503 from those SDKs installs the shared wait; an exhausted quota no longer does.
+- `retry-after-ms` and Gemini's `retryDelay` set the shared wait.
+- A provider's 400, 404 or 422 is not retried, not counted by the breaker, not sent to the fallback.
+- A provider's exhausted quota, 401 or 403 is not retried.
+- A recovery pass bounds each replay by its deadline; a replay the deadline cut stays pending.
+- A failure the DLQ sink parked is not parked a second time by the Celery signal hook.
 
 ### Added
 
@@ -56,6 +63,12 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `Bulkhead.try_acquire_async()` / `acquire_async()`, and `BulkheadState.queue_size`.
 - `TrafficGate.should_allow_async()`, `release_acquired()`, and `check_admission_async()`.
 - Idempotency claims carry a `claim_id`; `mark_completed()` / `mark_failed()` accept `claim_id=`.
+- `baldur.llm.wrap(client, fallbacks=[...])`: an LLM client whose calls wait, retry and move on.
+- `@protected(..., replay=True)`: a parked job re-runs from its arguments when its breaker closes.
+- `LLMUnavailableError`, raised by a wrapped LLM client when no endpoint answered.
+- `ReplayHandler.auto_replay_failure_types`: a handler's failure types replayed on recovery.
+- `BALDUR_DLQ_REPLAY_REQUEST_DATA_MAX_BYTES` (256 KiB): stored arguments of a replayable job.
+- `python -m baldur.scripts.demo_llm_outage`: a rate limit and an outage against the openai SDK.
 
 ### Removed
 

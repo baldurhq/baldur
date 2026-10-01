@@ -55,6 +55,9 @@ class TestPublicApiContract:
           re-export — a leaf raised on a fail-closed cache error by the
           ``protect(idempotency_key=)`` / ``@idempotent`` top-level surfaces
           (508 D6 rule, sibling of ``IdempotencyDuplicateError``).
+        - 32 → 33: 806 D4 added ``LLMUnavailableError`` — the leaf a
+          ``baldur.llm.wrap`` client raises when no endpoint answered, which a
+          ``@protected`` job sees and parks (508 D6 rule).
         """
         import baldur
 
@@ -96,6 +99,7 @@ class TestPublicApiContract:
             "IdempotencyUnavailableError",
             "DomainValidationError",
             "ConfigurationError",
+            "LLMUnavailableError",
         }
         assert set(baldur.__all__) == expected
         assert len(baldur.__all__) == len(expected)

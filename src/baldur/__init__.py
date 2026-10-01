@@ -82,6 +82,9 @@ if TYPE_CHECKING:
         IdempotencyUnavailableError as IdempotencyUnavailableError,
     )
     from baldur.core.exceptions import (
+        LLMUnavailableError as LLMUnavailableError,
+    )
+    from baldur.core.exceptions import (
         RateLimitExceeded as RateLimitExceeded,
     )
     from baldur.core.exceptions import (
@@ -159,7 +162,14 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
         "DomainValidationError",
     ),
     "ConfigurationError": ("baldur.core.exceptions", "ConfigurationError"),
+    "LLMUnavailableError": ("baldur.core.exceptions", "LLMUnavailableError"),
 }
+
+# Subpackages reachable as ``baldur.<name>`` after a bare ``import baldur``,
+# loaded on first access like the names above. A subpackage is not a public
+# symbol, so it stays out of ``__all__``: ``baldur.llm.wrap(...)`` works without
+# ``from baldur import *`` pulling the package in.
+_LAZY_SUBPACKAGES: frozenset[str] = frozenset({"llm"})
 
 
 def __getattr__(name: str):
@@ -169,6 +179,8 @@ def __getattr__(name: str):
         value = getattr(module, attr_name)
         globals()[name] = value
         return value
+    if name in _LAZY_SUBPACKAGES:
+        return importlib.import_module(f"{__name__}.{name}")
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -214,4 +226,5 @@ __all__ = [
     "IdempotencyUnavailableError",
     "DomainValidationError",
     "ConfigurationError",
+    "LLMUnavailableError",
 ]

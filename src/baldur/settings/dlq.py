@@ -208,6 +208,20 @@ class DLQSettings(BaseSettings):
             "per-entry storage cost."
         ),
     )
+    replay_request_data_max_bytes: int = Field(
+        default=262_144,
+        ge=4096,
+        le=1_048_576,
+        description=(
+            "Maximum bytes for the request_data field of a failure whose name "
+            "Baldur can replay (a replay handler is registered for its domain, "
+            "e.g. @protected(..., replay=True)). The larger of this and "
+            "request_data_max_bytes applies: a replay re-runs the job from "
+            "these arguments, so a prompt or document cut short would be lost. "
+            "Over the cap the same truncation marker is stored, the entry is "
+            "refused at replay, and dlq.replay_payload_truncated is logged."
+        ),
+    )
     field_max_bytes: int = Field(
         default=4096,
         ge=256,

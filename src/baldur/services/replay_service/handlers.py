@@ -66,6 +66,17 @@ class ReplayHandler(ABC):
         """
         pass
 
+    @property
+    def auto_replay_failure_types(self) -> tuple[str, ...]:
+        """Failure types of this domain replayed automatically when its breaker closes.
+
+        The recovery sweep replays the listed types parked under this handler's
+        own domain, in addition to the types an operator maps for the service
+        and the calls an open breaker rejected. Empty by default: a handler opts
+        its domain's failures in explicitly.
+        """
+        return ()
+
 
 class DefaultReplayHandler(ReplayHandler):
     """

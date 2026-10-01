@@ -21,7 +21,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from baldur.core.exceptions import RateLimitDeferredError
+from baldur.core.exceptions import LLMUnavailableError, RateLimitDeferredError
+from baldur.services.retry_handler.provider_errors import (
+    ProviderErrorCategory,
+    classify_provider_error,
+)
 from baldur.utils.retry_after import parse_retry_after
 
 __all__ = [
@@ -51,6 +55,14 @@ RATE_LIMIT_INDICATORS: tuple[str, ...] = (
 # would let a 429 from one provider stall calls to an unrelated one. Lives here
 # because both the retry stage and the breaker stage gate on it.
 UNIDENTIFIED_COORDINATION_KEY = "default"
+
+# Provider answers that install the shared wait: a limit the provider will lift
+# and an overload it asks callers to back off from. Every other answer either
+# cannot be waited out (an exhausted quota, a bad key, a rejected request) or
+# is retried on the ladder without telling the fleet to wait (a transient).
+_WAIT_CATEGORIES = frozenset(
+    {ProviderErrorCategory.RATE_LIMITED, ProviderErrorCategory.OVERLOADED}
+)
 
 # Sentinel for "the object has no such attribute", kept distinct from a real
 # ``None`` attribute value so a response exposing ``status_code = None`` still
@@ -150,9 +162,17 @@ def response_retry_after(value: Any) -> float | None:
 
 
 def _detect_from_exception(exception: BaseException) -> tuple[bool, float | None]:
-    """Classify a raised outcome by its message and type name."""
-    if isinstance(exception, RateLimitDeferredError):
+    """Classify a raised outcome: the provider's verdict first, then its words."""
+    if isinstance(exception, (RateLimitDeferredError, LLMUnavailableError)):
         return False, None
+
+    # An LLM SDK's exception carries the provider's answer: its status says
+    # whether this is a limit to wait out, and its headers or body the wait.
+    # Read it instead of the message, which says neither for an overload.
+    verdict = classify_provider_error(exception)
+    if verdict is not None:
+        waits = verdict.category in _WAIT_CATEGORIES
+        return waits, verdict.retry_after if waits else None
 
     error_str = str(exception).lower()
     error_type = type(exception).__name__.lower()
@@ -186,7 +206,11 @@ def detect_rate_limit(subject: Any) -> tuple[bool, float | None]:
 
     Two subject shapes, one verdict:
 
-    - **An exception**: its message and type name are matched against the known
+    - **An exception**: one raised by the OpenAI, Anthropic or Google Gen AI SDK
+      is read by its status (a 429 the provider will lift, or a 529/503
+      overload, waits; an exhausted quota does not), with the wait taken from
+      ``retry-after-ms``, ``Retry-After`` or Gemini's body hint. Any other
+      exception's message and type name are matched against the known
       rate-limit indicators, and Retry-After is read from a ``retry_after``
       attribute or an attached ``response``'s headers.
     - **Any other value**: read as a response — its ``status_code`` (or
@@ -197,7 +221,11 @@ def detect_rate_limit(subject: Any) -> tuple[bool, float | None]:
     Baldur's own outbound-cooldown deferral is explicitly NOT a provider rate
     limit: it means the provider was never contacted, so it is no evidence of a
     429 and must not escalate a cooldown. The heuristic would otherwise match it
-    on its type name alone, whatever its message says.
+    on its type name alone, whatever its message says. Neither is the
+    ``LLMUnavailableError`` a wrapped client raises when no endpoint answered:
+    each endpoint's own answer was already classified under that endpoint's
+    name, and the summary naming them must not install a second wait under the
+    caller's.
 
     Args:
         subject: The exception raised by, or the value returned from, the call.

@@ -41,6 +41,17 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 
+def retry_exhausted_failure_type(error_type_name: str) -> str:
+    """The failure type a terminal failure is parked under: ``MAX_RETRIES_<TYPE>``.
+
+    One derivation for the label the sink writes and for any reader that must
+    find those entries again by type — a replay handler declaring which of its
+    domain's parked failures replay automatically derives it here, so the two
+    cannot drift apart.
+    """
+    return f"MAX_RETRIES_{error_type_name.upper()}"
+
+
 def _user_id_column_value(raw: Any) -> int | None:
     """The integer ``user_id`` column value for a context identifier, or None."""
     if raw is None:
@@ -295,6 +306,27 @@ class DLQSink:
             "response_data": extra.get("response_data", {}),
         }
 
+    @staticmethod
+    def _mark_capture_dispatched(error: Exception | None) -> None:
+        """Tell later capture layers this failure is already parked. Best effort.
+
+        The Celery signal hook skips an exception carrying the mark; without it,
+        a task whose ``@protected(dlq=True)`` call parked its failure would park
+        it a second time when the same exception leaves the task. An exception
+        that refuses attributes (slots, a frozen type) simply stays unmarked,
+        and one Celery rebuilds before its failure signal loses the mark — the
+        hook then stores it as it always did.
+        """
+        if error is None:
+            return
+        try:
+            error.dlq_capture_dispatched = True  # type: ignore[attr-defined]
+        except Exception:
+            logger.debug(
+                "dlq_sink.capture_mark_skipped",
+                error_type=type(error).__name__,
+            )
+
     def _store_to_dlq(
         self,
         error: Exception,
@@ -309,7 +341,7 @@ class DLQSink:
 
             result = store_to_dlq(
                 domain=domain,
-                failure_type=f"MAX_RETRIES_{error_type.upper()}",
+                failure_type=retry_exhausted_failure_type(error_type),
                 entity_id=ctx_fields["entity_id"],
                 user_id=ctx_fields["user_id"],
                 error_code=error_type,
@@ -327,6 +359,7 @@ class DLQSink:
                     "dlq_sink.created_dlq_entry",
                     result=result.dlq_id,
                 )
+                self._mark_capture_dispatched(error)
                 return str(result.dlq_id) if result.dlq_id is not None else None
             logger.error(
                 "dlq_sink.create_dlq_entry_failed",

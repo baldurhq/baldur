@@ -976,14 +976,19 @@ class TestNonRetryableExceptionsContract:
         nre = non_retryable_exceptions()
         assert isinstance(CircuitBreakerTransitionError(), nre)
 
-    def test_the_default_set_is_the_breaker_error_and_the_cooldown_deferral(self):
-        """Both mean "the dependency was not contacted; re-calling now cannot help".
+    def test_the_default_set_is_the_breaker_error_the_deferral_and_no_llm_endpoint(
+        self,
+    ):
+        """Each means "re-calling now cannot help".
 
         A cooldown deferral was retried like a transient failure before: a
         loop enclosing a ``rate_limit_aware`` client burned ``max_attempts``
         sleeping between attempts that could not succeed before ``not_before``.
+        ``LLMUnavailableError`` comes from a wrapped client that already ran
+        every endpoint's own retries; retrying it multiplies them.
         """
         from baldur.core.exceptions import (
+            LLMUnavailableError,
             RateLimitDeferredError,
             non_retryable_exceptions,
         )
@@ -991,6 +996,7 @@ class TestNonRetryableExceptionsContract:
         assert non_retryable_exceptions() == (
             CircuitBreakerError,
             RateLimitDeferredError,
+            LLMUnavailableError,
         )
 
     def test_a_cooldown_deferral_is_non_retryable_via_isinstance(self):

@@ -57,6 +57,20 @@ logger = structlog.get_logger()
 
 T = TypeVar("T")
 
+
+def _is_invalid_request(error: Exception | None) -> bool:
+    """Whether ``error`` is a provider's rejection of the request itself.
+
+    Lazy import: the fallback policy stays out of the ``baldur.services``
+    import-time graph.
+    """
+    if error is None:
+        return False
+    from baldur.services.retry_handler.provider_errors import is_invalid_request
+
+    return is_invalid_request(error)
+
+
 # Bounded so a per-call lambda fallback (the composer is NOT cached when a
 # fallback is set) cannot grow the cache without bound; module-level callables
 # — the common case — stay resident and pay the signature walk once process-wide.
@@ -199,8 +213,14 @@ class FallbackPolicy(ResiliencePolicy[T], Generic[T]):
 
     @staticmethod
     def _default_predicate(result: PolicyResult) -> bool:
-        """Default condition: activate the fallback on any non-SUCCESS outcome."""
-        return result.outcome != PolicyOutcome.SUCCESS
+        """Default condition: activate the fallback on any non-SUCCESS outcome.
+
+        Except a provider's rejection of the request itself: the substitute
+        would stand in for an answer the caller's own request made impossible.
+        """
+        return result.outcome != PolicyOutcome.SUCCESS and not _is_invalid_request(
+            result.error
+        )
 
     def execute(
         self,
@@ -509,8 +529,14 @@ class AsyncFallbackPolicy(Generic[T]):
 
     @staticmethod
     def _default_predicate(result: PolicyResult) -> bool:
-        """Default condition: activate the fallback on any non-SUCCESS outcome."""
-        return result.outcome != PolicyOutcome.SUCCESS
+        """Default condition: activate the fallback on any non-SUCCESS outcome.
+
+        Except a provider's rejection of the request itself: the substitute
+        would stand in for an answer the caller's own request made impossible.
+        """
+        return result.outcome != PolicyOutcome.SUCCESS and not _is_invalid_request(
+            result.error
+        )
 
     async def execute(
         self,

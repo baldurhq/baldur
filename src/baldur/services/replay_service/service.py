@@ -83,6 +83,13 @@ REASON_PASS_ERRORED = "pass_errored"
 REASON_PASS_MADE_NO_PROGRESS = "pass_made_no_progress"
 
 
+# One selection lane: ``(failure type, domain, capture source)``. Operator
+# lanes select by type alone; the open-circuit lane is scoped to the closing
+# service's domain and to policy-chain captures; a lane a replay handler
+# declares is scoped to its own domain only.
+_Lane = tuple[str, str | None, str | None]
+
+
 def _lane_key(failure_type: str, domain: str | None) -> str:
     """Stable key for one selection lane, safe to put on a broker message."""
     return f"{failure_type}|{domain or ''}"
@@ -1429,7 +1436,7 @@ class ReplayService(EventEmitterMixin):
         self,
         *,
         service_name: str,
-        ordered_lanes: list[tuple[str, str | None]],
+        ordered_lanes: list[_Lane],
         max_items: int,
         max_replays: int,
         lane_cursors: dict[str, str],
@@ -1461,7 +1468,7 @@ class ReplayService(EventEmitterMixin):
             extra=extra,
         )
 
-        filled_exactly: list[tuple[str, str | None]] = []
+        filled_exactly: list[_Lane] = []
         used = 0
         for i, lane in enumerate(ordered_lanes):
             if deadline is not None and time.monotonic() >= deadline:
@@ -1489,27 +1496,32 @@ class ReplayService(EventEmitterMixin):
     def _fill_one_lane(
         self,
         selection: _LaneSelection,
-        lane: tuple[str, str | None],
+        lane: _Lane,
         quota: int,
         max_replays: int,
     ) -> int:
-        """Take up to ``quota`` entries for one lane, recording where it stopped."""
-        failure_type, lane_domain = lane
+        """Take up to ``quota`` entries for one lane, recording where it stopped.
+
+        The lane carries its own source filter. The open-circuit lane needs one:
+        a domain+type match does not by itself prove the circuit that closed is
+        the circuit that rejected, because a request-boundary layer stores the
+        same failure type under a path-inferred domain while the dead
+        dependency was something else entirely — only a policy-chain capture
+        carries the rejecting breaker's own name as its domain. A lane a replay
+        handler declares needs none: among capture layers only the policy
+        chain's store writes its ``MAX_RETRIES_`` labels, and a long retry
+        history can push the ``source`` stamp out of size-capped metadata, so
+        filtering on it would skip exactly the entries that retried longest.
+        The restriction is part of the selection, so a quota filled with
+        entries this lane may not touch is not possible.
+        """
+        failure_type, lane_domain, lane_source = lane
         key = _lane_key(failure_type, lane_domain)
         page = self.repository.find_replayable_page(
             max_retries=max_replays,
             domain=lane_domain,
             failure_type=failure_type,
-            # A domain+type match does not by itself prove the circuit that
-            # closed is the circuit that rejected: a request-boundary layer
-            # stores the same failure type under a path-inferred domain while
-            # the dead dependency was something else entirely. Replaying those
-            # here would drive them straight back into it and spend their
-            # budget. Only a policy-chain capture carries the rejecting
-            # breaker's own name as its domain — and the restriction is part of
-            # the selection, so a quota filled with entries this lane may not
-            # touch is no longer possible.
-            source=POLICY_CHAIN_CAPTURE_SOURCE if lane_domain is not None else None,
+            source=lane_source,
             limit=quota,
             cursor=selection.cursors.get(key),
         )
@@ -1603,6 +1615,99 @@ class ReplayService(EventEmitterMixin):
             return None
         return domain
 
+    def _resolve_declared_replay_lanes(
+        self, service_name: str, mapped_failure_types: list[str]
+    ) -> list[_Lane]:
+        """Lanes for the failure types the service's own replay handler declares.
+
+        A handler that knows how to re-run its domain's work may name which of
+        that domain's parked failures replay automatically on recovery
+        (``ReplayHandler.auto_replay_failure_types``). Each declared type gets a
+        lane scoped to the domain, unless the operator already mapped the type
+        for this service — that lane covers it, and running both would fetch the
+        same entry twice in one sweep. An unaddressable name or a domain with no
+        registered handler declares nothing.
+        """
+        domain = resolve_stored_domain(service_name)
+        if domain == FALLBACK_DOMAIN or not has_replay_handler(domain):
+            return []
+        try:
+            declared = tuple(get_replay_handler(domain).auto_replay_failure_types)
+        except Exception as exc:
+            logger.warning(
+                "replay_service.declared_failure_types_unreadable",
+                healing_domain=domain,
+                error=str(exc),
+            )
+            return []
+        return [
+            (failure_type, domain, None)
+            for failure_type in dict.fromkeys(declared)
+            if isinstance(failure_type, str)
+            and failure_type not in mapped_failure_types
+            and failure_type != OPEN_CIRCUIT_FAILURE_TYPE
+        ]
+
+    def _stop_pass_at_deadline(
+        self,
+        batch_result: BatchReplayResult,
+        selection: _LaneSelection,
+        processed: int,
+        carried_cursors: dict[str, str] | None,
+        service_name: str,
+        *,
+        cut_dlq_id: str | None = None,
+    ) -> None:
+        """End a pass at its deadline with the unprocessed tail left selectable.
+
+        Selection completed before any replay did, and acquisition happens per
+        entry inside ``_execute_replay`` — so every entry from ``processed`` on
+        is still PENDING at a position BELOW the page cursor this pass would
+        otherwise carry forward. Each lane rolls back to its last processed
+        entry so the next pass re-selects the tail instead of stepping over it.
+        ``total`` follows the same correction: the completion event and the
+        daily report must not count entries the pass never touched.
+        """
+        batch_result.capped = True
+        batch_result.total = processed
+        batch_result.lane_cursors = self._roll_back_lane_cursors(
+            selection, processed, carried_cursors or {}
+        )
+        logger.info(
+            "replay_service.circuit_close_deadline_reached",
+            service_name=service_name,
+            processed=processed,
+            selected=len(selection.selected),
+            **({"cut_dlq_id": cut_dlq_id} if cut_dlq_id is not None else {}),
+        )
+
+    def _execute_replay_within(
+        self, dlq_id: str, deadline: float | None
+    ) -> ReplayResult:
+        """One conditional replay, bounded by the pass deadline when there is one.
+
+        The deadline is set as the request-scoped deadline around the replay,
+        which every retry stage inside it already reads: their cooldown waits
+        and later attempts stop at it, and a wrapped LLM client hands it to the
+        SDK as the call's timeout. Without it, one slow replay ran the whole
+        pass into the task's soft time limit, where it was killed before
+        queueing the rest of the backlog.
+        """
+        if deadline is None:
+            return self._execute_replay(
+                dlq_id,
+                replay_type="conditional",
+                trigger=ResolutionTrigger.AUTO_REPLAY_CIRCUIT_CLOSE,
+            )
+        from baldur.scaling.deadline_context import deadline_scope
+
+        with deadline_scope(max(0.0, deadline - time.monotonic()) * 1000.0):
+            return self._execute_replay(
+                dlq_id,
+                replay_type="conditional",
+                trigger=ResolutionTrigger.AUTO_REPLAY_CIRCUIT_CLOSE,
+            )
+
     def _replay_on_circuit_close_locked(  # noqa: C901, PLR0912
         self,
         service_name: str,
@@ -1640,8 +1745,13 @@ class ReplayService(EventEmitterMixin):
         auto_domain = self._resolve_open_circuit_replay_domain(
             service_name, failure_types
         )
+        # Same reasoning for the types the service's own replay handler
+        # declares: the handler is the opt-in, so no map entry is needed.
+        declared_lanes = self._resolve_declared_replay_lanes(
+            service_name, failure_types
+        )
 
-        if not failure_types and auto_domain is None:
+        if not failure_types and auto_domain is None and not declared_lanes:
             # Operator misconfig: `service_failure_type_map` has no entry for
             # this service. Surface through the same channels as governance
             # blocks (WARNING log + DLQ_REPLAY_BLOCKED event + metric + audit)
@@ -1717,11 +1827,15 @@ class ReplayService(EventEmitterMixin):
 
         max_replays = self.config["max_replay_attempts"]
         # One fill lane per selection. Operator-mapped types select by type
-        # alone (unchanged); the open-circuit lane additionally scopes to the
-        # closing service's own domain.
-        lanes: list[tuple[str, str | None]] = [(ft, None) for ft in failure_types]
+        # alone (unchanged); a handler-declared lane scopes to the closing
+        # service's own domain; the open-circuit lane additionally to
+        # policy-chain captures.
+        lanes: list[_Lane] = [(ft, None, None) for ft in failure_types]
+        lanes.extend(declared_lanes)
         if auto_domain is not None:
-            lanes.append((OPEN_CIRCUIT_FAILURE_TYPE, auto_domain))
+            lanes.append(
+                (OPEN_CIRCUIT_FAILURE_TYPE, auto_domain, POLICY_CHAIN_CAPTURE_SOURCE)
+            )
         # Lanes are filled into one list and replayed in that order, so a
         # deadline landing mid-list always cuts from the tail — and the
         # open-circuit lane is appended last. Rotating the starting index by
@@ -1752,31 +1866,31 @@ class ReplayService(EventEmitterMixin):
 
         for processed, (_lane_key, entry) in enumerate(selection.selected):
             if deadline is not None and time.monotonic() >= deadline:
-                # Selection completed before any replay did, and acquisition
-                # happens per entry inside _execute_replay — so everything from
-                # here on is still PENDING at a position BELOW the page cursor
-                # this pass would otherwise carry forward. Roll each lane back
-                # to its last processed entry so the next pass re-selects the
-                # tail instead of stepping over it. `total` follows the same
-                # correction: the completion event and the daily report must
-                # not count entries the pass never touched.
-                batch_result.capped = True
-                batch_result.total = processed
-                batch_result.lane_cursors = self._roll_back_lane_cursors(
-                    selection, processed, lane_cursors or {}
-                )
-                logger.info(
-                    "replay_service.circuit_close_deadline_reached",
-                    service_name=service_name,
-                    processed=processed,
-                    selected=len(entries),
+                self._stop_pass_at_deadline(
+                    batch_result, selection, processed, lane_cursors, service_name
                 )
                 break
-            result = self._execute_replay(
-                entry.id,
-                replay_type="conditional",
-                trigger=ResolutionTrigger.AUTO_REPLAY_CIRCUIT_CLOSE,
-            )
+            result = self._execute_replay_within(entry.id, deadline)
+            if (
+                deadline is not None
+                and not result.success
+                and time.monotonic() >= deadline
+            ):
+                # The deadline cut this replay. It goes back to the backlog, not
+                # to review: the entry is already PENDING again (below its
+                # replay cap — the attempt it used stays used, so a job longer
+                # than a whole pass still reaches review at the cap), and it
+                # is left unprocessed so the cursor rolls back to just before
+                # it and the continuation replays it first.
+                self._stop_pass_at_deadline(
+                    batch_result,
+                    selection,
+                    processed,
+                    lane_cursors,
+                    service_name,
+                    cut_dlq_id=entry.id,
+                )
+                break
             batch_result.results.append(result)
 
             if result.skipped:
