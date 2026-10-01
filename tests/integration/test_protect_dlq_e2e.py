@@ -13,6 +13,14 @@ Test Categories:
         - a failed call persists one entry under the protect name
         - a call the wall-clock bound cut off persists one entry
         - an async failed call persists one entry through the same outbox
+    C. Failure kinds the composer now completes:
+        - ``@dlq_protect`` with retry switched off persists one entry
+        - a tenacity retry stage persists one entry with its attempt count
+        - a retry sequence the bound cut off persists one entry under the
+          protect name, and no second once the abandoned worker finishes
+        - an enclosing DLQ site around an inner site whose breaker is open
+          persists the rejection once, through the outbox and through a
+          local fallback record
 
 Async dispatch (impl doc 486)
 -----------------------------
@@ -51,21 +59,42 @@ pytestmark = pytest.mark.requires_pro
 
 
 import asyncio
+import json
 import threading
 import time
 from collections.abc import Iterator
+from unittest.mock import patch
 
 import pytest
+import tenacity
 
+from baldur import protect_facade
 from baldur.adapters.memory import InMemoryFailedOperationRepository
+from baldur.adapters.memory.circuit_breaker import (
+    InMemoryCircuitBreakerStateRepository,
+)
+from baldur.audit.persistence.disk_buffer_adapter import DiskBufferAdapter
 from baldur.audit.ring_buffer import RingBuffer
+from baldur.bridges.tenacity.policy import TenacityBridgePolicy
 from baldur.core.exceptions import TimeoutPolicyError
+from baldur.decorators.dlq_protect import dlq_protect
+from baldur.models.dlq import OPEN_CIRCUIT_FAILURE_TYPE
 from baldur.protect_facade import protect, protected
+from baldur.resilience.policies.timeout import TimeoutPolicy
+from baldur.services.circuit_breaker.config import CircuitBreakerConfig
+from baldur.services.circuit_breaker.exceptions import CircuitBreakerOpenError
+from baldur.services.circuit_breaker.policy import CircuitBreakerPolicy
+from baldur.services.circuit_breaker.service import CircuitBreakerService
+from baldur.services.dlq_capture import DLQCaptureService
+from baldur.services.dlq_capture import service as dlq_capture_service
 from baldur.services.dlq_outbox import outbox as outbox_module
 from baldur.services.dlq_outbox.outbox import Outbox
 from baldur.services.dlq_outbox.worker import DLQOutboxWorker
 from baldur.services.retry_handler.models import RetryPolicyConfig
 from baldur.settings.backpressure import BackpressureStrategy
+from baldur.settings.dlq_outbox import reset_dlq_outbox_settings
+from baldur.settings.protect import reset_protect_settings
+from baldur.settings.retry import reset_retry_settings
 from baldur_pro.services.dlq import DLQService, reset_dlq_service
 
 
@@ -380,3 +409,272 @@ class TestProtectUnretriedDlqRepositoryE2E:
         assert len(pending) == 1
         assert pending[0].failure_type == "MAX_RETRIES_RUNTIMEERROR"
         assert pending[0].request_data == {"doc_id": "doc-7"}
+
+
+# =============================================================================
+# E2E — failure kinds that used to reach the caller unparked
+# =============================================================================
+
+
+class _RaisingRepository(InMemoryFailedOperationRepository):
+    """A repository whose writes fail, counting each attempt."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.create_calls = 0
+
+    def create(self, *args, **kwargs):  # type: ignore[override]
+        self.create_calls += 1
+        raise RuntimeError("database unavailable")
+
+
+def _install_breaker_opening_on_first_failure(name: str) -> None:
+    """An in-memory breaker for ``name`` that opens on its first failure,
+    placed in the facade's per-name cache (dropped by the protect reset)."""
+    cb_service = CircuitBreakerService(
+        config=CircuitBreakerConfig(
+            enabled=True,
+            failure_threshold=1,
+            minimum_calls=1,
+            failure_rate_threshold=0,
+            recovery_timeout=60,
+        ),
+        repository=InMemoryCircuitBreakerStateRepository(),
+    )
+    protect_facade._cb_policy_cache[name] = CircuitBreakerPolicy(
+        service_name=name, cb_service=cb_service, hooks=[]
+    )
+
+
+def _fail() -> str:
+    raise ConnectionError("upstream down")
+
+
+def _call_through_open_inner_site(inner: str, outer: str) -> None:
+    """Open ``inner``'s breaker without parking anything, then make the
+    nested call: an enclosing DLQ site around a ``dlq=True`` inner site."""
+    _install_breaker_opening_on_first_failure(inner)
+    with pytest.raises(ConnectionError):
+        protect(inner, _fail, dlq=False, timeout=None)
+
+    with pytest.raises(CircuitBreakerOpenError):
+        protect(
+            outer,
+            lambda: protect(inner, _fail, dlq=True, timeout=None),
+            retry=True,
+            dlq=True,
+            timeout=None,
+        )
+
+
+class TestProtectDlqCaptureWidenedE2E:
+    """The failure kinds the composer now completes reach the repository.
+
+    Validates:
+    - the verdict the composer completes — for a retry stage switched off, a
+      tenacity stage and a timeout that cut a retry sequence off — is the one
+      the sink reads, so the entry is persisted under the protect name
+    - the custody mark the inner site writes from the capture service's real
+      result keeps the enclosing site from writing a second copy, through the
+      outbox and through a local fallback record
+    """
+
+    def setup_method(self):
+        reset_protect_settings()
+
+    def teardown_method(self):
+        reset_protect_settings()
+        reset_retry_settings()
+        reset_dlq_outbox_settings()
+
+    def test_repository_receives_entry_from_dlq_protect_with_retry_switched_off(
+        self,
+        in_memory_dlq_repo: InMemoryFailedOperationRepository,
+        started_outbox: Outbox,
+        monkeypatch,
+    ):
+        """
+        Purpose:
+            Verify ``@dlq_protect`` under ``BALDUR_RETRY_ENABLED=false`` persists
+            its failure — the retry stage's single attempt states its verdict.
+        Expected:
+            - exactly one entry, under the decorator name
+            - failure_type MAX_RETRIES_CONNECTIONERROR; metadata max_attempts == 1
+        """
+        # The retry stage snapshots the switch when the composer is built, on
+        # the first call below. A protect reset here would also stop the
+        # outbox this test drains.
+        monkeypatch.setenv("BALDUR_RETRY_ENABLED", "false")
+        reset_retry_settings()
+
+        @dlq_protect("e2e_widened_retry_off", timeout=None)
+        def charge(order_id: str) -> str:
+            raise ConnectionError("upstream down")
+
+        with pytest.raises(ConnectionError):
+            charge("o-1")
+
+        _wait_for_repo_count(in_memory_dlq_repo, 1)
+
+        pending = in_memory_dlq_repo.get_pending_by_domain(
+            "e2e_widened_retry_off", limit=10
+        )
+        assert in_memory_dlq_repo.count_all() == 1
+        assert len(pending) == 1
+        assert pending[0].failure_type == "MAX_RETRIES_CONNECTIONERROR"
+        assert (pending[0].metadata or {}).get("max_attempts") == 1
+
+    def test_repository_receives_entry_from_a_tenacity_retry_stage(
+        self,
+        in_memory_dlq_repo: InMemoryFailedOperationRepository,
+        started_outbox: Outbox,
+    ):
+        """
+        Purpose:
+            Verify a ``TenacityBridgePolicy`` as ``retry=`` persists its
+            exhausted call — the bridge writes no verdict, the composer does.
+        Expected:
+            - exactly one entry, under the protect name
+            - metadata max_attempts == the bridge's attempt count
+        """
+        bridge = TenacityBridgePolicy(
+            stop=tenacity.stop_after_attempt(3), wait=tenacity.wait_none()
+        )
+
+        @protected(
+            "e2e_widened_tenacity",
+            dlq=True,
+            retry=bridge,
+            circuit_breaker=False,
+            timeout=None,
+        )
+        def charge(order_id: str) -> str:
+            raise ConnectionError("upstream down")
+
+        with pytest.raises(ConnectionError):
+            charge("o-1")
+
+        _wait_for_repo_count(in_memory_dlq_repo, 1)
+
+        pending = in_memory_dlq_repo.get_pending_by_domain(
+            "e2e_widened_tenacity", limit=10
+        )
+        assert in_memory_dlq_repo.count_all() == 1
+        assert len(pending) == 1
+        assert pending[0].failure_type == "MAX_RETRIES_CONNECTIONERROR"
+        assert (pending[0].metadata or {}).get("max_attempts") == 3
+
+    def test_repository_receives_entry_for_a_retry_sequence_cut_off_by_the_bound(
+        self,
+        in_memory_dlq_repo: InMemoryFailedOperationRepository,
+        started_outbox: Outbox,
+    ):
+        """
+        Purpose:
+            Verify a call ``timeout=`` cuts off while its retry stage runs is
+            persisted once, under the protect name — the retry config names no
+            domain, so its placeholder is not where the entry lands.
+        Expected:
+            - exactly one entry, under the protect name
+            - failure_type MAX_RETRIES_TIMEOUTPOLICYERROR
+            - no second entry once the abandoned worker has finished
+        """
+        release = threading.Event()
+
+        @protected(
+            "e2e_widened_cut_off",
+            dlq=True,
+            retry=RetryPolicyConfig(
+                max_attempts=2, backoff_base=0, backoff_max=0, jitter_percent=0
+            ),
+            circuit_breaker=False,
+            timeout=0.05,
+        )
+        def slow(order_id: str) -> str:
+            release.wait(timeout=5.0)
+            return "late"
+
+        try:
+            with pytest.raises(TimeoutPolicyError):
+                slow("o-1")
+        finally:
+            release.set()
+            TimeoutPolicy.shutdown_executor()
+
+        _wait_for_repo_count(in_memory_dlq_repo, 1)
+        _wait_for_repo_count(in_memory_dlq_repo, 2, timeout=0.3)
+
+        pending = in_memory_dlq_repo.get_pending_by_domain(
+            "e2e_widened_cut_off", limit=10
+        )
+        assert in_memory_dlq_repo.count_all() == 1
+        assert len(pending) == 1
+        assert pending[0].failure_type == "MAX_RETRIES_TIMEOUTPOLICYERROR"
+
+    def test_nested_rejection_is_persisted_once_through_the_outbox(
+        self,
+        in_memory_dlq_repo: InMemoryFailedOperationRepository,
+        started_outbox: Outbox,
+    ):
+        """
+        Purpose:
+            Verify an enclosing DLQ site around an inner ``dlq=True`` site whose
+            breaker is open persists the rejection once: the outbox acks with
+            no entry id, and the inner site still marks the rejection.
+        Expected:
+            - exactly one entry, under the inner site's name
+            - failure_type CIRCUIT_BREAKER_OPEN
+        """
+        _call_through_open_inner_site("e2e_nested_inner", "e2e_nested_outer")
+
+        _wait_for_repo_count(in_memory_dlq_repo, 1)
+        _wait_for_repo_count(in_memory_dlq_repo, 2, timeout=0.3)
+
+        pending = in_memory_dlq_repo.get_pending_by_domain("e2e_nested_inner", limit=10)
+        assert in_memory_dlq_repo.count_all() == 1
+        assert len(pending) == 1
+        assert pending[0].failure_type == OPEN_CIRCUIT_FAILURE_TYPE
+
+    def test_nested_rejection_held_in_a_local_fallback_record_is_not_stored_again(
+        self, monkeypatch, tmp_path
+    ):
+        """
+        Purpose:
+            Verify a rejection whose store failed into a local fallback record
+            is in custody: with the outbox off the capture service writes on
+            the calling thread, its repository raises, the JSONL fallback holds
+            the entry, and the enclosing site does not try again.
+        Expected:
+            - the repository write is attempted once
+            - one fallback record, the inner site's open-circuit entry
+        """
+        monkeypatch.setenv("BALDUR_DLQ_OUTBOX_ENABLED", "false")
+        reset_dlq_outbox_settings()
+        repository = _RaisingRepository()
+        fallback_path = tmp_path / "dlq_fallback.jsonl"
+
+        # The backing seam pins the capture service whichever tier the
+        # registry would resolve; the LMDB tier is reported missing so the
+        # fallback lands in a JSONL file this test owns.
+        with (
+            patch(
+                "baldur.services.dlq_capture.resolve_dlq_backing",
+                autospec=True,
+                return_value=DLQCaptureService(repository=repository),
+            ),
+            patch.object(dlq_capture_service, "DLQ_FALLBACK_PATH", fallback_path),
+            patch.object(
+                DiskBufferAdapter,
+                "get_instance",
+                autospec=True,
+                side_effect=ImportError("disk buffer tier not installed"),
+            ),
+        ):
+            _call_through_open_inner_site("e2e_fallback_inner", "e2e_fallback_outer")
+
+        assert repository.create_calls == 1
+        records = fallback_path.read_text(encoding="utf-8").splitlines()
+        assert len(records) == 1
+        entry = json.loads(records[0])["entry_data"]
+        assert entry["domain"] == "e2e_fallback_inner"
+        assert entry["failure_type"] == OPEN_CIRCUIT_FAILURE_TYPE

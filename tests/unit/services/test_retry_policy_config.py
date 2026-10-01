@@ -3,19 +3,31 @@ Unit tests for the RetryPolicyConfig settings class and RetryResult conversion.
 
 Target: services/retry_handler/models.py
 - RetryPolicyConfig: pure retry-only settings (externally dependent fields removed)
+- RetryPolicyConfig.from_settings: the total attempt count read off an
+  unvalidated settings mapping (a domain overlay, the runtime store)
+- failed_attempt_entry(): the one retry-history entry shape
 - RetryResult.to_policy_result(): conversion to the unified PolicyResult type
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
+
+import pytest
+from structlog.testing import capture_logs
 
 from baldur.interfaces.resilience_policy import PolicyOutcome
 from baldur.services.retry_handler.models import (
+    ATTEMPT_ERROR_MESSAGE_LIMIT,
+    PLACEHOLDER_DOMAIN,
     RetryAction,
     RetryPolicyConfig,
     RetryResult,
+    failed_attempt_entry,
 )
 
 # =============================================================================
@@ -90,6 +102,13 @@ class TestRetryPolicyConfigContract:
     def test_domain_default(self):
         """domain defaults to 'default'."""
         assert RetryPolicyConfig().domain == "default"
+
+    def test_the_domain_default_is_the_named_placeholder(self):
+        """The placeholder a DLQ-capturing composer files under the call site's
+        name is the value an unnamed config carries."""
+        assert PLACEHOLDER_DOMAIN == "default"
+        assert RetryPolicyConfig().domain == PLACEHOLDER_DOMAIN
+        assert RetryPolicyConfig.from_settings().domain == PLACEHOLDER_DOMAIN
 
     def test_enable_dlq_default(self):
         """enable_dlq defaults to True."""
@@ -278,6 +297,207 @@ class TestRetryPolicyConfigSourcingBehavior:
 
         assert cfg.rate_limit_aware is True
         assert cfg.rate_limit_key is None
+
+
+# =============================================================================
+# from_settings — the attempt count off an unvalidated mapping (contract)
+# =============================================================================
+
+#: Logged when a settings route carries a value the attempt count, or the
+#: overlay that holds it, cannot be resolved from.
+COERCION_FAILED_EVENT = "retry.domain_override_coercion_failed"
+
+#: ``RetrySettings.max_attempts`` in the settings tree both routes fall back to.
+SETTINGS_MAX_ATTEMPTS = 4
+
+#: An integer JSON can carry but no float can represent: ``float()`` raises
+#: OverflowError on it.
+UNREPRESENTABLE_INT = int("1" + "0" * 400)
+
+
+def _settings_tree(domain_configs: dict[str, Any]) -> SimpleNamespace:
+    """The settings tree both resolution branches read, as plain namespaces."""
+    return SimpleNamespace(
+        core=SimpleNamespace(
+            retry=SimpleNamespace(
+                max_attempts=SETTINGS_MAX_ATTEMPTS,
+                max_delay=60.0,
+                max_elapsed=None,
+                base_delay=1.0,
+                backoff_strategy="exponential",
+            ),
+            backoff=SimpleNamespace(
+                exponential_jitter_factor=0.2,
+                exponential_multiplier=2.0,
+                linear_increment=1.0,
+            ),
+        ),
+        services_group=SimpleNamespace(dlq=SimpleNamespace(enabled=True)),
+        domain_configs=domain_configs,
+    )
+
+
+@contextmanager
+def _resolution_branch(route: str, retry_values: Any) -> Iterator[None]:
+    """Force one resolution branch, carrying ``retry_values`` where it reads.
+
+    ``static``: the PRO-absent branch, with ``retry_values`` as the
+    ``payment`` domain's ``retry`` overlay. ``runtime``: the PRO runtime-store
+    branch, with ``retry_values`` as the store's retry family.
+    """
+    manager = None
+    domain_configs: dict[str, Any] = {}
+    if route == "runtime":
+        manager = SimpleNamespace(
+            get_retry_config=lambda: retry_values,
+            get_dlq_config=lambda: {"enabled": True},
+        )
+    else:
+        domain_configs = {"payment": {"retry": retry_values}}
+    with (
+        patch(
+            "baldur.factory.registry.ProviderRegistry.runtime_config_manager"
+        ) as manager_slot,
+        patch(
+            "baldur.services.retry_handler.models.get_config",
+            return_value=_settings_tree(domain_configs),
+        ),
+    ):
+        manager_slot.safe_get.return_value = manager
+        yield
+
+
+def _resolve_with_logs(route: str, retry_values: Any) -> tuple[RetryPolicyConfig, list]:
+    """Resolve the ``payment`` config on ``route`` and return it with its logs."""
+    with _resolution_branch(route, retry_values), capture_logs() as logs:
+        config = RetryPolicyConfig.from_settings("payment")
+    return config, logs
+
+
+def _coercion_warnings(logs: list) -> list:
+    return [e for e in logs if e.get("event") == COERCION_FAILED_EVENT]
+
+
+_ROUTES = pytest.mark.parametrize(
+    ("route", "expected_source"),
+    [("static", "static"), ("runtime", "runtime_config")],
+    ids=["domain_overlay", "runtime_store"],
+)
+
+
+class TestRetryMaxAttemptsCoercionContract:
+    """Both settings routes read ``max_attempts`` from a mapping no model
+    validates; a count below 1 would run the function zero times, so an
+    unusable value falls back to the settings count with a WARNING.
+
+    Each case also asserts the branch that resolved it: the runtime branch
+    swallows its own errors into the static one, which carries the same
+    fallback, so the value alone cannot tell the two routes apart.
+    """
+
+    @pytest.mark.parametrize(
+        "bad_value",
+        [0, -1, "0", None, 2.5, True, "many", UNREPRESENTABLE_INT],
+        ids=[
+            "zero",
+            "negative",
+            "zero_string",
+            "none",
+            "fractional",
+            "bool",
+            "non_numeric_string",
+            "unrepresentable_int",
+        ],
+    )
+    @_ROUTES
+    def test_an_unusable_count_falls_back_to_the_settings_value_with_a_warning(
+        self, route, expected_source, bad_value
+    ):
+        config, logs = _resolve_with_logs(route, {"max_attempts": bad_value})
+
+        assert config.config_source == expected_source
+        assert config.max_attempts == 4
+        warnings = _coercion_warnings(logs)
+        assert len(warnings) == 1
+        assert warnings[0]["log_level"] == "warning"
+        assert warnings[0]["domain"] == "payment"
+        assert warnings[0]["key"] == "max_attempts"
+        assert warnings[0]["value"] == repr(bad_value)
+        assert warnings[0]["fallback"] == 4
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [(1, 1), ("3", 3), (3.0, 3)],
+        ids=["boundary_one", "numeric_string", "integral_float"],
+    )
+    @_ROUTES
+    def test_an_integral_count_of_at_least_one_is_accepted_silently(
+        self, route, expected_source, value, expected
+    ):
+        config, logs = _resolve_with_logs(route, {"max_attempts": value})
+
+        assert config.config_source == expected_source
+        assert config.max_attempts == expected
+        assert _coercion_warnings(logs) == []
+
+    @_ROUTES
+    def test_an_absent_count_takes_the_settings_value_silently(
+        self, route, expected_source
+    ):
+        config, logs = _resolve_with_logs(route, {})
+
+        assert config.config_source == expected_source
+        assert config.max_attempts == 4
+        assert _coercion_warnings(logs) == []
+
+    @pytest.mark.parametrize("overlay", [None, [], "x"], ids=["none", "list", "string"])
+    def test_a_non_mapping_retry_overlay_is_treated_as_empty_with_a_warning(
+        self, overlay
+    ):
+        """A domain entry validates as a mapping, its families do not: read as
+        one, ``{"payment": {"retry": None}}`` raised out of every ``retry=True``
+        call for that name."""
+        config, logs = _resolve_with_logs("static", overlay)
+
+        assert config.config_source == "static"
+        assert config.max_attempts == 4
+        assert config.rate_limit_aware is True
+        warnings = _coercion_warnings(logs)
+        assert len(warnings) == 1
+        assert warnings[0]["log_level"] == "warning"
+        assert warnings[0]["domain"] == "payment"
+        assert warnings[0]["key"] == "retry"
+        assert warnings[0]["fallback"] == {}
+
+
+# =============================================================================
+# failed_attempt_entry — contract
+# =============================================================================
+
+
+class TestFailedAttemptEntryContract:
+    """The retry-history entry every retry exit records for an attempt that
+    raised — a stored DLQ entry carries it as is."""
+
+    def test_entry_names_the_attempt_and_its_error(self):
+        assert failed_attempt_entry(2, ValueError("card declined")) == {
+            "attempt": 2,
+            "error_type": "ValueError",
+            "error_message": "card declined",
+        }
+
+    def test_message_limit_is_five_hundred_characters(self):
+        assert ATTEMPT_ERROR_MESSAGE_LIMIT == 500
+
+    @pytest.mark.parametrize(
+        ("length", "kept"),
+        [(499, 499), (500, 500), (501, 500)],
+        ids=["below_limit", "at_limit", "above_limit"],
+    )
+    def test_message_is_cut_at_the_limit(self, length, kept):
+        entry = failed_attempt_entry(1, RuntimeError("x" * length))
+
+        assert entry["error_message"] == "x" * kept
 
 
 # =============================================================================

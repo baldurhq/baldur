@@ -35,6 +35,7 @@ from baldur.resilience.policies.composer import (
     _arm_failure_verdict,
     _classify_exception_outcome,
     _FallbackApplied,
+    _is_failed_call,
     _is_open_circuit_rejection,
     _SyncSinkToAsyncAdapter,
     _terminal_reaches_sinks,
@@ -1573,8 +1574,9 @@ class _AsyncCircuitOpenPolicy(_CircuitOpenPolicy):
 class _BulkheadFullPolicy:
     """Policy that rejects on a full bulkhead.
 
-    A REJECTED terminal that is deliberately NOT captured — which of the other
-    rejection shapes represent parkable work is a separate decision.
+    Mirrors the real bulkhead's reject shape: a REJECTED ``PolicyResult``
+    carrying a ``BulkheadFullError`` — a call that failed for want of capacity,
+    which open-circuit arming leaves alone and failure arming parks.
     """
 
     @property
@@ -1755,21 +1757,59 @@ class TestSinkTerminalRoutingBehavior:
 
         assert _is_open_circuit_rejection(result) is expected
 
+    @pytest.mark.parametrize(
+        ("outcome", "error", "expected"),
+        [
+            (PolicyOutcome.FAILURE, RuntimeError("boom"), True),
+            (PolicyOutcome.TIMEOUT, TimeoutPolicyError(5.0), True),
+            (PolicyOutcome.REJECTED, BulkheadFullError("payment_api", 2, 2), True),
+            # A stage that ended without an error object: the composer
+            # synthesizes this rejection, and the call still failed.
+            (PolicyOutcome.REJECTED, PolicyRejectedException("synthesized"), True),
+            # The open circuit has its own lane; a guard veto carries no error.
+            (PolicyOutcome.REJECTED, CircuitBreakerOpenError("payment_api"), False),
+            (PolicyOutcome.REJECTED, None, False),
+            (PolicyOutcome.SUCCESS, None, False),
+            (PolicyOutcome.SUCCESS_WITH_FALLBACK, None, False),
+        ],
+        ids=[
+            "failure",
+            "timeout",
+            "bulkhead_full",
+            "synthesized_rejection",
+            "open_circuit",
+            "guard_veto",
+            "success",
+            "served_fallback",
+        ],
+    )
+    def test_failed_call_predicate_takes_every_error_carrying_terminal_but_the_open_circuit(
+        self, outcome, error, expected
+    ):
+        """The one predicate routing and fill-in share, so they cannot disagree
+        on which terminals are failed calls."""
+        result = PolicyResult(value=None, outcome=outcome, error=error)
+
+        assert _is_failed_call(result) is expected
+
 
 class TestArmFailureVerdictContract:
     """``_arm_failure_verdict`` writes the retry stage's exhaustion verdict,
-    sized for the attempts the call made — the spec values are the entry's
-    shape."""
+    sized for the attempts the call made, and files a verdict that names only
+    the placeholder domain under the call-site name — the spec values are the
+    entry's shape."""
 
     @pytest.mark.parametrize(
         ("outcome", "error"),
         [
             (PolicyOutcome.FAILURE, RuntimeError("upstream 500")),
             (PolicyOutcome.TIMEOUT, TimeoutPolicyError(5.0)),
+            (PolicyOutcome.REJECTED, BulkheadFullError("payment_api", 2, 2)),
+            (PolicyOutcome.REJECTED, PolicyRejectedException("synthesized")),
         ],
-        ids=["failure", "timeout"],
+        ids=["failure", "timeout", "bulkhead_full", "synthesized_rejection"],
     )
-    def test_unmarked_final_failure_gains_the_single_attempt_verdict(
+    def test_unmarked_failed_call_gains_the_single_attempt_verdict(
         self, outcome, error
     ):
         result = PolicyResult(value=None, outcome=outcome, error=error)
@@ -1782,6 +1822,69 @@ class TestArmFailureVerdictContract:
             "max_attempts": 1,
             "retry_history": [],
             "reason": "max_attempts",
+        }
+
+    @pytest.mark.parametrize(
+        ("total_attempts", "expected"),
+        [(0, 1), (1, 1), (3, 3)],
+        ids=["no_attempt_reported", "one_attempt", "bridge_count"],
+    )
+    def test_written_verdict_counts_the_attempts_the_call_made(
+        self, total_attempts, expected
+    ):
+        """A caller-supplied retry stage writes no verdict; the one written for
+        it carries that stage's own attempt count, never fewer than one."""
+        result = PolicyResult(
+            value=None,
+            outcome=PolicyOutcome.FAILURE,
+            error=RuntimeError("upstream 500"),
+            total_attempts=total_attempts,
+        )
+
+        _arm_failure_verdict(result, "summarize")
+
+        assert result.metadata["max_attempts"] == expected
+
+    @pytest.mark.parametrize(
+        "stage_domain",
+        [{"domain": "default"}, {}, {"domain": None}],
+        ids=["placeholder", "missing", "none"],
+    )
+    def test_placeholder_domain_stage_verdict_is_filed_under_the_call_site_name(
+        self, stage_domain
+    ):
+        """Only the domain is completed; the stage's decision and counts stay."""
+        result = PolicyResult(
+            value=None,
+            outcome=PolicyOutcome.FAILURE,
+            error=RuntimeError("boom"),
+            metadata={"should_dlq": True, "max_attempts": 3, **stage_domain},
+        )
+
+        _arm_failure_verdict(result, "summarize")
+
+        assert result.metadata == {
+            "should_dlq": True,
+            "max_attempts": 3,
+            "domain": "summarize",
+        }
+
+    def test_placeholder_domain_declined_verdict_keeps_its_decision(self):
+        """A stage's "do not store" survives the domain completion, so the
+        sink still records it as declined under the name an operator queries."""
+        result = PolicyResult(
+            value=None,
+            outcome=PolicyOutcome.FAILURE,
+            error=RuntimeError("boom"),
+            metadata={"should_dlq": False, "domain": "default", "max_attempts": 2},
+        )
+
+        _arm_failure_verdict(result, "summarize")
+
+        assert result.metadata == {
+            "should_dlq": False,
+            "domain": "summarize",
+            "max_attempts": 2,
         }
 
     def test_arming_keeps_the_keys_a_stage_already_merged(self):
@@ -2053,7 +2156,7 @@ class TestAsyncComposerRejectionCaptureBehavior:
 
 
 # =============================================================================
-# Behavior — unretried-failure capture: the composer writes the store verdict
+# Behavior — failure capture: the composer completes the store verdict
 # =============================================================================
 
 
@@ -2112,9 +2215,48 @@ class _AsyncVerdictStage(_VerdictStage):
             )
 
 
-class TestComposerUnretriedCaptureBehavior:
-    """``PolicyComposer.execute`` marks an unretried final failure for storage
-    under the armed domain and delivers it — the TIMEOUT terminal included."""
+class _AsyncBulkheadFullPolicy(_BulkheadFullPolicy):
+    """Async twin of ``_BulkheadFullPolicy``."""
+
+    async def execute(  # type: ignore[override]
+        self,
+        func: Callable[..., Any],
+        *args: Any,
+        context: PolicyContext | None = None,
+        **kwargs: Any,
+    ) -> PolicyResult:
+        return PolicyResult(
+            value=None,
+            outcome=PolicyOutcome.REJECTED,
+            error=BulkheadFullError("payment_api", max_concurrent=2, active_count=2),
+        )
+
+
+class _ErrorlessFailureStage:
+    """A caller-supplied stage that ends in FAILURE without an error object
+    after several attempts — the composer synthesizes the rejection the
+    caller receives."""
+
+    @property
+    def name(self) -> str:
+        return "custom_retry"
+
+    def execute(
+        self,
+        func: Callable[..., Any],
+        *args: Any,
+        context: PolicyContext | None = None,
+        **kwargs: Any,
+    ) -> PolicyResult:
+        return PolicyResult(
+            value=None, outcome=PolicyOutcome.FAILURE, error=None, total_attempts=3
+        )
+
+
+class TestComposerFailureCaptureBehavior:
+    """``PolicyComposer.execute`` completes the verdict on every failed call
+    under the armed name and delivers it — the TIMEOUT and error-carrying
+    rejection terminals included."""
 
     def test_armed_composer_delivers_failure_marked_for_its_domain(self, composer):
         # Given an armed composer with no stage — the empty-chain terminal
@@ -2146,6 +2288,84 @@ class TestComposerUnretriedCaptureBehavior:
         assert sink.calls[0][2].metadata["should_dlq"] is True
         assert sink.calls[0][2].metadata["domain"] == "summarize"
 
+    def test_armed_composer_delivers_bulkhead_full_rejection_once_with_the_verdict(
+        self, composer
+    ):
+        sink = MockSink()
+        composer.add(_BulkheadFullPolicy()).add_sink(sink)
+        composer.capture_open_circuit_rejections()
+        composer.capture_failures("inventory")
+
+        result = composer.execute(lambda: "never runs")
+
+        assert result.outcome == PolicyOutcome.REJECTED
+        assert len(sink.calls) == 1
+        assert isinstance(sink.calls[0][0], BulkheadFullError)
+        assert sink.calls[0][2].metadata["should_dlq"] is True
+        assert sink.calls[0][2].metadata["domain"] == "inventory"
+        assert sink.calls[0][2].metadata["max_attempts"] == 1
+
+    def test_retry_stage_that_gave_up_on_a_full_bulkhead_is_parked_under_the_name(
+        self, composer
+    ):
+        """The ``ha_pipeline`` shape: a full bulkhead inside a retry stage. The
+        stage exhausts on the retryable refusal and writes its verdict under
+        the placeholder domain; the composer files it under the armed name."""
+        from baldur.services.retry_handler.models import RetryPolicyConfig
+        from baldur.services.retry_handler.policy import RetryPolicy
+
+        # Given a two-attempt retry stage around a bulkhead that is full
+        sink = MockSink()
+        composer.add(
+            RetryPolicy(
+                config=RetryPolicyConfig(max_attempts=2), sleeper=lambda _: None
+            )
+        )
+        composer.add(_BulkheadFullPolicy()).add_sink(sink)
+        composer.capture_failures("inventory")
+
+        # When the call is refused on both attempts
+        result = composer.execute(lambda: "never runs")
+
+        # Then one delivery carries the stage's verdict under the armed name
+        assert result.outcome == PolicyOutcome.REJECTED
+        assert len(sink.calls) == 1
+        delivered = sink.calls[0][2].metadata
+        assert delivered["should_dlq"] is True
+        assert delivered["domain"] == "inventory"
+        assert delivered["max_attempts"] == 2
+
+    def test_errorless_stage_failure_is_parked_as_a_synthesized_rejection(
+        self, composer
+    ):
+        """No error object comes back, so the caller receives a synthesized
+        rejection; the call still failed and is parked with the stage's count."""
+        sink = MockSink()
+        composer.add(_ErrorlessFailureStage()).add_sink(sink)
+        composer.capture_failures("summarize")
+
+        result = composer.execute(lambda: "never runs")
+
+        assert result.outcome == PolicyOutcome.REJECTED
+        assert isinstance(result.error, PolicyRejectedException)
+        assert len(sink.calls) == 1
+        assert sink.calls[0][2].metadata["domain"] == "summarize"
+        assert sink.calls[0][2].metadata["max_attempts"] == 3
+
+    def test_failure_armed_composer_leaves_guard_veto_undelivered(self, composer):
+        """A guard's refusal carries no error: the guard logs it, nothing parks."""
+        sink = MockSink()
+        composer.add_guard(MockGuard(allowed=False, reason="duplicate"))
+        composer.add(MockPolicy("wrapper")).add_sink(sink)
+        composer.capture_failures("summarize")
+
+        result = composer.execute(lambda: "ok")
+
+        assert result.outcome == PolicyOutcome.REJECTED
+        assert result.error is None
+        assert sink.calls == []
+        assert "should_dlq" not in result.metadata
+
     def test_unarmed_composer_delivers_failure_without_a_verdict(self, composer):
         """Negative half: without arming nothing writes the verdict, so the DLQ
         sink would drop this terminal."""
@@ -2157,6 +2377,19 @@ class TestComposerUnretriedCaptureBehavior:
         assert len(sink.calls) == 1
         assert "should_dlq" not in sink.calls[0][2].metadata
 
+    def test_unarmed_composer_leaves_bulkhead_full_rejection_undelivered(
+        self, composer
+    ):
+        """Negative half of the bulkhead case: only failure arming widens the
+        rejections that reach a sink."""
+        sink = MockSink()
+        composer.add(_BulkheadFullPolicy()).add_sink(sink)
+
+        result = composer.execute(lambda: "never runs")
+
+        assert result.outcome == PolicyOutcome.REJECTED
+        assert sink.calls == []
+
     def test_armed_composer_keeps_a_stage_verdict_that_declines(self, composer):
         sink = MockSink()
         composer.add(_VerdictStage(should_dlq=False)).add_sink(sink)
@@ -2167,6 +2400,19 @@ class TestComposerUnretriedCaptureBehavior:
         delivered = sink.calls[0][2]
         assert delivered.metadata["should_dlq"] is False
         assert delivered.metadata["domain"] == "retry_domain"
+
+    def test_armed_composer_files_a_placeholder_domain_verdict_under_its_name(
+        self, composer
+    ):
+        sink = MockSink()
+        composer.add(_VerdictStage(should_dlq=True, domain="default")).add_sink(sink)
+        composer.capture_failures("summarize")
+
+        composer.execute(_throwing(RuntimeError("upstream 500")))
+
+        delivered = sink.calls[0][2]
+        assert delivered.metadata["should_dlq"] is True
+        assert delivered.metadata["domain"] == "summarize"
 
     def test_armed_composer_skips_served_fallback(self, composer):
         """A served fallback answered the caller, so nothing is marked or parked."""
@@ -2202,9 +2448,9 @@ class TestComposerUnretriedCaptureBehavior:
         assert composer.capture_failures("summarize") is composer
 
 
-class TestAsyncComposerUnretriedCaptureBehavior:
-    """``AsyncPolicyComposer`` marks and delivers the same terminals through its
-    normalized sink channel (sync/async parity)."""
+class TestAsyncComposerFailureCaptureBehavior:
+    """``AsyncPolicyComposer`` completes and delivers the same terminals
+    through its normalized sink channel (sync/async parity)."""
 
     def test_armed_async_composer_delivers_failure_marked_for_its_domain(
         self, async_composer
@@ -2237,6 +2483,42 @@ class TestAsyncComposerUnretriedCaptureBehavior:
         assert sink.calls[0][2].metadata["should_dlq"] is True
         assert sink.calls[0][2].metadata["domain"] == "asummarize"
 
+    def test_armed_async_composer_delivers_bulkhead_full_rejection_once(
+        self, async_composer
+    ):
+        async def _never_runs() -> str:
+            return "never runs"
+
+        sink = MockSink()
+        async_composer.add(_AsyncBulkheadFullPolicy()).add_sink(sink)
+        async_composer.capture_open_circuit_rejections()
+        async_composer.capture_failures("ainventory")
+
+        result = asyncio.run(async_composer.execute(_never_runs))
+
+        assert result.outcome == PolicyOutcome.REJECTED
+        assert len(sink.calls) == 1
+        assert isinstance(sink.calls[0][0], BulkheadFullError)
+        assert sink.calls[0][2].metadata["should_dlq"] is True
+        assert sink.calls[0][2].metadata["domain"] == "ainventory"
+
+    def test_failure_armed_async_composer_leaves_guard_veto_undelivered(
+        self, async_composer
+    ):
+        async def _ok() -> str:
+            return "ok"
+
+        sink = MockSink()
+        async_composer.add_guard(MockGuard(allowed=False, reason="duplicate"))
+        async_composer.add(MockAsyncPolicy("wrapper")).add_sink(sink)
+        async_composer.capture_failures("asummarize")
+
+        result = asyncio.run(async_composer.execute(_ok))
+
+        assert result.outcome == PolicyOutcome.REJECTED
+        assert sink.calls == []
+        assert "should_dlq" not in result.metadata
+
     def test_unarmed_async_composer_delivers_failure_without_a_verdict(
         self, async_composer
     ):
@@ -2266,6 +2548,22 @@ class TestAsyncComposerUnretriedCaptureBehavior:
         delivered = sink.calls[0][2]
         assert delivered.metadata["should_dlq"] is False
         assert delivered.metadata["domain"] == "retry_domain"
+
+    def test_armed_async_composer_files_a_placeholder_domain_verdict_under_its_name(
+        self, async_composer
+    ):
+        async def _fails() -> str:
+            raise RuntimeError("upstream 500")
+
+        sink = MockSink()
+        async_composer.add(_AsyncVerdictStage(should_dlq=True, domain="default"))
+        async_composer.add_sink(sink).capture_failures("asummarize")
+
+        asyncio.run(async_composer.execute(_fails))
+
+        delivered = sink.calls[0][2]
+        assert delivered.metadata["should_dlq"] is True
+        assert delivered.metadata["domain"] == "asummarize"
 
     def test_armed_async_composer_skips_served_fallback(self, async_composer):
         from baldur.resilience.policies.fallback import AsyncFallbackPolicy

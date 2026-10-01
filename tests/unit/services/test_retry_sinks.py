@@ -3,26 +3,36 @@ Unit tests for DLQSink (Dead Letter Queue Sink).
 
 Target: services/retry_handler/sinks.py
 - DLQSink: DLQ store gated on the should_dlq flag, fail-open
+- the two lanes (verdict, open circuit) and the record every exit that stores
+  nothing leaves (``dlq_sink.capture_skipped`` reasons, the observe-only
+  would-store decision, the capture service's own refusals)
+- the open-circuit custody mark that keeps a nested site from parking one
+  rejection twice
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 from structlog.testing import capture_logs
 
+from baldur.adapters.memory import InMemoryFailedOperationRepository
 from baldur.core.exceptions import TimeoutPolicyError
 from baldur.interfaces.resilience_policy import (
     PolicyContext,
     PolicyOutcome,
     PolicyResult,
 )
-from baldur.models.dlq import DLQEntryResult
+from baldur.models.dlq import DLQConfig, DLQEntryResult
 from baldur.services.bulkhead.exceptions import BulkheadFullError
 from baldur.services.circuit_breaker.exceptions import CircuitBreakerOpenError
+from baldur.services.dlq_capture import DLQCaptureService, reset_overflow_state
 from baldur.services.retry_handler.sinks import DLQSink
+from baldur.settings.dlq import reset_dlq_settings
+from baldur.settings.dlq_outbox import reset_dlq_outbox_settings
 from tests.factories import dry_run_active
 
 # 518 batch (a): the sticky-flag baldur_pro resolver (``#485 D1b/G4``) and its
@@ -767,3 +777,289 @@ class TestDLQSinkOpenCircuitMarkerBehavior:
             DLQSink().handle_failure(error, None, _rejection_result())
 
         assert error.dlq_capture_dispatched is False
+
+    def test_local_fallback_record_marks_the_exception_as_taken_into_custody(self):
+        """The store's backend failed but a local fallback record holds the
+        entry: an enclosing site must not write a second copy."""
+        error = self._dispatch(
+            DLQEntryResult.fallback("backend down", "disk_persistent_buffer://dlq")
+        )
+
+        assert error.dlq_capture_dispatched is True
+        assert error.dlq_id is None
+
+    def test_raising_store_leaves_the_exception_unmarked(self):
+        """The store kept nothing, so the enclosing site tries again."""
+        error = CircuitBreakerOpenError("payment_api")
+        with (
+            patch(
+                "baldur.settings.dlq.get_dlq_settings",
+                return_value=_capture_settings(),
+            ),
+            patch(
+                "baldur.services.retry_handler.sinks.store_to_dlq",
+                autospec=True,
+                side_effect=RuntimeError("DLQ down"),
+            ),
+        ):
+            DLQSink().handle_failure(error, None, _rejection_result())
+
+        assert error.dlq_capture_dispatched is False
+
+    def test_rejection_already_in_custody_is_not_stored_again(self):
+        """The outer half of a nested ``dlq=True`` site: the rejection the
+        inner site parked propagates out marked, and is skipped."""
+        error = CircuitBreakerOpenError("payment_api")
+        error.mark_dlq_capture_dispatched("dlq-inner")
+        with (
+            patch(
+                "baldur.settings.dlq.get_dlq_settings",
+                return_value=_capture_settings(),
+            ),
+            patch(
+                "baldur.services.retry_handler.sinks.store_to_dlq", autospec=True
+            ) as mock_store,
+        ):
+            ret = DLQSink().handle_failure(error, None, _rejection_result())
+
+        assert ret is None
+        mock_store.assert_not_called()
+        assert error.dlq_id == "dlq-inner"
+
+
+# =============================================================================
+# DLQSink — every exit that stores nothing leaves a record
+# =============================================================================
+#
+# Four of these records sit below the default WARNING level by design, which
+# is why the DLQ guide names each rule's event and level: an operator reading
+# why a call was not parked knows which level to turn on. Tests whose name
+# carries "excluded" pin the record of a stated exclusion rule.
+
+SKIP_EVENT = "dlq_sink.capture_skipped"
+
+_STORE = "baldur.services.retry_handler.sinks.store_to_dlq"
+
+
+def _skip_records(logs: list) -> list:
+    return [e for e in logs if e.get("event") == SKIP_EVENT]
+
+
+def _verdict_terminal(error: Exception, **metadata) -> PolicyResult:
+    """A non-open-circuit terminal carrying ``metadata`` as its verdict."""
+    return PolicyResult(
+        outcome=PolicyOutcome.FAILURE,
+        error=error,
+        total_attempts=1,
+        metadata=metadata,
+    )
+
+
+class TestDLQSinkSkipRecordBehavior:
+    """An opt-out exit logs ``dlq_sink.capture_skipped`` at DEBUG with its
+    reason; observe-only logs the would-store decision. Every case also pins
+    that the store was never called."""
+
+    def test_verdictless_failure_is_skipped_as_no_verdict(self):
+        """A composer no call site armed — a caller's own ``compose()``."""
+        error = RuntimeError("upstream 500")
+        with patch(_STORE, autospec=True) as mock_store, capture_logs() as logs:
+            ret = DLQSink().handle_failure(
+                error, None, _verdict_terminal(error, domain="payment")
+            )
+
+        assert ret is None
+        mock_store.assert_not_called()
+        [record] = _skip_records(logs)
+        assert record["log_level"] == "debug"
+        assert record["reason"] == "no_verdict"
+        assert record["error_type"] == "RuntimeError"
+
+    def test_excluded_stage_declined_verdict_is_skipped_as_stage_declined(self):
+        """Rule: a retry stage the caller built with ``enable_dlq=False``."""
+        error = RuntimeError("upstream 500")
+        with patch(_STORE, autospec=True) as mock_store, capture_logs() as logs:
+            ret = DLQSink().handle_failure(
+                error,
+                None,
+                _verdict_terminal(error, should_dlq=False, domain="payment"),
+            )
+
+        assert ret is None
+        mock_store.assert_not_called()
+        [record] = _skip_records(logs)
+        assert record["log_level"] == "debug"
+        assert record["reason"] == "stage_declined"
+        assert record["domain"] == "payment"
+        assert record["error_type"] == "RuntimeError"
+
+    def test_excluded_open_circuit_capture_switched_off_is_skipped_with_its_reason(
+        self,
+    ):
+        """Rule: ``BALDUR_DLQ_OPEN_CIRCUIT_CAPTURE_ENABLED=false``."""
+        with (
+            patch(
+                "baldur.settings.dlq.get_dlq_settings",
+                return_value=_capture_settings(False),
+            ),
+            patch(_STORE, autospec=True) as mock_store,
+            capture_logs() as logs,
+        ):
+            ret = DLQSink().handle_failure(
+                CircuitBreakerOpenError("payment_api"), None, _rejection_result()
+            )
+
+        assert ret is None
+        mock_store.assert_not_called()
+        [record] = _skip_records(logs)
+        assert record["log_level"] == "debug"
+        assert record["reason"] == "open_circuit_capture_disabled"
+        assert record["healing_domain"] == "payment_api"
+
+    def test_unreadable_settings_are_skipped_as_settings_unreadable(self):
+        with (
+            patch(
+                "baldur.settings.dlq.get_dlq_settings",
+                side_effect=RuntimeError("settings backend down"),
+            ),
+            patch(_STORE, autospec=True) as mock_store,
+            capture_logs() as logs,
+        ):
+            ret = DLQSink().handle_failure(
+                CircuitBreakerOpenError("payment_api"), None, _rejection_result()
+            )
+
+        assert ret is None
+        mock_store.assert_not_called()
+        [record] = _skip_records(logs)
+        assert record["log_level"] == "debug"
+        assert record["reason"] == "settings_unreadable"
+        assert record["error"] == "settings backend down"
+
+    def test_rejection_an_inner_site_parked_is_skipped_as_already_captured(self):
+        """Not an exclusion: the call is parked, by the inner site."""
+        error = CircuitBreakerOpenError("payment_api")
+        error.mark_dlq_capture_dispatched("dlq-inner")
+        with patch(_STORE, autospec=True) as mock_store, capture_logs() as logs:
+            ret = DLQSink().handle_failure(error, None, _rejection_result())
+
+        assert ret is None
+        mock_store.assert_not_called()
+        [record] = _skip_records(logs)
+        assert record["log_level"] == "debug"
+        assert record["reason"] == "already_captured"
+        assert record["healing_domain"] == "payment_api"
+        assert record["result"] == "dlq-inner"
+
+    @pytest.mark.parametrize("lane", ["verdict", "open_circuit"])
+    def test_excluded_observe_only_call_logs_the_would_store_decision(self, lane):
+        """Rule: observe-only mode (dry-run, shadow, evaluation) — INFO, by
+        dry-run's design, not a skip record."""
+        if lane == "verdict":
+            error: Exception = RuntimeError("upstream 500")
+            terminal = _verdict_terminal(error, should_dlq=True, domain="payment")
+        else:
+            error = CircuitBreakerOpenError("payment")
+            terminal = _rejection_result("payment")
+        with (
+            patch(
+                "baldur.settings.dlq.get_dlq_settings",
+                return_value=_capture_settings(),
+            ),
+            patch(_STORE, autospec=True) as mock_store,
+            dry_run_active(),
+            capture_logs() as logs,
+        ):
+            ret = DLQSink().handle_failure(error, None, terminal)
+
+        assert ret is None
+        mock_store.assert_not_called()
+        suppressed = [
+            e
+            for e in logs
+            if e.get("event") == "execution_mode.intervention_suppressed"
+        ]
+        assert len(suppressed) == 1
+        assert suppressed[0]["log_level"] == "info"
+        assert suppressed[0]["action"] == "dlq_store"
+        assert suppressed[0]["service_name"] == "payment"
+        assert _skip_records(logs) == []
+
+
+class _DomainAtCapacityRepository(InMemoryFailedOperationRepository):
+    """An in-memory repository whose every domain reports a full queue, so
+    the overflow check refuses without seeding thousands of entries."""
+
+    def count_by_domain(self, domain: str) -> int:
+        return 10_000_000
+
+
+@pytest.fixture
+def sync_store_under_reject_overflow(monkeypatch) -> Iterator[None]:
+    """The ``reject`` overflow strategy, checked on every store, with the
+    outbox off so the store — and its refusal — runs on the calling thread."""
+    monkeypatch.setenv("BALDUR_DLQ_OVERFLOW_STRATEGY", "reject")
+    monkeypatch.setenv("BALDUR_DLQ_OVERFLOW_CHECK_INTERVAL", "1")
+    monkeypatch.setenv("BALDUR_DLQ_OUTBOX_ENABLED", "false")
+    reset_dlq_settings()
+    reset_dlq_outbox_settings()
+    reset_overflow_state()
+    yield
+    reset_dlq_settings()
+    reset_dlq_outbox_settings()
+    reset_overflow_state()
+
+
+class TestDLQSinkCaptureServiceExclusionBehavior:
+    """The capture service's own refusals reach the sink as a failed store;
+    the records come from the real service behind the backing seam."""
+
+    @staticmethod
+    def _park(service: DLQCaptureService) -> tuple[str | None, list]:
+        error = RuntimeError("upstream 500")
+        with (
+            patch(
+                "baldur.services.dlq_capture.resolve_dlq_backing",
+                autospec=True,
+                return_value=service,
+            ),
+            capture_logs() as logs,
+        ):
+            ret = DLQSink().handle_failure(
+                error,
+                None,
+                _verdict_terminal(error, should_dlq=True, domain="payment"),
+            )
+        return ret, logs
+
+    def test_excluded_dlq_switched_off_logs_store_skipped_and_entry_failed(self):
+        """Rule: ``BALDUR_DLQ_ENABLED=false`` — the service's DEBUG skip and
+        the sink's ERROR for the store it did not keep."""
+        repository = InMemoryFailedOperationRepository()
+        service = DLQCaptureService(
+            config=DLQConfig(enabled=False), repository=repository
+        )
+
+        ret, logs = self._park(service)
+
+        assert ret is None
+        assert repository.count_all() == 0
+        records = {(e["event"], e["log_level"]) for e in logs}
+        assert ("dlq.store_skipped_disabled", "debug") in records
+        assert ("dlq_sink.create_dlq_entry_failed", "error") in records
+
+    def test_excluded_queue_full_under_reject_logs_store_rejected_overflow(
+        self, sync_store_under_reject_overflow
+    ):
+        """Rule: the queue is full under the ``reject`` overflow strategy."""
+        repository = _DomainAtCapacityRepository()
+        service = DLQCaptureService(config=DLQConfig(), repository=repository)
+
+        ret, logs = self._park(service)
+
+        assert ret is None
+        assert repository.count_all() == 0
+        rejected = [e for e in logs if e.get("event") == "dlq.store_rejected_overflow"]
+        assert len(rejected) == 1
+        assert rejected[0]["log_level"] == "warning"
+        assert rejected[0]["domain"] == "payment"

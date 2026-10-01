@@ -16,8 +16,16 @@ Note:
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from unittest.mock import MagicMock, patch
+
 import pytest
 
+from baldur.adapters.memory.circuit_breaker import (
+    InMemoryCircuitBreakerStateRepository,
+)
+from baldur.interfaces.resilience_policy import PolicyOutcome
+from baldur.models.dlq import OPEN_CIRCUIT_FAILURE_TYPE, DLQEntryResult
 from baldur.resilience.policies.composer import PolicyComposer
 from baldur.resilience.policies.fallback import FallbackPolicy
 from baldur.resilience.policies.guards.error_budget import ErrorBudgetGuard
@@ -28,6 +36,11 @@ from baldur.resilience.policies.presets import (
     ha_pipeline,
     standard_pipeline,
 )
+from baldur.services.circuit_breaker.config import CircuitBreakerConfig
+from baldur.services.circuit_breaker.exceptions import CircuitBreakerOpenError
+from baldur.services.circuit_breaker.service import CircuitBreakerService
+from baldur.services.retry_handler.models import RetryPolicyConfig
+from baldur.services.retry_handler.policy import RetryPolicy
 
 # =============================================================================
 # Behavior — standard_pipeline
@@ -133,6 +146,104 @@ class TestStandardPipelineCBInclusionP0_2Behavior:
         )
         names = [p.name for p in pipeline._policies]
         assert names == ["fallback", "retry"]
+
+
+# =============================================================================
+# Behavior — standard_pipeline parks every failed call under service_name
+# =============================================================================
+
+_STORE = "baldur.services.retry_handler.sinks.store_to_dlq"
+
+
+@pytest.fixture
+def store() -> Iterator[MagicMock]:
+    """The DLQ store the preset's sink calls — the capture seam."""
+    with patch(
+        _STORE, autospec=True, return_value=DLQEntryResult.created("dlq-1")
+    ) as mock_store:
+        yield mock_store
+
+
+@pytest.fixture
+def shared_breaker_opening_on_first_failure() -> Iterator[CircuitBreakerService]:
+    """The process-shared breaker service the preset's own breaker records
+    on, swapped for an in-memory one that opens on a single failure."""
+    service = CircuitBreakerService(
+        config=CircuitBreakerConfig(
+            enabled=True,
+            failure_threshold=1,
+            minimum_calls=1,
+            failure_rate_threshold=0,
+            recovery_timeout=60,
+        ),
+        repository=InMemoryCircuitBreakerStateRepository(),
+    )
+    with patch(
+        "baldur.services.circuit_breaker.convenience.get_circuit_breaker_service",
+        return_value=service,
+    ):
+        yield service
+
+
+def _down() -> str:
+    raise ConnectionError("upstream down")
+
+
+def _parked(store: MagicMock) -> list[tuple[str, str]]:
+    return [
+        (c.kwargs["domain"], c.kwargs["failure_type"]) for c in store.call_args_list
+    ]
+
+
+class TestStandardPipelineDlqCaptureBehavior:
+    """The preset arms its composer under ``service_name``: a call its open
+    breaker refuses is parked as an open-circuit entry, and a failed call's
+    placeholder-domain verdict is filed under the service name."""
+
+    def test_open_breaker_refusal_is_parked_once_as_open_circuit_under_service_name(
+        self, store, shared_breaker_opening_on_first_failure
+    ):
+        # Given a single-attempt preset whose breaker opens on its first failure
+        pipeline = standard_pipeline("svc.preset_outage", max_retries=1)
+
+        # When one call fails and the next is refused by the open breaker
+        first = pipeline.execute(_down)
+        second = pipeline.execute(_down)
+
+        # Then each is parked once under the service name — the refusal as an
+        # open-circuit entry, never as a retry exhaustion of the breaker error
+        assert first.outcome == PolicyOutcome.FAILURE
+        assert second.outcome == PolicyOutcome.REJECTED
+        assert isinstance(second.error, CircuitBreakerOpenError)
+        assert _parked(store) == [
+            ("svc.preset_outage", "MAX_RETRIES_CONNECTIONERROR"),
+            ("svc.preset_outage", OPEN_CIRCUIT_FAILURE_TYPE),
+        ]
+
+    def test_failed_call_is_parked_under_service_name_not_the_placeholder(self, store):
+        """The preset's own retry config names the placeholder domain."""
+        pipeline = standard_pipeline("svc.preset_down", max_retries=1, cb_enabled=False)
+
+        pipeline.execute(_down)
+
+        assert _parked(store) == [("svc.preset_down", "MAX_RETRIES_CONNECTIONERROR")]
+        assert store.call_args.kwargs["domain"] != "default"
+
+    def test_caller_retry_stage_exhaustion_is_parked_under_service_name(self, store):
+        """A ``retry_policy`` built without a domain keeps its own attempt count;
+        only its placeholder domain is replaced."""
+        pipeline = standard_pipeline(
+            "svc.preset_retried",
+            cb_enabled=False,
+            retry_policy=RetryPolicy(
+                config=RetryPolicyConfig(max_attempts=2), sleeper=lambda _: None
+            ),
+        )
+
+        pipeline.execute(_down)
+
+        assert _parked(store) == [("svc.preset_retried", "MAX_RETRIES_CONNECTIONERROR")]
+        assert store.call_args.kwargs["metadata"]["max_attempts"] == 2
 
 
 # =============================================================================
@@ -589,7 +700,6 @@ class TestAdaptivePipelineBehavior:
 
     def test_enabled_hot_tier_returns_minimal(self):
         """adaptive_enabled=True + hot tier → returns minimal_pipeline."""
-        from unittest.mock import patch
 
         from baldur.resilience.policies.presets import adaptive_pipeline
         from baldur.settings.pipeline import PipelineSettings
@@ -611,7 +721,6 @@ class TestAdaptivePipelineBehavior:
 
     def test_enabled_non_hot_tier_returns_standard(self):
         """adaptive_enabled=True + non-hot tier → returns standard_pipeline."""
-        from unittest.mock import patch
 
         from baldur.resilience.policies.presets import adaptive_pipeline
         from baldur.settings.pipeline import PipelineSettings
@@ -632,7 +741,6 @@ class TestAdaptivePipelineBehavior:
 
     def test_enabled_no_tier_returns_standard(self):
         """adaptive_enabled=True + tier_id=None → returns standard_pipeline."""
-        from unittest.mock import patch
 
         from baldur.resilience.policies.presets import adaptive_pipeline
         from baldur.settings.pipeline import PipelineSettings
@@ -653,7 +761,6 @@ class TestAdaptivePipelineBehavior:
 
     def test_degradation_active_returns_minimal(self):
         """Returns minimal when GracefulDegradation disables full_guards."""
-        from unittest.mock import MagicMock, patch
 
         from baldur.resilience.policies.presets import adaptive_pipeline
         from baldur.settings.pipeline import PipelineSettings
@@ -684,7 +791,6 @@ class TestAdaptivePipelineBehavior:
 
     def test_audit_sampling_rate_propagated_to_minimal(self):
         """adaptive_pipeline's audit_sampling_rate is passed to minimal."""
-        from unittest.mock import patch
 
         from baldur.resilience.policies.hooks.sampled_audit import (
             SampledAuditHook,

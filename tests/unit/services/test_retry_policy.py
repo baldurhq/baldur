@@ -10,7 +10,11 @@ Target: services/retry_handler/policy.py
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import nullcontext
 from unittest.mock import MagicMock
+
+import pytest
 
 from baldur.adapters.rate_limit.memory_adapter import InMemoryRateLimitStorage
 from baldur.core.backoff import (
@@ -34,6 +38,8 @@ from baldur.services.retry_handler.policy import RetryPolicy
 from baldur.services.retry_handler.rate_limit_detection import (  # noqa: F401
     RATE_LIMIT_INDICATORS,
 )
+from baldur.settings.retry import reset_retry_settings
+from tests.factories import dry_run_active
 
 # =============================================================================
 # RetryPolicy — Contract
@@ -901,3 +907,142 @@ class TestRetryPolicyCoordinatorFailOpenBehavior:
         assert result.outcome == PolicyOutcome.SUCCESS
         assert result.value == "ok"
         assert result.error is None
+
+
+# =============================================================================
+# RetryPolicy — the single attempt states the stage's verdict (contract)
+# =============================================================================
+
+
+@pytest.fixture
+def retry_switched_off(monkeypatch) -> Iterator[None]:
+    """``BALDUR_RETRY_ENABLED=false`` for stages built inside the test; the
+    stage snapshots the switch at construction."""
+    monkeypatch.setenv("BALDUR_RETRY_ENABLED", "false")
+    reset_retry_settings()
+    yield
+    reset_retry_settings()
+
+
+class TestRetrySingleAttemptVerdictContract:
+    """Retry switched off and observe-only both run the call once; the FAILURE
+    states the store verdict the loop's exit states, sized for that attempt.
+
+    Without it a DLQ sink drops the failure (no verdict), and a stage built
+    with ``enable_dlq=False`` loses its "do not store" to the composer's
+    fill-in.
+    """
+
+    @pytest.mark.parametrize("enable_dlq", [True, False], ids=["stores", "declines"])
+    @pytest.mark.parametrize("path", ["retry_disabled", "observe_only"])
+    def test_single_attempt_failure_states_the_stage_verdict(
+        self, request, path, enable_dlq
+    ):
+        # Given a three-attempt stage on its single-attempt path
+        if path == "retry_disabled":
+            request.getfixturevalue("retry_switched_off")
+        calls: list[int] = []
+
+        def down() -> str:
+            calls.append(1)
+            raise ConnectionError("down")
+
+        policy = RetryPolicy(
+            config=RetryPolicyConfig(
+                max_attempts=3, domain="payment", enable_dlq=enable_dlq
+            ),
+            sleeper=lambda _: None,
+        )
+
+        # When the call fails
+        with dry_run_active() if path == "observe_only" else nullcontext():
+            result = policy.execute(down)
+
+        # Then it ran once and the result carries the stage's verdict
+        assert calls == [1]
+        assert result.outcome == PolicyOutcome.FAILURE
+        assert result.metadata == {
+            "max_attempts": 1,
+            "domain": "payment",
+            "should_dlq": enable_dlq,
+            "retry_history": [
+                {"attempt": 1, "error_type": "ConnectionError", "error_message": "down"}
+            ],
+            "reason": "max_attempts",
+        }
+
+    def test_single_attempt_success_carries_no_verdict(self, retry_switched_off):
+        policy = RetryPolicy(config=RetryPolicyConfig(max_attempts=3, domain="payment"))
+
+        result = policy.execute(lambda: "ok")
+
+        assert result.outcome == PolicyOutcome.SUCCESS
+        assert result.value == "ok"
+        assert result.metadata == {}
+
+
+# =============================================================================
+# RetryPolicy — a total attempt count below 1 from code (contract)
+# =============================================================================
+
+
+class TestRetryMaxAttemptsBelowOneContract:
+    """Every synchronous code route builds its stage through the constructor,
+    which refuses a count that would run the function zero times."""
+
+    @pytest.mark.parametrize("count", [0, -1], ids=["zero", "negative"])
+    def test_constructor_max_attempts_below_one_raises_naming_the_field(self, count):
+        with pytest.raises(
+            ValueError, match=rf"max_attempts must be >= 1, got {count}"
+        ):
+            RetryPolicy(config=RetryPolicyConfig(max_attempts=count))
+
+    def test_constructor_max_attempts_below_one_boundary_accepts_one(self):
+        calls: list[int] = []
+
+        def down() -> str:
+            calls.append(1)
+            raise ConnectionError("down")
+
+        result = RetryPolicy(config=RetryPolicyConfig(max_attempts=1)).execute(down)
+
+        assert calls == [1]
+        assert result.metadata["max_attempts"] == 1
+
+    def test_retry_decorator_max_attempts_below_one_raises_at_decoration(self):
+        """``@retry`` assigns the override to the config before building the
+        stage, so the constructor sees the assigned value."""
+        from baldur.resilience.policies.async_retry import retry
+
+        with pytest.raises(ValueError, match="max_attempts must be >= 1"):
+
+            @retry(domain="payment", max_attempts=0)
+            def charge() -> str:
+                return "never decorated"
+
+    def test_standard_pipeline_max_attempts_below_one_raises_at_build(self):
+        from baldur.resilience.policies.presets import standard_pipeline
+
+        with pytest.raises(ValueError, match="max_attempts must be >= 1"):
+            standard_pipeline("payment_api", max_retries=0)
+
+    def test_protect_config_max_attempts_below_one_raises_before_calling_fn(self):
+        from baldur.protect_facade import protect
+
+        calls: list[int] = []
+
+        def charge() -> str:
+            calls.append(1)
+            return "ok"
+
+        with pytest.raises(ValueError, match="max_attempts must be >= 1"):
+            protect(
+                "svc.zero_attempts",
+                charge,
+                retry=RetryPolicyConfig(max_attempts=0),
+                dlq=True,
+                circuit_breaker=False,
+                timeout=None,
+            )
+
+        assert calls == []

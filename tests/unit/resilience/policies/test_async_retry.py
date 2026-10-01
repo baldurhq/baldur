@@ -1,29 +1,31 @@
 """
-AsyncRetryPolicy / async_retry_policy 단위 테스트 (#333).
+Unit tests for AsyncRetryPolicy / async_retry_policy (#333).
 
-테스트 대상:
+Targets:
 - resilience/policies/async_retry.py (AsyncRetryPolicy, async_retry_policy)
 
 Note: the ``@retried_async`` decorator was removed in 670 (superseded by the
 unified ``@retry``). Its dual-dispatch replacement is covered by
 test_retry_decorator.py.
 
-UNIT_TEST_GUIDELINES.md 준수:
-- 계약 검증(Contract): 하드코딩 기대값 (name, __all__, 기본값)
-- 동작 검증(Behavior): 소스 참조 (PolicyOutcome, BackoffStrategy)
-- conftest.py 배치: 1개 파일 전용 fixture → 파일 내부 (§5.1)
-- Mock autospec: autospec=True 사용 (§6.2)
-- 시간 의존성: asyncio.sleep 모킹 (§6.3)
+UNIT_TEST_GUIDELINES.md compliance:
+- Contract verification: hardcoded expected values (name, __all__, defaults)
+- Behavior verification: source references (PolicyOutcome, BackoffStrategy)
+- conftest.py placement: single-file fixtures stay inside the file (§5.1)
+- Mock autospec: autospec=True (§6.2)
+- Time dependency: asyncio.sleep is mocked (§6.3)
 
-검증 기법:
-- §8.2 예외/엣지 케이스 — CancelledError, BaseException, non-retryable
-- §8.4 부수효과 — structlog 로깅 이벤트
-- §8.5 의존성 상호작용 — backoff.calculate, asyncio.sleep 호출 검증
+Techniques:
+- §8.2 exceptions/edge cases — CancelledError, BaseException, non-retryable
+- §8.4 side effects — structlog logging events
+- §8.5 dependency interaction — backoff.calculate, asyncio.sleep calls
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
+from contextlib import nullcontext
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -45,43 +47,46 @@ from baldur.resilience.policies.async_retry import (
     AsyncRetryPolicy,
     async_retry_policy,
 )
+from baldur.services.retry_handler.models import RetryPolicyConfig
+from baldur.settings.retry import reset_retry_settings
+from tests.factories import dry_run_active
 
 # =============================================================================
-# 계약 검증 — AsyncRetryPolicy 인터페이스 / 기본값
+# Contract — AsyncRetryPolicy interface / defaults
 # =============================================================================
 
 
 class TestAsyncRetryPolicyContract:
-    """AsyncRetryPolicy 고정 식별자 및 기본값 계약 검증."""
+    """AsyncRetryPolicy fixed identifiers and default-value contract."""
 
     def test_name_is_retry(self):
-        """name property는 'retry'이다."""
+        """The name property is 'retry'."""
         policy = AsyncRetryPolicy()
         assert policy.name == "retry"
 
     def test_default_max_retries_is_three(self):
-        """기본 max_retries는 3이다."""
+        """The default max_retries is 3."""
         policy = AsyncRetryPolicy()
         assert policy._max_retries == 3
 
     def test_default_backoff_is_exponential(self):
-        """기본 backoff는 ExponentialBackoff이다."""
+        """The default backoff is ExponentialBackoff."""
         policy = AsyncRetryPolicy()
         assert isinstance(policy._backoff, ExponentialBackoff)
 
     def test_default_retryable_exceptions_is_exception(self):
-        """기본 retryable_exceptions는 (Exception,)이다."""
+        """The default retryable_exceptions is (Exception,)."""
         policy = AsyncRetryPolicy()
         assert policy._retryable_exceptions == (Exception,)
 
     def test_satisfies_async_resilience_protocol(self):
-        """AsyncResiliencePolicy Protocol을 만족한다."""
+        """Satisfies the AsyncResiliencePolicy Protocol."""
         policy = AsyncRetryPolicy()
         assert isinstance(policy, AsyncResiliencePolicy)
 
     @pytest.mark.asyncio
     async def test_success_result_has_retry_in_executed_policies(self):
-        """성공 결과의 executed_policies에 'retry'가 포함된다."""
+        """A successful result's executed_policies contains 'retry'."""
 
         async def ok():
             return "ok"
@@ -91,7 +96,7 @@ class TestAsyncRetryPolicyContract:
         assert "retry" in result.executed_policies
 
     def test_module_all_contains_three_exports(self):
-        """__all__은 정확히 3개 항목을 포함한다."""
+        """__all__ holds exactly three entries."""
         import baldur.resilience.policies.async_retry as mod
 
         assert len(mod.__all__) == 3
@@ -101,16 +106,16 @@ class TestAsyncRetryPolicyContract:
 
 
 # =============================================================================
-# 동작 검증 — AsyncRetryPolicy.execute() 기본 동작
+# Behavior — AsyncRetryPolicy.execute() basics
 # =============================================================================
 
 
 class TestAsyncRetryPolicyExecuteBehavior:
-    """AsyncRetryPolicy.execute() 기본 동작 검증."""
+    """AsyncRetryPolicy.execute() basic behavior."""
 
     @pytest.mark.asyncio
     async def test_success_on_first_attempt_returns_value(self):
-        """첫 시도 성공 시 값과 attempts=1을 반환한다."""
+        """A first-attempt success returns the value with attempts=1."""
 
         async def ok():
             return 42
@@ -125,7 +130,7 @@ class TestAsyncRetryPolicyExecuteBehavior:
 
     @pytest.mark.asyncio
     async def test_success_after_retries_returns_correct_attempts(self):
-        """N회 실패 후 성공 시 올바른 attempts를 반환한다."""
+        """A success after N failures reports the right attempt count."""
         call_count = 0
 
         async def fail_then_succeed():
@@ -148,7 +153,7 @@ class TestAsyncRetryPolicyExecuteBehavior:
 
     @pytest.mark.asyncio
     async def test_exhausted_returns_failure_with_last_error(self):
-        """모든 재시도 소진 시 FAILURE outcome과 마지막 에러를 반환한다."""
+        """Exhausting every retry returns a FAILURE outcome with the last error."""
 
         async def always_fail():
             raise ConnectionError("down")
@@ -188,7 +193,7 @@ class TestAsyncRetryPolicyExecuteBehavior:
 
     @pytest.mark.asyncio
     async def test_sync_func_wrapped_in_to_thread(self):
-        """sync 함수가 asyncio.to_thread()로 실행된다."""
+        """A sync function runs through asyncio.to_thread()."""
 
         def sync_func():
             return "sync_result"
@@ -206,7 +211,7 @@ class TestAsyncRetryPolicyExecuteBehavior:
 
     @pytest.mark.asyncio
     async def test_args_and_kwargs_forwarded_to_async_func(self):
-        """위치/키워드 인수가 async 함수에 전달된다."""
+        """Positional and keyword arguments reach an async function."""
         received_args = {}
 
         async def capture(a, b, key=None):
@@ -222,7 +227,7 @@ class TestAsyncRetryPolicyExecuteBehavior:
 
     @pytest.mark.asyncio
     async def test_args_and_kwargs_forwarded_to_sync_func(self):
-        """위치/키워드 인수가 sync 함수에 to_thread로 전달된다."""
+        """Positional and keyword arguments reach a sync function through to_thread."""
 
         def sync_capture(a, b, key=None):
             return (a, b, key)
@@ -240,16 +245,16 @@ class TestAsyncRetryPolicyExecuteBehavior:
 
 
 # =============================================================================
-# 동작 검증 — Backoff delay 및 Jitter
+# Behavior — backoff delay and jitter
 # =============================================================================
 
 
 class TestAsyncRetryPolicyBackoffBehavior:
-    """AsyncRetryPolicy backoff delay 적용 검증."""
+    """AsyncRetryPolicy applies the backoff delay."""
 
     @pytest.mark.asyncio
     async def test_backoff_delay_applied_between_retries(self):
-        """재시도 간 backoff 지연이 asyncio.sleep으로 적용된다."""
+        """The backoff delay between retries is applied with asyncio.sleep."""
         call_count = 0
 
         async def fail_twice():
@@ -301,21 +306,21 @@ class TestAsyncRetryPolicyBackoffBehavior:
 
     @pytest.mark.asyncio
     async def test_jitter_controlled_by_backoff_strategy(self):
-        """Jitter 활성화/비활성화는 BackoffStrategy 파라미터로 제어된다."""
-        # jitter=False → delay가 정확히 일정
+        """Jitter on/off is controlled by the BackoffStrategy parameter."""
+        # jitter=False → the delay is exactly constant
         backoff_no_jitter = ConstantBackoff(delay=1.0, jitter=False)
         delays_no_jitter = [backoff_no_jitter.calculate(i) for i in range(5)]
         assert all(d == pytest.approx(1.0) for d in delays_no_jitter)
 
-        # jitter=True → delay가 변동 (확률적이지만 100% 동일하지 않을 것)
+        # jitter=True → the delay varies (probabilistic, but never identical every time)
         backoff_with_jitter = ConstantBackoff(delay=1.0, jitter=True, jitter_factor=0.5)
         delays_with_jitter = [backoff_with_jitter.calculate(i) for i in range(20)]
-        # 20회 중 최소 1번은 정확히 1.0이 아닐 것 (확률적 보장)
+        # at least one of 20 draws is not exactly 1.0 (probabilistic guarantee)
         assert not all(d == 1.0 for d in delays_with_jitter)
 
     @pytest.mark.asyncio
     async def test_no_sleep_on_final_failure(self):
-        """마지막 실패(소진) 시에는 asyncio.sleep이 호출되지 않는다."""
+        """The final (exhausting) failure does not call asyncio.sleep."""
 
         async def always_fail():
             raise ConnectionError("fail")
@@ -332,16 +337,16 @@ class TestAsyncRetryPolicyBackoffBehavior:
 
 
 # =============================================================================
-# 동작 검증 — CancelledError 방어
+# Behavior — CancelledError handling
 # =============================================================================
 
 
 class TestAsyncRetryCancellationBehavior:
-    """asyncio.CancelledError 방어 로직 검증."""
+    """asyncio.CancelledError handling."""
 
     @pytest.mark.asyncio
     async def test_cancelled_error_not_retried(self):
-        """CancelledError는 재시도하지 않고 즉시 전파한다."""
+        """CancelledError propagates at once, without a retry."""
         policy = AsyncRetryPolicy(max_retries=3)
 
         async def raise_cancelled():
@@ -352,7 +357,7 @@ class TestAsyncRetryCancellationBehavior:
 
     @pytest.mark.asyncio
     async def test_cancelled_error_with_broad_retryable(self):
-        """retryable_exceptions=(Exception,)이어도 CancelledError는 통과한다."""
+        """CancelledError passes through even with retryable_exceptions=(Exception,)."""
         policy = AsyncRetryPolicy(max_retries=3, retryable_exceptions=(Exception,))
 
         async def raise_cancelled():
@@ -363,7 +368,7 @@ class TestAsyncRetryCancellationBehavior:
 
     @pytest.mark.asyncio
     async def test_concurrent_retries_with_cancellation(self):
-        """여러 태스크가 동시에 재시도 중일 때 일부 취소된다."""
+        """Some of several concurrently retrying tasks are cancelled."""
         policy = AsyncRetryPolicy(max_retries=5)
         call_count = 0
 
@@ -386,7 +391,7 @@ class TestAsyncRetryCancellationBehavior:
 
     @pytest.mark.asyncio
     async def test_keyboard_interrupt_not_retried(self):
-        """KeyboardInterrupt는 재시도하지 않고 즉시 전파한다."""
+        """KeyboardInterrupt propagates at once, without a retry."""
         policy = AsyncRetryPolicy(retryable_exceptions=(Exception,))
 
         async def raise_keyboard_interrupt():
@@ -417,16 +422,16 @@ class TestAsyncRetryCancellationBehavior:
 
 
 # =============================================================================
-# 동작 검증 — PolicyContext 전파
+# Behavior — PolicyContext propagation
 # =============================================================================
 
 
 class TestAsyncRetryContextPropagationBehavior:
-    """PolicyContext 상태 전파 검증."""
+    """PolicyContext state propagation."""
 
     @pytest.mark.asyncio
     async def test_context_extra_updated_with_retry_attempt(self):
-        """재시도 시 context.extra에 retry_attempt이 기록된다."""
+        """A retry records retry_attempt in context.extra."""
         captured_contexts = []
 
         mock_backoff = MagicMock(spec=BackoffStrategy)
@@ -463,7 +468,7 @@ class TestAsyncRetryContextPropagationBehavior:
 
     @pytest.mark.asyncio
     async def test_context_extra_updated_with_retry_last_error(self):
-        """재시도 시 context.extra에 retry_last_error가 기록된다."""
+        """A retry records retry_last_error in context.extra."""
         captured_contexts = []
 
         mock_backoff = MagicMock(spec=BackoffStrategy)
@@ -497,7 +502,7 @@ class TestAsyncRetryContextPropagationBehavior:
 
     @pytest.mark.asyncio
     async def test_none_context_handled_safely(self):
-        """context=None 시 에러 없이 재시도가 동작한다."""
+        """Retry works without error when context=None."""
 
         async def always_fail():
             raise ConnectionError("fail")
@@ -514,7 +519,7 @@ class TestAsyncRetryContextPropagationBehavior:
 
     @pytest.mark.asyncio
     async def test_original_context_not_mutated(self):
-        """원본 PolicyContext는 변경되지 않는다 (frozen + CoW)."""
+        """The original PolicyContext is not modified (frozen + CoW)."""
 
         async def always_fail():
             raise ConnectionError("fail")
@@ -527,26 +532,26 @@ class TestAsyncRetryContextPropagationBehavior:
         ):
             await policy.execute(always_fail, context=ctx)
 
-        # frozen dataclass → with_updates는 새 인스턴스를 생성
+        # frozen dataclass → with_updates creates a new instance
         assert ctx.extra == {"original": True}
         assert "retry_attempt" not in ctx.extra
 
 
 # =============================================================================
-# 동작 검증 — 로깅 메타데이터
+# Behavior — logging metadata
 # =============================================================================
 
 
 class TestAsyncRetryLoggingBehavior:
-    """AsyncRetryPolicy structlog 로깅 메타데이터 검증.
+    """AsyncRetryPolicy structlog logging metadata.
 
-    structlog.testing.capture_logs()를 사용하여 로그를 캡처한다.
-    capsys는 configure_structlog() 호출 후 stdlib 라우팅 시 캡처 불가.
+    Logs are captured with structlog.testing.capture_logs().
+    capsys cannot capture them once configure_structlog() routes through stdlib.
     """
 
     @pytest.mark.asyncio
     async def test_attempt_failed_log_includes_func_name(self):
-        """retry.async_attempt_failed 이벤트에 func 메타데이터가 포함된다."""
+        """The retry.async_attempt_failed event carries the func metadata."""
 
         async def my_async_function():
             raise ConnectionError("fail")
@@ -567,7 +572,7 @@ class TestAsyncRetryLoggingBehavior:
 
     @pytest.mark.asyncio
     async def test_exhausted_log_includes_func_name(self):
-        """retry.async_exhausted 이벤트에 func 메타데이터가 포함된다."""
+        """The retry.async_exhausted event carries the func metadata."""
 
         async def fetch_data():
             raise ConnectionError("fail")
@@ -588,7 +593,7 @@ class TestAsyncRetryLoggingBehavior:
 
     @pytest.mark.asyncio
     async def test_qualname_preferred_over_name(self):
-        """__qualname__이 __name__보다 우선 사용된다."""
+        """__qualname__ is preferred over __name__."""
 
         class MyService:
             async def fetch(self):
@@ -609,16 +614,16 @@ class TestAsyncRetryLoggingBehavior:
 
 
 # =============================================================================
-# 동작 검증 — AsyncPolicyComposer 통합
+# Behavior — AsyncPolicyComposer integration
 # =============================================================================
 
 
 class TestAsyncRetryComposerIntegrationBehavior:
-    """AsyncRetryPolicy가 AsyncPolicyComposer 체인에서 동작하는지 검증."""
+    """AsyncRetryPolicy works inside an AsyncPolicyComposer chain."""
 
     @pytest.mark.asyncio
     async def test_composes_with_async_policy_composer(self):
-        """AsyncPolicyComposer 체인에서 정상 동작한다."""
+        """Works normally inside an AsyncPolicyComposer chain."""
         from baldur.resilience.policies.composer import AsyncPolicyComposer
 
         call_count = 0
@@ -645,20 +650,20 @@ class TestAsyncRetryComposerIntegrationBehavior:
 
 
 # =============================================================================
-# 계약 검증 — async_retry_policy 팩토리
+# Contract — the async_retry_policy factory
 # =============================================================================
 
 
 class TestAsyncRetryPolicyFactoryContract:
-    """async_retry_policy 팩토리 함수 계약 검증."""
+    """async_retry_policy factory function contract."""
 
     def test_returns_async_retry_policy_instance(self):
-        """반환 타입이 AsyncRetryPolicy이다."""
+        """The return type is AsyncRetryPolicy."""
         policy = async_retry_policy()
         assert isinstance(policy, AsyncRetryPolicy)
 
     def test_parameters_forwarded(self):
-        """파라미터가 AsyncRetryPolicy에 전달된다."""
+        """Parameters are forwarded to AsyncRetryPolicy."""
         backoff = ConstantBackoff(delay=2.0)
         policy = async_retry_policy(
             max_retries=5,
@@ -671,31 +676,31 @@ class TestAsyncRetryPolicyFactoryContract:
 
 
 # =============================================================================
-# 계약 검증 — max_retries 입력 검증 (#2)
+# Contract — max_retries input validation (#2)
 # =============================================================================
 
 
 class TestAsyncRetryPolicyInputValidation:
-    """AsyncRetryPolicy 생성자 입력 검증."""
+    """AsyncRetryPolicy constructor input validation."""
 
     def test_negative_max_retries_raises_value_error(self):
-        """max_retries가 음수이면 ValueError가 발생한다."""
+        """A negative max_retries raises ValueError."""
         with pytest.raises(ValueError, match="max_retries must be >= 0"):
             AsyncRetryPolicy(max_retries=-1)
 
     def test_negative_large_max_retries_raises_value_error(self):
-        """큰 음수 max_retries도 ValueError가 발생한다."""
+        """A large negative max_retries raises ValueError too."""
         with pytest.raises(ValueError, match="max_retries must be >= 0"):
             AsyncRetryPolicy(max_retries=-100)
 
     def test_zero_max_retries_accepted(self):
-        """max_retries=0은 허용된다 (재시도 없이 1회 실행)."""
+        """max_retries=0 is accepted (one run, no retry)."""
         policy = AsyncRetryPolicy(max_retries=0)
         assert policy._max_retries == 0
 
     @pytest.mark.asyncio
     async def test_zero_retries_executes_once(self):
-        """max_retries=0 시 함수가 정확히 1회 실행된다."""
+        """With max_retries=0 the function runs exactly once."""
         call_count = 0
 
         async def counting_func():
@@ -711,22 +716,22 @@ class TestAsyncRetryPolicyInputValidation:
         assert result.total_attempts == 1
 
     def test_factory_negative_max_retries_raises(self):
-        """async_retry_policy 팩토리도 음수 max_retries에 ValueError를 발생시킨다."""
+        """The async_retry_policy factory also raises ValueError on a negative max_retries."""
         with pytest.raises(ValueError, match="max_retries must be >= 0"):
             async_retry_policy(max_retries=-1)
 
 
 # =============================================================================
-# 동작 검증 — functools.partial 언래핑 (#4)
+# Behavior — functools.partial unwrapping (#4)
 # =============================================================================
 
 
 class TestAsyncRetryPartialUnwrapBehavior:
-    """functools.partial로 래핑된 함수의 async 감지 검증."""
+    """Async detection of a function wrapped in functools.partial."""
 
     @pytest.mark.asyncio
     async def test_partial_wrapped_async_func_detected_as_async(self):
-        """functools.partial(async_func, ...)이 async로 감지된다."""
+        """functools.partial(async_func, ...) is detected as async."""
         import functools
 
         async def async_add(a, b):
@@ -741,7 +746,7 @@ class TestAsyncRetryPartialUnwrapBehavior:
 
     @pytest.mark.asyncio
     async def test_partial_wrapped_sync_func_uses_to_thread(self):
-        """functools.partial(sync_func, ...)이 to_thread로 실행된다."""
+        """functools.partial(sync_func, ...) runs through to_thread."""
         import functools
 
         def sync_add(a, b):
@@ -762,7 +767,7 @@ class TestAsyncRetryPartialUnwrapBehavior:
 
     @pytest.mark.asyncio
     async def test_nested_partial_async_func_detected(self):
-        """이중 partial 래핑된 async 함수도 감지된다."""
+        """An async function wrapped in two partials is detected too."""
         import functools
 
         async def async_compute(a, b, c):
@@ -1221,3 +1226,132 @@ class TestAsyncRetryObservationClaimBehavior:
         result = asyncio.run(policy.execute(_ok))
 
         assert result.value == "ok"
+
+
+# =============================================================================
+# Contract — the single attempt states the stage's verdict (sync parity)
+# =============================================================================
+
+
+@pytest.fixture
+def retry_switched_off(monkeypatch) -> Iterator[None]:
+    """``BALDUR_RETRY_ENABLED=false`` for stages built inside the test; the
+    stage snapshots the switch at construction."""
+    monkeypatch.setenv("BALDUR_RETRY_ENABLED", "false")
+    reset_retry_settings()
+    yield
+    reset_retry_settings()
+
+
+class TestAsyncRetrySingleAttemptVerdictContract:
+    """Retry switched off and observe-only both run the call once; the FAILURE
+    states the store verdict the loop's exit states, sized for that attempt —
+    the shape the synchronous stage writes."""
+
+    @pytest.mark.parametrize("enable_dlq", [True, False], ids=["stores", "declines"])
+    @pytest.mark.parametrize("path", ["retry_disabled", "observe_only"])
+    def test_single_attempt_failure_states_the_stage_verdict(
+        self, request, path, enable_dlq
+    ):
+        # Given a three-attempt stage on its single-attempt path
+        if path == "retry_disabled":
+            request.getfixturevalue("retry_switched_off")
+        calls: list[int] = []
+
+        async def down() -> str:
+            calls.append(1)
+            raise ConnectionError("down")
+
+        policy = AsyncRetryPolicy.from_policy_config(
+            RetryPolicyConfig(max_attempts=3, domain="payment", enable_dlq=enable_dlq)
+        )
+
+        # When the call fails
+        with dry_run_active() if path == "observe_only" else nullcontext():
+            result = asyncio.run(policy.execute(down))
+
+        # Then it ran once and the result carries the stage's verdict
+        assert calls == [1]
+        assert result.outcome == PolicyOutcome.FAILURE
+        assert result.metadata == {
+            "should_dlq": enable_dlq,
+            "domain": "payment",
+            "max_attempts": 1,
+            "retry_history": [
+                {"attempt": 1, "error_type": "ConnectionError", "error_message": "down"}
+            ],
+            "reason": "max_attempts",
+        }
+
+    def test_single_attempt_success_carries_no_verdict(self, retry_switched_off):
+        async def ok() -> str:
+            return "ok"
+
+        policy = AsyncRetryPolicy.from_policy_config(
+            RetryPolicyConfig(max_attempts=3, domain="payment")
+        )
+
+        result = asyncio.run(policy.execute(ok))
+
+        assert result.outcome == PolicyOutcome.SUCCESS
+        assert result.value == "ok"
+        assert result.metadata == {}
+
+
+# =============================================================================
+# Contract — a total attempt count below 1 from code
+# =============================================================================
+
+
+class TestAsyncRetryMaxAttemptsBelowOneContract:
+    """Every async code route builds its stage through ``from_policy_config``,
+    which refuses a count that would run the function zero times — where it
+    once ran it once."""
+
+    @pytest.mark.parametrize("count", [0, -1], ids=["zero", "negative"])
+    def test_from_policy_config_max_attempts_below_one_raises_naming_the_field(
+        self, count
+    ):
+        with pytest.raises(
+            ValueError, match=rf"max_attempts must be >= 1, got {count}"
+        ):
+            AsyncRetryPolicy.from_policy_config(RetryPolicyConfig(max_attempts=count))
+
+    def test_from_policy_config_max_attempts_below_one_boundary_accepts_one(self):
+        policy = AsyncRetryPolicy.from_policy_config(RetryPolicyConfig(max_attempts=1))
+
+        assert policy._max_retries == 0
+
+    def test_retry_decorator_on_async_def_max_attempts_below_one_raises_at_decoration(
+        self,
+    ):
+        from baldur.resilience.policies.async_retry import retry
+
+        with pytest.raises(ValueError, match="max_attempts must be >= 1"):
+
+            @retry(domain="payment", max_attempts=0)
+            async def charge() -> str:
+                return "never decorated"
+
+    def test_aprotect_config_max_attempts_below_one_raises_before_calling_fn(self):
+        from baldur.protect_facade import aprotect
+
+        calls: list[int] = []
+
+        async def charge() -> str:
+            calls.append(1)
+            return "ok"
+
+        with pytest.raises(ValueError, match="max_attempts must be >= 1"):
+            asyncio.run(
+                aprotect(
+                    "svc.azero_attempts",
+                    charge,
+                    retry=RetryPolicyConfig(max_attempts=0),
+                    dlq=True,
+                    circuit_breaker=False,
+                    timeout=None,
+                )
+            )
+
+        assert calls == []
