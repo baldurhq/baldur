@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import timedelta
 from enum import Enum
@@ -46,11 +47,17 @@ class IdempotencyDecision(str, Enum):
 
 @dataclass
 class IdempotencyCheckResult:
-    """Idempotency check result."""
+    """Idempotency check result.
+
+    ``claim_id`` identifies the claim a CONTINUE decision took (None for SKIP /
+    ABORT and for the unconfigured no-op gate). Passing it to ``mark_completed``
+    / ``mark_failed`` makes the mark land only on that claim's record.
+    """
 
     decision: IdempotencyDecision
     cached_result: dict[str, Any] | None = None
     retry_count: int = 0
+    claim_id: str | None = None
 
 
 class IdempotencyGate:
@@ -192,6 +199,23 @@ class IdempotencyGate:
         ).clock_skew_tolerance_seconds
         return time.time() - effective_ttl.total_seconds() - tolerance
 
+    @staticmethod
+    def _new_claim_id() -> str:
+        """A fresh owner token for one claim."""
+        return uuid.uuid4().hex
+
+    @staticmethod
+    def _mark_guard(claim_id: str | None) -> tuple[str, str]:
+        """The (field, expected) pair a mark compares before writing.
+
+        With a ``claim_id`` the mark lands only on that claim's record — a
+        late mark cannot overwrite a later claim on the same key. Without one,
+        any record still ``executing`` is marked (the pre-claim-id contract).
+        """
+        if claim_id is not None:
+            return "claim_id", claim_id
+        return "status", "executing"
+
     def _effective_memory_ttl(self) -> timedelta:
         """Resolve the dedup memory window for ``mark_*`` default paths.
 
@@ -234,6 +258,9 @@ class IdempotencyGate:
         the dedup horizon — the completed-record memory window is governed
         separately by ``mark_completed`` / ``mark_failed``.
 
+        Every claim record carries a fresh ``claim_id`` (on a first acquire
+        and on a takeover alike), returned in the CONTINUE result.
+
         Returns:
             CONTINUE — execution may proceed (EXECUTING state acquired)
             SKIP — already completed (cached_result included)
@@ -258,15 +285,19 @@ class IdempotencyGate:
     ) -> IdempotencyCheckResult:
         """Real-cache check-and-acquire (``cache`` guaranteed non-None)."""
         effective_ttl = ttl or timedelta(seconds=self._execution_ttl_seconds)
+        claim_id = self._new_claim_id()
         record_value: dict[str, Any] = {
             "status": "executing",
             "started_at": time.time(),
             "retry_count": 0,
+            "claim_id": claim_id,
         }
 
         acquired = cache.setnx(key, record_value, ttl=effective_ttl)
         if acquired:
-            return IdempotencyCheckResult(decision=IdempotencyDecision.CONTINUE)
+            return IdempotencyCheckResult(
+                decision=IdempotencyDecision.CONTINUE, claim_id=claim_id
+            )
 
         # Key already exists — check its status
         existing = cache.get(key)
@@ -274,7 +305,9 @@ class IdempotencyGate:
             # Race: key expired between setnx and get — treat as CONTINUE
             retry_acquired = cache.setnx(key, record_value, ttl=effective_ttl)
             if retry_acquired:
-                return IdempotencyCheckResult(decision=IdempotencyDecision.CONTINUE)
+                return IdempotencyCheckResult(
+                    decision=IdempotencyDecision.CONTINUE, claim_id=claim_id
+                )
             return IdempotencyCheckResult(decision=IdempotencyDecision.ABORT)
 
         if not isinstance(existing, dict):
@@ -303,6 +336,7 @@ class IdempotencyGate:
                 return IdempotencyCheckResult(
                     decision=IdempotencyDecision.CONTINUE,
                     retry_count=record_value["retry_count"],
+                    claim_id=claim_id,
                 )
             return IdempotencyCheckResult(decision=IdempotencyDecision.ABORT)
 
@@ -325,6 +359,7 @@ class IdempotencyGate:
                     return IdempotencyCheckResult(
                         decision=IdempotencyDecision.CONTINUE,
                         retry_count=record_value["retry_count"],
+                        claim_id=claim_id,
                     )
                 return IdempotencyCheckResult(decision=IdempotencyDecision.ABORT)
             return IdempotencyCheckResult(decision=IdempotencyDecision.ABORT)
@@ -380,13 +415,18 @@ class IdempotencyGate:
         result: dict[str, Any] | None = None,
         retry_count: int = 0,
         ttl: timedelta | None = None,
+        claim_id: str | None = None,
     ) -> None:
         """Transition EXECUTING -> COMPLETED. Cache the result.
 
-        Atomically replaces the record only if its current status is
-        ``executing``. ``retry_count`` is supplied by the caller (forwarded
-        from ``IdempotencyCheckResult.retry_count``) so the success path
-        does not re-read the record before writing.
+        Atomically replaces the record only if it is still the claim being
+        marked: with ``claim_id`` (from ``IdempotencyCheckResult.claim_id``)
+        only that claim's record; without it, any record whose status is
+        ``executing``. The record written carries no ``claim_id``, so a
+        second mark by the same claim finds nothing to replace.
+        ``retry_count`` is supplied by the caller (forwarded from
+        ``IdempotencyCheckResult.retry_count``) so the success path does not
+        re-read the record before writing.
 
         ``ttl`` bounds the dedup memory window — how long this completed
         record blocks duplicates. ``None`` uses the gate's memory default
@@ -402,8 +442,9 @@ class IdempotencyGate:
             "result": result or {},
             "retry_count": retry_count,
         }
+        field, expected = self._mark_guard(claim_id)
         success = self._cache.cas_dict_field(
-            key, "status", "executing", new_record, effective_ttl
+            key, field, expected, new_record, effective_ttl
         )
         if not success:
             logger.info(
@@ -438,13 +479,16 @@ class IdempotencyGate:
         error: str = "",
         retry_count: int = 0,
         ttl: timedelta | None = None,
+        claim_id: str | None = None,
     ) -> None:
         """Transition EXECUTING -> FAILED.
 
-        Atomically replaces the record only if its current status is
-        ``executing``. ``retry_count`` is supplied by the caller (forwarded
-        from ``IdempotencyCheckResult.retry_count``) so the failure path
-        does not re-read the record before writing.
+        Atomically replaces the record only if it is still the claim being
+        marked (``claim_id`` given: that claim's record only; otherwise any
+        ``executing`` record — see :meth:`mark_completed`). ``retry_count`` is
+        supplied by the caller (forwarded from
+        ``IdempotencyCheckResult.retry_count``) so the failure path does not
+        re-read the record before writing.
 
         ``ttl`` bounds the dedup memory window for the failed record (the
         retryable-state retention). ``None`` uses the gate's memory default
@@ -460,8 +504,9 @@ class IdempotencyGate:
             "error": error,
             "retry_count": retry_count,
         }
+        field, expected = self._mark_guard(claim_id)
         success = self._cache.cas_dict_field(
-            key, "status", "executing", new_record, effective_ttl
+            key, field, expected, new_record, effective_ttl
         )
         if not success:
             logger.info(
@@ -615,21 +660,27 @@ class AsyncIdempotencyGate:
     ) -> IdempotencyCheckResult:
         """Real-cache awaited check-and-acquire (``cache`` guaranteed non-None)."""
         effective_ttl = ttl or timedelta(seconds=self._execution_ttl_seconds)
+        claim_id = IdempotencyGate._new_claim_id()
         record_value: dict[str, Any] = {
             "status": "executing",
             "started_at": time.time(),
             "retry_count": 0,
+            "claim_id": claim_id,
         }
 
         acquired = await cache.asetnx(key, record_value, ttl=effective_ttl)
         if acquired:
-            return IdempotencyCheckResult(decision=IdempotencyDecision.CONTINUE)
+            return IdempotencyCheckResult(
+                decision=IdempotencyDecision.CONTINUE, claim_id=claim_id
+            )
 
         existing = await cache.aget(key)
         if existing is None:
             retry_acquired = await cache.asetnx(key, record_value, ttl=effective_ttl)
             if retry_acquired:
-                return IdempotencyCheckResult(decision=IdempotencyDecision.CONTINUE)
+                return IdempotencyCheckResult(
+                    decision=IdempotencyDecision.CONTINUE, claim_id=claim_id
+                )
             return IdempotencyCheckResult(decision=IdempotencyDecision.ABORT)
 
         if not isinstance(existing, dict):
@@ -657,6 +708,7 @@ class AsyncIdempotencyGate:
                 return IdempotencyCheckResult(
                     decision=IdempotencyDecision.CONTINUE,
                     retry_count=record_value["retry_count"],
+                    claim_id=claim_id,
                 )
             return IdempotencyCheckResult(decision=IdempotencyDecision.ABORT)
 
@@ -675,6 +727,7 @@ class AsyncIdempotencyGate:
                     return IdempotencyCheckResult(
                         decision=IdempotencyDecision.CONTINUE,
                         retry_count=record_value["retry_count"],
+                        claim_id=claim_id,
                     )
                 return IdempotencyCheckResult(decision=IdempotencyDecision.ABORT)
             return IdempotencyCheckResult(decision=IdempotencyDecision.ABORT)
@@ -687,8 +740,12 @@ class AsyncIdempotencyGate:
         result: dict[str, Any] | None = None,
         retry_count: int = 0,
         ttl: timedelta | None = None,
+        claim_id: str | None = None,
     ) -> None:
-        """Transition EXECUTING -> COMPLETED and cache the result (awaitable)."""
+        """Transition EXECUTING -> COMPLETED and cache the result (awaitable).
+
+        Same claim scoping as :meth:`IdempotencyGate.mark_completed`.
+        """
         if self._cache is None:
             return
         effective_ttl = ttl or self._effective_memory_ttl()
@@ -698,8 +755,9 @@ class AsyncIdempotencyGate:
             "result": result or {},
             "retry_count": retry_count,
         }
+        field, expected = IdempotencyGate._mark_guard(claim_id)
         success = await self._cache.acas_dict_field(
-            key, "status", "executing", new_record, effective_ttl
+            key, field, expected, new_record, effective_ttl
         )
         if not success:
             logger.info(
@@ -729,8 +787,12 @@ class AsyncIdempotencyGate:
         error: str = "",
         retry_count: int = 0,
         ttl: timedelta | None = None,
+        claim_id: str | None = None,
     ) -> None:
-        """Transition EXECUTING -> FAILED (awaitable)."""
+        """Transition EXECUTING -> FAILED (awaitable).
+
+        Same claim scoping as :meth:`IdempotencyGate.mark_completed`.
+        """
         if self._cache is None:
             return
         effective_ttl = ttl or self._effective_memory_ttl()
@@ -740,8 +802,9 @@ class AsyncIdempotencyGate:
             "error": error,
             "retry_count": retry_count,
         }
+        field, expected = IdempotencyGate._mark_guard(claim_id)
         success = await self._cache.acas_dict_field(
-            key, "status", "executing", new_record, effective_ttl
+            key, field, expected, new_record, effective_ttl
         )
         if not success:
             logger.info(
