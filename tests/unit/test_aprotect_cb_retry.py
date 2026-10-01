@@ -49,6 +49,11 @@ from baldur.services.circuit_breaker.policy import CircuitBreakerPolicy
 from baldur.services.circuit_breaker.rate_limit_tracker import RateLimitTracker
 from baldur.services.circuit_breaker.service import CircuitBreakerService
 from baldur.services.retry_handler.models import RetryPolicyConfig
+from tests.factories.llm_doubles import (
+    FakeAnthropicError,
+    FakeOpenAIError,
+    openai_status_error,
+)
 
 # The async retry stage sleeps between attempts via this symbol — patch it so
 # exhaustion tests run instantly and deterministically.
@@ -925,3 +930,124 @@ class TestAprotectCoordinationParityBehavior:
         cb_service.record_failure.assert_called_once()
         recorded = cb_service.record_failure.call_args.kwargs["error_context"]
         assert recorded["type"] == "ProviderThrottled"
+
+
+# =============================================================================
+# Behavior — provider verdicts on the async path (sync/async parity)
+# =============================================================================
+
+
+class TestAsyncRetryProviderVerdictBehavior:
+    """The async retry stage, breaker and fallback read the provider's verdict as the sync ones do."""
+
+    def test_aprotect_provider_invalid_request_runs_once_never_falls_back_or_counts(
+        self, clean_caches
+    ):
+        """An OpenAI 400 under ``aprotect(retry=True, fallback=f)``: one call, no ``f``, no count."""
+        # Given
+        pytest.importorskip("openai")
+        name = "async.provider_invalid"
+        cb_service = _seed_low_threshold_breaker(name, failure_threshold=5)
+        error = openai_status_error(400)
+        calls = {"n": 0}
+        served: list[str] = []
+
+        async def rejected():
+            calls["n"] += 1
+            raise error
+
+        async def fb():
+            served.append("f")
+            return "served"
+
+        # When
+        with patch(_ASYNC_SLEEP, new_callable=AsyncMock):
+            meta = asyncio.run(
+                aprotect_with_meta(
+                    name=name,
+                    fn=rejected,
+                    retry=RetryPolicyConfig(max_attempts=3, domain=name),
+                    fallback=fb,
+                    circuit_breaker=True,
+                    dlq=False,
+                    timeout=None,
+                )
+            )
+
+        # Then
+        assert calls["n"] == 1
+        assert meta.attempts == 1
+        assert meta.metadata["reason"] == "non_retryable"
+        assert (meta.success, meta.fallback_used, served) == (False, False, [])
+        assert meta.error is error
+        assert cb_service.get_or_create_state(name).failure_count == 0
+
+    @pytest.mark.parametrize(
+        ("status", "code"),
+        [(429, "insufficient_quota"), (401, None)],
+        ids=["quota", "auth"],
+    )
+    def test_aprotect_quota_or_auth_runs_once_but_counts_and_falls_back(
+        self, clean_caches, status, code
+    ):
+        """No retry for an answer waiting cannot fix — but it is a failure, so ``f`` serves."""
+        name = f"async.provider_unusable_{status}"
+        cb_service = _seed_low_threshold_breaker(name, failure_threshold=5)
+        calls = {"n": 0}
+
+        async def unusable():
+            calls["n"] += 1
+            raise FakeOpenAIError(status, code=code)
+
+        async def fb():
+            return "served"
+
+        with patch(_ASYNC_SLEEP, new_callable=AsyncMock):
+            meta = asyncio.run(
+                aprotect_with_meta(
+                    name=name,
+                    fn=unusable,
+                    retry=RetryPolicyConfig(max_attempts=3, domain=name),
+                    fallback=fb,
+                    circuit_breaker=True,
+                    dlq=False,
+                    timeout=None,
+                )
+            )
+
+        assert calls["n"] == 1
+        assert (meta.fallback_used, meta.value) == (True, "served")
+        assert cb_service.get_or_create_state(name).failure_count == 1
+
+    @pytest.mark.parametrize(
+        "status",
+        [529, 503, 500],
+        ids=["overloaded_529", "overloaded_503", "server_500"],
+    )
+    def test_aprotect_waitable_provider_answer_is_retried_to_the_cap(
+        self, clean_caches, status
+    ):
+        """An overload or a transient failure keeps every async attempt."""
+        name = f"async.provider_waitable_{status}"
+        calls = {"n": 0}
+
+        async def failing():
+            calls["n"] += 1
+            raise FakeAnthropicError(status)
+
+        with patch(_ASYNC_SLEEP, new_callable=AsyncMock):
+            meta = asyncio.run(
+                aprotect_with_meta(
+                    name=name,
+                    fn=failing,
+                    retry=RetryPolicyConfig(
+                        max_attempts=3, domain=name, rate_limit_aware=False
+                    ),
+                    circuit_breaker=False,
+                    dlq=False,
+                    timeout=None,
+                )
+            )
+
+        assert calls["n"] == 3
+        assert meta.metadata["reason"] == "max_attempts"

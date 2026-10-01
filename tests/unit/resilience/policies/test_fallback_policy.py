@@ -14,6 +14,7 @@ Follows UNIT_TEST_GUIDELINES.md:
 
 from __future__ import annotations
 
+import asyncio
 import functools
 from dataclasses import dataclass, field
 from unittest.mock import MagicMock
@@ -41,6 +42,11 @@ from baldur.resilience.policies.fallback import (
     _FALLBACK_ARITY_CACHE_SIZE,
     _FALLBACK_MODE_TO_OUTCOME,
     _fallback_accepts_error,
+)
+from tests.factories.llm_doubles import (
+    FakeAnthropicError,
+    FakeGenaiError,
+    FakeOpenAIError,
 )
 
 # =============================================================================
@@ -1630,3 +1636,103 @@ class TestFallbackStandalonePredicate:
         result = await policy.execute(timed_out)
 
         assert result.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
+
+
+# =============================================================================
+# Behavior — the default predicate reads the provider's verdict
+# =============================================================================
+
+
+def _provider_invalid_error() -> Exception:
+    return FakeOpenAIError(400, message="Invalid 'messages': empty array")
+
+
+class TestFallbackProviderVerdictBehavior:
+    """The default predicate never substitutes for a request the provider itself rejected."""
+
+    @pytest.mark.parametrize(
+        "policy_cls", [FallbackPolicy, AsyncFallbackPolicy], ids=["sync", "async"]
+    )
+    @pytest.mark.parametrize(
+        ("error", "activates"),
+        [
+            (FakeOpenAIError(400), False),
+            (FakeGenaiError(404), False),
+            (FakeOpenAIError(429, code="insufficient_quota"), True),
+            (FakeOpenAIError(401), True),
+            (FakeAnthropicError(529), True),
+            (FakeOpenAIError(None), True),
+            (ValueError("bad input"), True),
+            (None, True),
+        ],
+        ids=[
+            "provider_invalid_400",
+            "provider_invalid_404",
+            "quota",
+            "auth",
+            "overloaded",
+            "connection",
+            "not_provider",
+            "no_error",
+        ],
+    )
+    def test_default_predicate_on_a_failure_follows_the_verdict(
+        self, policy_cls, error, activates
+    ):
+        """A failed result activates the fallback unless the provider rejected the request."""
+        policy = policy_cls()
+        result = PolicyResult(outcome=PolicyOutcome.FAILURE, error=error)
+
+        assert policy._predicate(result) is activates
+
+    def test_sync_execute_provider_invalid_returns_the_failure_unserved(self):
+        """The rejected request comes back as the failure; the substitute is never called."""
+        served: list[str] = []
+        error = _provider_invalid_error()
+        policy = FallbackPolicy(fallback_fn=lambda: served.append("f") or "fallback")
+
+        def rejected():
+            raise error
+
+        result = policy.execute(rejected)
+
+        assert served == []
+        assert result.outcome is not PolicyOutcome.SUCCESS_WITH_FALLBACK
+        assert result.error is error
+
+    def test_async_execute_provider_invalid_returns_the_failure_unserved(self):
+        """The async policy refuses the substitute for a rejected request too."""
+        served: list[str] = []
+        error = _provider_invalid_error()
+
+        async def fallback():
+            served.append("f")
+            return "fallback"
+
+        async def rejected():
+            raise error
+
+        result = asyncio.run(
+            AsyncFallbackPolicy(fallback_fn=fallback).execute(rejected)
+        )
+
+        assert served == []
+        assert result.outcome is not PolicyOutcome.SUCCESS_WITH_FALLBACK
+        assert result.error is error
+
+    def test_caller_predicate_still_serves_a_provider_invalid_request(self):
+        """A caller-supplied predicate is the caller's decision, left untouched."""
+        policy = FallbackPolicy(
+            fallback_fn=lambda: "fallback",
+            predicate=lambda r: r.outcome != PolicyOutcome.SUCCESS,
+        )
+
+        def rejected():
+            raise _provider_invalid_error()
+
+        result = policy.execute(rejected)
+
+        assert (result.outcome, result.value) == (
+            PolicyOutcome.SUCCESS_WITH_FALLBACK,
+            "fallback",
+        )

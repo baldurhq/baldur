@@ -1063,3 +1063,81 @@ class TestDLQSinkCaptureServiceExclusionBehavior:
         assert len(rejected) == 1
         assert rejected[0]["log_level"] == "warning"
         assert rejected[0]["domain"] == "payment"
+
+
+# =============================================================================
+# DLQSink — the capture mark on a stored terminal
+# =============================================================================
+
+
+class _RefusesAttributes(Exception):
+    """An exception type that refuses new attributes (a frozen or slotted type)."""
+
+    def __setattr__(self, name, value):
+        raise AttributeError(f"{type(self).__name__} is frozen")
+
+
+class TestDLQSinkCaptureMarkBehavior:
+    """A terminal the sink parked is marked, so the Celery hook does not park it again."""
+
+    _STORE = "baldur.services.retry_handler.sinks.store_to_dlq"
+
+    def _verdict(self) -> PolicyResult:
+        return PolicyResult(
+            outcome=PolicyOutcome.FAILURE,
+            total_attempts=1,
+            metadata={"should_dlq": True, "domain": "job.summarize"},
+        )
+
+    def test_successful_store_marks_the_exception(self):
+        """Stored → ``dlq_capture_dispatched`` is set on the very object raised."""
+        error = TimeoutError("no endpoint answered")
+        with patch(
+            self._STORE, autospec=True, return_value=DLQEntryResult.created("dlq-7")
+        ) as store:
+            stored_id = DLQSink().handle_failure(error, None, self._verdict())
+
+        assert stored_id == "dlq-7"
+        assert store.call_args.kwargs["failure_type"] == "MAX_RETRIES_TIMEOUTERROR"
+        assert error.dlq_capture_dispatched is True
+
+    def test_failed_store_leaves_the_exception_unmarked(self):
+        """Not stored → no mark, so a later capture layer still parks it."""
+        error = TimeoutError("no endpoint answered")
+        with patch(
+            self._STORE,
+            autospec=True,
+            return_value=DLQEntryResult.failed("overflow rejected"),
+        ):
+            DLQSink().handle_failure(error, None, self._verdict())
+
+        assert getattr(error, "dlq_capture_dispatched", False) is False
+
+    def test_raising_store_leaves_the_exception_unmarked(self):
+        """A store that raises parked nothing, so nothing is marked."""
+        error = TimeoutError("no endpoint answered")
+        with patch(self._STORE, autospec=True, side_effect=RuntimeError("DLQ down")):
+            DLQSink().handle_failure(error, None, self._verdict())
+
+        assert getattr(error, "dlq_capture_dispatched", False) is False
+
+    def test_exception_refusing_attributes_is_stored_and_left_unmarked(self):
+        """Best effort: a type that refuses the mark is still stored, and the sink says why."""
+        error = _RefusesAttributes("frozen")
+        with (
+            patch(
+                self._STORE,
+                autospec=True,
+                return_value=DLQEntryResult.created("dlq-8"),
+            ),
+            capture_logs() as logs,
+        ):
+            stored_id = DLQSink().handle_failure(error, None, self._verdict())
+
+        assert stored_id == "dlq-8"
+        assert not hasattr(error, "dlq_capture_dispatched")
+        assert [
+            log["error_type"]
+            for log in logs
+            if log["event"] == "dlq_sink.capture_mark_skipped"
+        ] == ["_RefusesAttributes"]

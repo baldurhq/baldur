@@ -8,12 +8,20 @@ Test target: services/retry_handler/rate_limit_detection.py
 
 from __future__ import annotations
 
+import time
 from datetime import timedelta
 from email.utils import format_datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from baldur.adapters.rate_limit.memory_adapter import InMemoryRateLimitStorage
+from baldur.core.exceptions import LLMUnavailableError, RateLimitDeferredError
+from baldur.interfaces.resilience_policy import PolicyOutcome
+from baldur.services.rate_limit_coordinator import RateLimitCoordinator
+from baldur.services.rate_limit_coordinator.models import RateLimitCoordinatorConfig
+from baldur.services.retry_handler.models import RetryPolicyConfig
+from baldur.services.retry_handler.policy import RetryPolicy
 from baldur.services.retry_handler.rate_limit_detection import (
     RATE_LIMIT_INDICATORS,
     UNIDENTIFIED_COORDINATION_KEY,
@@ -26,6 +34,15 @@ from baldur.services.retry_handler.rate_limit_detection import (
 from baldur.settings.middleware import reset_middleware_settings
 from baldur.utils.retry_after import parse_retry_after
 from baldur.utils.time import utc_now
+from tests.factories.llm_doubles import (
+    FakeAnthropicError,
+    FakeGenaiError,
+    FakeOpenAIError,
+    anthropic_status_error,
+    gemini_error_body,
+    genai_api_error,
+)
+from tests.factories.time_helpers import mock_sleep
 
 # =============================================================================
 # Contract Tests
@@ -501,6 +518,143 @@ class TestStatusVocabularyContract:
         default drifted apart, one of the two gates would stop firing and a 429
         from one provider could stall calls to an unrelated one.
         """
-        from baldur.services.retry_handler.models import RetryPolicyConfig
 
         assert RetryPolicyConfig().domain == UNIDENTIFIED_COORDINATION_KEY
+
+
+# =============================================================================
+# Behavior Tests — provider verdict first
+# =============================================================================
+
+
+def _coordinator(*, default_retry_after: float = 2.0) -> RateLimitCoordinator:
+    """A coordinator over its own in-memory store, without jitter or debounce."""
+    return RateLimitCoordinator(
+        storage=InMemoryRateLimitStorage(),
+        config=RateLimitCoordinatorConfig(
+            jitter_percent=0.0,
+            debounce_window_seconds=0.0,
+            default_retry_after=default_retry_after,
+        ),
+    )
+
+
+def _one_attempt(domain: str, coordinator: RateLimitCoordinator) -> RetryPolicy:
+    """A retry stage that makes one attempt and coordinates through ``coordinator``."""
+    return RetryPolicy(
+        RetryPolicyConfig(max_attempts=1, domain=domain),
+        rate_limit_coordinator=coordinator,
+    )
+
+
+def _raising(error: Exception):
+    def call():
+        raise error
+
+    return call
+
+
+class TestDetectRateLimitProviderVerdictBehavior:
+    """An LLM SDK's exception is read by its verdict; every other one by its words."""
+
+    @pytest.mark.parametrize(
+        ("error", "expected"),
+        [
+            (FakeOpenAIError(429, headers={"retry-after": "12"}), (True, 12.0)),
+            (FakeAnthropicError(529, message="Overloaded"), (True, None)),
+            (FakeOpenAIError(503, headers={"retry-after": "4"}), (True, 4.0)),
+            (
+                FakeGenaiError(429, gemini_error_body(429, retry_delay="45s")),
+                (True, 45.0),
+            ),
+            (
+                FakeOpenAIError(
+                    429, code="insufficient_quota", headers={"retry-after": "30"}
+                ),
+                (False, None),
+            ),
+            (FakeOpenAIError(401, message="rate limit on this key"), (False, None)),
+            (
+                FakeOpenAIError(400, message="Too Many Requests in prompt"),
+                (False, None),
+            ),
+            (FakeOpenAIError(500, message="upstream throttled"), (False, None)),
+        ],
+        ids=[
+            "rate_limited_with_hint",
+            "overloaded_529_without_hint",
+            "overloaded_503_with_hint",
+            "gemini_retry_delay",
+            "quota_never_waits",
+            "auth_words_ignored",
+            "invalid_words_ignored",
+            "transient_words_ignored",
+        ],
+    )
+    def test_sdk_exception_is_read_by_its_verdict_not_its_words(self, error, expected):
+        """A limit or an overload waits with its hint; nothing else waits, whatever it says."""
+        assert detect_rate_limit(error) == expected
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            LLMUnavailableError(
+                "No LLM endpoint answered: llm.ratelimit_example_com.gpt (rate_limited)",
+                attempts=(("llm.ratelimit_example_com.gpt", "rate_limited"),),
+            ),
+            RateLimitDeferredError(key="llm.api_openai_com.gpt", not_before=None),
+        ],
+        ids=["llm_unavailable_naming_a_rate_limit_host", "rate_limit_deferral"],
+    )
+    def test_baldur_own_terminal_and_deferral_install_no_wait(self, error):
+        """Neither Baldur's no-endpoint terminal nor its deferral is a provider's 429."""
+        assert detect_rate_limit(error) == (False, None)
+
+    def test_non_sdk_exception_keeps_the_substring_rule(self):
+        """An exception from any other library is still read by its words."""
+        assert detect_rate_limit(Exception("HTTP 429 rate limit exceeded")) == (
+            True,
+            None,
+        )
+
+    def test_gemini_retry_delay_records_a_coordinator_expiry_that_far_ahead(self):
+        """Gemini's body ``retryDelay: "45s"`` becomes a shared wait of at least 45 s."""
+        # Given
+        pytest.importorskip("google.genai")
+        coordinator = _coordinator()
+        domain = "llm.generativelanguage_googleapis_com.gemini_2_0_flash"
+        error = genai_api_error(429, gemini_error_body(429, retry_delay="45s"))
+        before = time.time()
+
+        # When
+        result = _one_attempt(domain, coordinator).execute(_raising(error))
+
+        # Then
+        assert result.outcome is PolicyOutcome.FAILURE
+        assert coordinator.get_state(domain).cooldown_until >= before + 45.0
+
+    def test_anthropic_overloaded_529_installs_a_wait_a_second_caller_serves(self):
+        """A 529 with no hint still tells the fleet to wait; the next caller waits it out."""
+        # Given — the first worker is answered 529 and records the wait
+        pytest.importorskip("anthropic")
+        coordinator = _coordinator(default_retry_after=2.0)
+        domain = "llm.api_anthropic_com.claude_sonnet"
+        _one_attempt(domain, coordinator).execute(_raising(anthropic_status_error(529)))
+        installed = coordinator.get_state(domain).cooldown_until - time.time()
+        sleeps_before_call: list[int] = []
+
+        # When — a second worker calls the same endpoint
+        with mock_sleep() as slept:
+
+            def answer() -> str:
+                sleeps_before_call.append(slept.call_count)
+                return "answered"
+
+            result = _one_attempt(domain, coordinator).execute(answer)
+
+        # Then — it waited out the 529's wait before its call went out
+        assert result.outcome is PolicyOutcome.SUCCESS
+        assert sleeps_before_call == [slept.call_count]
+        assert slept.call_count >= 1
+        assert 0 < slept.total_slept <= installed + 0.5
+        assert slept.total_slept == pytest.approx(installed, abs=0.5)

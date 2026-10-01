@@ -29,16 +29,28 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from baldur.adapters.memory.circuit_breaker import (
+    InMemoryCircuitBreakerStateRepository,
+)
 from baldur.interfaces.resilience_policy import (
     PolicyContext,
     PolicyOutcome,
     PolicyResult,
 )
-from baldur.services.circuit_breaker.config import CircuitBreakerDecision
+from baldur.services.circuit_breaker.config import (
+    CircuitBreakerConfig,
+    CircuitBreakerDecision,
+)
 from baldur.services.circuit_breaker.exceptions import CircuitBreakerOpenError
 from baldur.services.circuit_breaker.policy import (
     CircuitBreakerPolicy,
     circuit_breaker,
+)
+from baldur.services.circuit_breaker.service import CircuitBreakerService
+from tests.factories.llm_doubles import (
+    FakeAnthropicError,
+    FakeGenaiError,
+    FakeOpenAIError,
 )
 
 
@@ -987,3 +999,89 @@ class TestCircuitBreakerDecoratorAsyncBehavior:
 
         assert rejected_seen is True
         assert service.get_or_create_state("async_open_api").state == CircuitState.OPEN
+
+
+# =============================================================================
+# Exception filtering (Behavior) — provider verdicts
+# =============================================================================
+
+
+class TestCircuitBreakerProviderVerdictBehavior:
+    """A provider's rejection of the request is no breaker failure; every other answer is."""
+
+    @pytest.mark.parametrize(
+        ("error", "counted"),
+        [
+            (FakeOpenAIError(400), False),
+            (FakeOpenAIError(422), False),
+            (FakeGenaiError(404), False),
+            (FakeOpenAIError(429, code="insufficient_quota"), True),
+            (FakeOpenAIError(401), True),
+            (FakeOpenAIError(429), True),
+            (FakeAnthropicError(529), True),
+            (FakeOpenAIError(500), True),
+            (FakeOpenAIError(None), True),
+            (ValueError("bad input"), True),
+        ],
+        ids=[
+            "provider_invalid_400",
+            "provider_invalid_422",
+            "provider_invalid_genai_404",
+            "quota",
+            "auth",
+            "rate_limited",
+            "overloaded",
+            "server_error",
+            "connection",
+            "not_provider",
+        ],
+    )
+    def test_is_failure_follows_the_provider_verdict(self, error, counted):
+        """Only a rejected request is exempt: the provider answered, so it is up."""
+        policy = CircuitBreakerPolicy(service_name="llm.api_openai_com.gpt_4o")
+
+        assert policy._is_failure(error) is counted
+
+    def test_provider_invalid_is_exempt_even_when_listed_as_a_failure_type(self):
+        """The exemption is a domain invariant, ahead of the operator's failure list."""
+        policy = CircuitBreakerPolicy(
+            service_name="llm.api_openai_com.gpt_4o",
+            failure_exceptions=(FakeOpenAIError,),
+        )
+
+        assert policy._is_failure(FakeOpenAIError(400)) is False
+        assert policy._is_failure(FakeOpenAIError(500)) is True
+
+    @pytest.mark.parametrize(
+        ("status", "failure_count", "state"),
+        [(400, 0, "closed"), (500, 1, "open")],
+        ids=["provider_invalid_leaves_breaker_closed", "server_error_opens_it"],
+    )
+    def test_execute_records_only_provider_failures(self, status, failure_count, state):
+        """One bad prompt cannot open the breaker that every good prompt goes through."""
+        # Given — a breaker that opens on its first counted failure
+        name = "llm.api_openai_com.gpt_4o"
+        service = CircuitBreakerService(
+            config=CircuitBreakerConfig(
+                enabled=True,
+                failure_threshold=1,
+                minimum_calls=1,
+                failure_rate_threshold=0,
+                recovery_timeout=60,
+            ),
+            repository=InMemoryCircuitBreakerStateRepository(),
+        )
+        policy = CircuitBreakerPolicy(service_name=name, cb_service=service, hooks=[])
+        error = FakeOpenAIError(status)
+
+        def call():
+            raise error
+
+        # When
+        with pytest.raises(FakeOpenAIError):
+            policy.execute(call)
+
+        # Then
+        recorded = service.get_or_create_state(name)
+        assert recorded.failure_count == failure_count
+        assert recorded.state == state

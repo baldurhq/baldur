@@ -13,6 +13,8 @@ Technique classification:
 
 from __future__ import annotations
 
+import pickle
+
 import pytest
 
 from baldur.core.exceptions import (
@@ -27,6 +29,7 @@ from baldur.core.exceptions import (
     DLQEntryNotFoundError,
     DLQError,
     DLQReplayError,
+    LLMUnavailableError,
     ResilienceError,
     RetryExhaustedError,
     RunbookError,
@@ -1111,3 +1114,79 @@ class TestDistributedHashChainUnavailableErrorContract:
         from baldur.core.exceptions import DistributedHashChainUnavailableError
 
         assert str(DistributedHashChainUnavailableError("custom")) == "custom"
+
+
+class TestLLMUnavailableErrorContract:
+    """The one error a job sees when no endpoint of a wrapped LLM client answered."""
+
+    _ATTEMPTS = (
+        ("llm.api_openai_com.gpt_4o", "overloaded"),
+        ("llm.api_groq_com.llama_3_70b", "breaker_open"),
+    )
+
+    def test_is_a_resilience_error_not_a_rejection(self):
+        """A job's composer classifies it FAILURE, so the sink parks it under the job."""
+        from baldur.interfaces.resilience_policy import PolicyRejectedException
+
+        assert issubclass(LLMUnavailableError, ResilienceError)
+        assert issubclass(LLMUnavailableError, BaldurError)
+        assert not issubclass(LLMUnavailableError, CircuitBreakerError)
+        assert not issubclass(LLMUnavailableError, PolicyRejectedException)
+
+    def test_is_exported_at_the_top_level(self):
+        """Raised by a top-level surface, so re-exported there (selection rule b)."""
+        import baldur
+        from baldur.core import exceptions
+
+        assert baldur.LLMUnavailableError is LLMUnavailableError
+        assert "LLMUnavailableError" in exceptions.__all__
+
+    def test_attempts_default_to_empty(self):
+        """No endpoint tried → no attempts."""
+        assert LLMUnavailableError("none").attempts == ()
+
+    def test_attempts_are_kept_as_a_tuple(self):
+        """A list handed in is frozen into a tuple; the caller's list is not kept."""
+        given = list(self._ATTEMPTS)
+
+        error = LLMUnavailableError("summary", attempts=given)  # type: ignore[arg-type]
+        given.clear()
+
+        assert error.attempts == self._ATTEMPTS
+
+    def test_message_is_the_summary(self):
+        """``str()`` is the summary the wrap writes."""
+        assert str(LLMUnavailableError("No LLM endpoint answered: x")) == (
+            "No LLM endpoint answered: x"
+        )
+
+    def test_pickle_round_trip_keeps_type_message_attempts_and_capture_mark(self):
+        """Celery pickles a task's exception before its failure signal; nothing is lost."""
+        error = LLMUnavailableError("No LLM endpoint answered", attempts=self._ATTEMPTS)
+        error.dlq_capture_dispatched = True  # type: ignore[attr-defined]
+
+        restored = pickle.loads(pickle.dumps(error))
+
+        assert type(restored) is LLMUnavailableError
+        assert str(restored) == "No LLM endpoint answered"
+        assert restored.attempts == self._ATTEMPTS
+        assert restored.dlq_capture_dispatched is True
+
+    def test_celery_keeps_the_same_instance_for_its_failure_signal(self):
+        """Celery rebuilds only an exception that does not round-trip; this one does."""
+        serialization = pytest.importorskip("celery.utils.serialization")
+        error = LLMUnavailableError("No LLM endpoint answered", attempts=self._ATTEMPTS)
+        error.dlq_capture_dispatched = True  # type: ignore[attr-defined]
+
+        assert serialization.get_pickleable_exception(error) is error
+
+    def test_extra_context_lists_the_attempts(self):
+        """The structlog context carries every endpoint tried, in order."""
+        error = LLMUnavailableError("summary", attempts=self._ATTEMPTS)
+
+        assert error.extra_context() == {
+            "attempts": [
+                ["llm.api_openai_com.gpt_4o", "overloaded"],
+                ["llm.api_groq_com.llama_3_70b", "breaker_open"],
+            ]
+        }

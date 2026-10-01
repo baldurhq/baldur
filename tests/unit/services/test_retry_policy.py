@@ -10,9 +10,10 @@ Target: services/retry_handler/policy.py
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Iterator
 from contextlib import nullcontext
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -28,18 +29,30 @@ from baldur.interfaces.resilience_policy import (
     PolicyOutcome,
     ResiliencePolicy,
 )
+from baldur.protect_facade import protect_with_meta
+from baldur.services.circuit_breaker import get_circuit_breaker_service
 from baldur.services.rate_limit_coordinator import (
     RateLimitCoordinator,
     RateLimitDeferredError,
 )
-from baldur.services.rate_limit_coordinator.models import RateLimitResult
+from baldur.services.rate_limit_coordinator.models import (
+    RateLimitCoordinatorConfig,
+    RateLimitResult,
+)
 from baldur.services.retry_handler.models import RetryPolicyConfig
 from baldur.services.retry_handler.policy import RetryPolicy
 from baldur.services.retry_handler.rate_limit_detection import (  # noqa: F401
     RATE_LIMIT_INDICATORS,
 )
+from baldur.settings.protect import reset_protect_settings
 from baldur.settings.retry import reset_retry_settings
 from tests.factories import dry_run_active
+from tests.factories.llm_doubles import (
+    FakeAnthropicError,
+    FakeOpenAIError,
+    openai_status_error,
+)
+from tests.factories.time_helpers import mock_sleep
 
 # =============================================================================
 # RetryPolicy — Contract
@@ -582,7 +595,6 @@ class TestRetryPolicyExhaustedEventP0_3Behavior:
 
     def test_retry_exhausted_emits_event(self):
         """Exhaustion emits RETRY_EXHAUSTED event with expected data fields."""
-        from unittest.mock import patch
 
         mock_bus = MagicMock()
         config = RetryPolicyConfig(max_attempts=2, domain="payments")
@@ -623,7 +635,6 @@ class TestRetryPolicyExhaustedEventP0_3Behavior:
 
     def test_retry_exhausted_event_bus_unavailable_returns_failure(self):
         """EventBus ImportError → retry still returns FAILURE (fail-open)."""
-        from unittest.mock import patch
 
         config = RetryPolicyConfig(max_attempts=1)
         policy = RetryPolicy(config=config)
@@ -640,7 +651,6 @@ class TestRetryPolicyExhaustedEventP0_3Behavior:
 
     def test_retry_exhausted_event_includes_context_identifiers(self):
         """Event payload includes order_id, user_id, trace_id from PolicyContext."""
-        from unittest.mock import patch
 
         mock_bus = MagicMock()
         config = RetryPolicyConfig(max_attempts=1, domain="orders")
@@ -665,7 +675,6 @@ class TestRetryPolicyExhaustedEventP0_3Behavior:
 
     def test_retry_exhausted_event_cb_fast_fail_has_attempts_1(self):
         """CB fast-fail emits RETRY_EXHAUSTED with attempts=1 (D13)."""
-        from unittest.mock import patch
 
         from baldur.core.exceptions import CircuitBreakerError
 
@@ -1046,3 +1055,186 @@ class TestRetryMaxAttemptsBelowOneContract:
             )
 
         assert calls == []
+
+
+# =============================================================================
+# RetryPolicy — provider verdicts
+# =============================================================================
+
+
+@pytest.fixture
+def protect_sandbox() -> Iterator[None]:
+    """Fresh protect caches, and a retry ladder that does not sleep."""
+    reset_protect_settings()
+    with patch(
+        "baldur.services.retry_handler.policy._DEFAULT_SLEEPER", lambda _seconds: None
+    ):
+        yield
+    reset_protect_settings()
+
+
+def _failure_count(name: str) -> int:
+    return get_circuit_breaker_service().get_or_create_state(name).failure_count
+
+
+class _Raiser:
+    """Raises its error on every call and counts the calls."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.calls = 0
+
+    def __call__(self) -> str:
+        self.calls += 1
+        raise self.error
+
+
+class TestRetryProviderVerdictBehavior:
+    """A provider answer a retry cannot change ends the loop; a limit is waited, then retried."""
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            FakeOpenAIError(400),
+            FakeOpenAIError(422),
+            FakeOpenAIError(402),
+            FakeOpenAIError(429, code="insufficient_quota"),
+            FakeOpenAIError(401),
+            FakeAnthropicError(403),
+        ],
+        ids=[
+            "provider_invalid_400",
+            "provider_invalid_422",
+            "quota_402",
+            "quota_insufficient_quota",
+            "auth_401",
+            "auth_403",
+        ],
+    )
+    def test_unchangeable_provider_answer_stops_after_one_attempt(self, error):
+        """Quota, auth and a rejected request run once and exit ``non_retryable``."""
+        call = _Raiser(error)
+        policy = RetryPolicy(
+            RetryPolicyConfig(max_attempts=3, domain="llm.api_openai_com.gpt"),
+            sleeper=lambda _seconds: None,
+        )
+
+        result = policy.execute(call)
+
+        assert call.calls == 1
+        assert result.total_attempts == 1
+        assert result.metadata["reason"] == "non_retryable"
+        assert result.error is error
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            FakeOpenAIError(429),
+            FakeAnthropicError(529),
+            FakeOpenAIError(503),
+            FakeOpenAIError(500),
+            FakeOpenAIError(None),
+        ],
+        ids=[
+            "rate_limited",
+            "overloaded_529",
+            "overloaded_503",
+            "server_500",
+            "no_status",
+        ],
+    )
+    def test_waitable_provider_answer_is_retried_to_the_cap(self, error):
+        """A limit, an overload or a transient failure is retried like any failure."""
+        call = _Raiser(error)
+        policy = RetryPolicy(
+            RetryPolicyConfig(
+                max_attempts=3, domain="llm.api_openai_com.gpt", rate_limit_aware=False
+            ),
+            sleeper=lambda _seconds: None,
+        )
+
+        result = policy.execute(call)
+
+        assert call.calls == 3
+        assert result.metadata["reason"] == "max_attempts"
+
+    def test_rate_limited_answer_is_retried_after_the_shared_wait(self):
+        """A 429 asking for 3 s installs that wait; the retry goes out after it."""
+        # Given
+        coordinator = RateLimitCoordinator(
+            storage=InMemoryRateLimitStorage(),
+            config=RateLimitCoordinatorConfig(
+                jitter_percent=0.0,
+                debounce_window_seconds=0.0,
+                default_retry_after=0.5,
+            ),
+        )
+        answers: list = [FakeOpenAIError(429, headers={"retry-after": "3"}), "answered"]
+        sleeps_at_call: list[int] = []
+
+        # When
+        with mock_sleep() as slept:
+
+            def call() -> str:
+                sleeps_at_call.append(slept.call_count)
+                outcome = answers.pop(0)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return outcome
+
+            result = RetryPolicy(
+                RetryPolicyConfig(max_attempts=2, domain="llm.api_openai_com.gpt"),
+                rate_limit_coordinator=coordinator,
+                sleeper=lambda _seconds: None,
+            ).execute(call)
+
+        # Then — the second attempt left only after the provider's 3 s
+        assert (result.outcome, result.value) == (PolicyOutcome.SUCCESS, "answered")
+        assert sleeps_at_call[0] == 0
+        assert sleeps_at_call[1] >= 1
+        assert slept.total_slept == pytest.approx(3.0, abs=0.5)
+
+    def test_protect_provider_invalid_request_runs_once_never_falls_back_or_counts(
+        self, protect_sandbox
+    ):
+        """An OpenAI 400 under ``protect(retry=True, fallback=f)``: one call, no ``f``, no count."""
+        # Given
+        pytest.importorskip("openai")
+        name = f"svc.provider_invalid.{uuid.uuid4().hex[:8]}"
+        call = _Raiser(openai_status_error(400))
+        served: list[str] = []
+        before = _failure_count(name)
+
+        # When
+        result = protect_with_meta(
+            name,
+            call,
+            retry=True,
+            fallback=lambda: served.append("f") or "served",
+        )
+
+        # Then
+        assert call.calls == 1
+        assert result.attempts == 1
+        assert result.metadata["reason"] == "non_retryable"
+        assert (result.success, result.fallback_used, served) == (False, False, [])
+        assert result.error is call.error
+        assert _failure_count(name) == before
+
+    @pytest.mark.parametrize(
+        "error",
+        [FakeOpenAIError(429, code="insufficient_quota"), FakeOpenAIError(401)],
+        ids=["quota", "auth"],
+    )
+    def test_protect_quota_or_auth_runs_once_but_counts_and_falls_back(
+        self, error, protect_sandbox
+    ):
+        """Waiting cannot fix it, so no retry — but the provider failed, so ``f`` serves."""
+        name = f"svc.provider_unusable.{uuid.uuid4().hex[:8]}"
+        call = _Raiser(error)
+
+        result = protect_with_meta(name, call, retry=True, fallback=lambda: "served")
+
+        assert call.calls == 1
+        assert (result.fallback_used, result.value) == (True, "served")
+        assert _failure_count(name) == 1

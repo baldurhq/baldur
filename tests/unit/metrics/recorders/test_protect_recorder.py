@@ -15,6 +15,7 @@ Scope:
 
 from __future__ import annotations
 
+import uuid
 from unittest.mock import MagicMock
 
 import pytest
@@ -370,3 +371,106 @@ class TestProtectRecorderStickyFailure:
 
         # Then — cached instance wins; flag is ignored when _recorder present
         assert result is cached
+
+
+# =============================================================================
+# Behavior — record_fallback() counts an activation and nothing else
+# =============================================================================
+
+
+def _sample(metric: str, labels: dict[str, str]) -> float:
+    from prometheus_client import REGISTRY
+
+    return REGISTRY.get_sample_value(metric, labels) or 0.0
+
+
+def _series_named(family: str, name: str) -> list[dict[str, str]]:
+    """Every sample of ``family`` whose ``name`` label is ``name``."""
+    from prometheus_client import REGISTRY
+
+    return [
+        sample.labels
+        for metric in REGISTRY.collect()
+        if metric.name == family
+        for sample in metric.samples
+        if sample.labels.get("name") == name
+    ]
+
+
+class _RaisingCollector:
+    """A counter whose ``labels`` raises, and remembers it was reached."""
+
+    def __init__(self) -> None:
+        self.touched = False
+
+    def labels(self, **_labels):
+        self.touched = True
+        raise RuntimeError("registry down")
+
+
+class TestProtectRecorderFallbackBehavior:
+    """``record_fallback`` counts one activation; each endpoint's own call is recorded elsewhere."""
+
+    @pytest.fixture(autouse=True)
+    def _prometheus(self):
+        pytest.importorskip("prometheus_client")
+
+    @pytest.mark.parametrize("mode", ["sync", "async"])
+    def test_record_fallback_counts_one_activation_under_name_and_mode(self, mode):
+        """``baldur_protect_fallback_total{name, mode}`` goes up by exactly one."""
+        name = f"llm.primary_{uuid.uuid4().hex[:8]}"
+        labels = {"name": name, "mode": mode}
+        before = _sample("baldur_protect_fallback_total", labels)
+
+        ProtectMetricRecorder().record_fallback(name, mode=mode)
+
+        assert _sample("baldur_protect_fallback_total", labels) == before + 1
+
+    def test_record_fallback_observes_no_attempts_or_duration(self):
+        """The endpoints' attempts were already recorded under their own names."""
+        name = f"llm.primary_{uuid.uuid4().hex[:8]}"
+
+        ProtectMetricRecorder().record_fallback(name)
+
+        assert _series_named("baldur_protect_attempts", name) == []
+        assert _series_named("baldur_protect_duration_seconds", name) == []
+
+    def test_record_still_observes_all_three_series(self):
+        """``record()`` keeps its three observations after the shared path."""
+        name = f"svc.fallback_{uuid.uuid4().hex[:8]}"
+        call = {"name": name, "outcome": "fallback", "mode": "sync"}
+
+        ProtectMetricRecorder().record(
+            name=name,
+            outcome="fallback",
+            attempts=2,
+            duration_seconds=0.25,
+            fallback_used=True,
+        )
+
+        assert _sample("baldur_protect_attempts_count", call) == 1
+        assert _sample("baldur_protect_attempts_sum", call) == 2
+        assert _sample("baldur_protect_duration_seconds_count", call) == 1
+        assert (
+            _sample("baldur_protect_fallback_total", {"name": name, "mode": "sync"})
+            == 1
+        )
+
+    def test_record_fallback_is_fail_open_and_says_so(self, monkeypatch):
+        """A broken counter never reaches the caller; the failure is logged as a WARNING."""
+        from baldur.metrics.recorders import protect as recorder_module
+
+        recorder = ProtectMetricRecorder()
+        collector = _RaisingCollector()
+        recorder._fallback_total = collector
+        warnings: list[str] = []
+        monkeypatch.setattr(
+            recorder_module.logger,
+            "warning",
+            lambda event, **_fields: warnings.append(event),
+        )
+
+        recorder.record_fallback("llm.primary", mode="sync")
+
+        assert collector.touched is True
+        assert warnings == ["metrics.record_protect_failed"]
