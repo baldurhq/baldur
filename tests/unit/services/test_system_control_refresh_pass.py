@@ -12,7 +12,7 @@ Verification techniques applied (§8):
   - §8.7 Concurrency — readers finish while every manager lock is held; a
     local write racing a pass's read is never overwritten by it
   - §8.4 Side effects — the local announcement, its source and payload, the
-    INFO line and gauges on a copy change
+    INFO line on a copy change, the gauges on every assignment of the copy
   - §8.12 Branch outcome — heard vs unheard, system-control vs throttle source,
     a failed announcement repeated
   - §8.2 Exception/edge cases — every reader stays answerable when the store,
@@ -30,14 +30,37 @@ from structlog.testing import capture_logs
 from baldur.services.event_bus.bus.event_types import EventType
 from baldur.services.event_bus.bus.models import create_event
 from baldur.services.system_control import (
+    SystemControlManager,
     SystemState,
+    get_system_control,
     is_baldur_enabled,
     is_dry_run,
+    reset_system_control,
 )
 
 ACTOR = "oncall-admin"
 REASON = "payment incident"
 _JOIN_SECONDS = 5.0
+# The series the shipped Grafana "System Control (Kill Switch)" panels read.
+ENABLED_GAUGE = "baldur_system_control_enabled"
+DRY_RUN_GAUGE = "baldur_system_control_dry_run"
+
+
+def _gauge(name: str) -> float | None:
+    from prometheus_client import REGISTRY
+
+    return REGISTRY.get_sample_value(name)
+
+
+def _zero_switch_gauges() -> None:
+    """Both gauges at 0, what a gauge holds before anything sets it."""
+    from baldur.metrics.recorders.system_control import (
+        set_sc_dry_run,
+        set_sc_enabled,
+    )
+
+    set_sc_enabled(False)
+    set_sc_dry_run(False)
 
 
 def _read_everything(manager) -> tuple:
@@ -174,15 +197,12 @@ class TestSystemControlRefreshPassBehavior:
         control_env.load(enabled=True)
         control_env.seed(version=2, enabled=False)
 
-        with (
-            patch("baldur.services.system_control.set_sc_enabled") as gauge,
-            capture_logs() as logs,
-        ):
+        with capture_logs() as logs:
             control_env.refresh()
             control_env.refresh()
 
         assert control_env.manager.is_enabled() is False
-        gauge.assert_called_once_with(False)
+        assert _gauge(ENABLED_GAUGE) == 0.0
         changed = [
             log for log in logs if log["event"] == "system_control.state_changed"
         ]
@@ -346,3 +366,45 @@ class TestSystemControlRefreshPassBehavior:
 
         assert control_env.manager.is_dry_run() is True
         assert control_env.kill_switch_events() == []
+
+
+# =============================================================================
+# Behavior — the switch gauges
+# =============================================================================
+
+
+class TestSystemControlGaugeBehavior:
+    """The gauges export this process's copy, whether or not it ever moved."""
+
+    def test_pass_that_reads_the_switch_unchanged_exports_it_enabled(self, control_env):
+        """No stored value and a copy that stays enabled still read 1, not 0."""
+        # Given: nothing stored (a flushed store) and gauges still at 0
+        _zero_switch_gauges()
+
+        # When
+        control_env.refresh()
+
+        # Then
+        assert control_env.manager.switches() == (True, False)
+        assert _gauge(ENABLED_GAUGE) == 1.0
+        assert _gauge(DRY_RUN_GAUGE) == 0.0
+
+    def test_new_manager_exports_its_default_copy_while_the_store_is_down(
+        self, control_env
+    ):
+        """A process booting into a store outage acts enabled and reports enabled."""
+        # Given: the store cannot be read and the gauges are at 0
+        control_env.store.fail_reads = ConnectionError("store down")
+        _zero_switch_gauges()
+        SystemControlManager._instance = None
+        reset_system_control(cleanup=False)
+
+        # When: the manager is built and its first pass fails
+        manager = get_system_control()
+        control_env.refresh()
+
+        # Then
+        assert manager.is_state_known() is False
+        assert manager.switches() == (True, False)
+        assert _gauge(ENABLED_GAUGE) == 1.0
+        assert _gauge(DRY_RUN_GAUGE) == 0.0

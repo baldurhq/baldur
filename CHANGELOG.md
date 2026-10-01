@@ -61,6 +61,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A state-store outage no longer slows protected calls or makes `is_baldur_enabled()` raise.
 - Two processes writing the file state store at once no longer corrupt it.
 - A process holding a stale switch state no longer overwrites a newer flip.
+- `baldur_system_control_enabled` no longer reads 0 (disabled) while the kill switch is not pulled.
 
 ## [1.16.0] - 2026-09-28
 

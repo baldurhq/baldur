@@ -270,6 +270,10 @@ class SystemControlManager(EventEmitterMixin):
         # The copy readers answer from. Replaced whole, never mutated in place,
         # so a reader's single reference read sees one consistent state.
         self._snapshot: SystemState = SystemState()
+        # Exported now, not at the first pass: a store that cannot be read at
+        # boot keeps this default copy in force, while the enabled gauge would
+        # read its initial 0 ("disabled").
+        self._export_copy(self._snapshot)
         # Bumped by every local write in the same apply-lock section that
         # assigns its outcome; a pass whose read began before it is discarded.
         self._write_generation: int = 0
@@ -939,11 +943,18 @@ class SystemControlManager(EventEmitterMixin):
         return True
 
     @staticmethod
-    def _record_copy_change(old: SystemState, new: SystemState, *, log: bool) -> None:
-        if old.enabled != new.enabled:
-            set_sc_enabled(new.enabled)
-        if old.dry_run != new.dry_run:
-            set_sc_dry_run(new.dry_run)
+    def _export_copy(state: SystemState) -> None:
+        """Set the switch gauges to what this process's copy holds."""
+        set_sc_enabled(state.enabled)
+        set_sc_dry_run(state.dry_run)
+
+    @classmethod
+    def _record_copy_change(
+        cls, old: SystemState, new: SystemState, *, log: bool
+    ) -> None:
+        # Every assignment exports the copy, a change or not: a copy that never
+        # moves is still exported, and a recreated metrics registry catches up.
+        cls._export_copy(new)
         if log and (old.enabled != new.enabled or old.dry_run != new.dry_run):
             logger.info(
                 "system_control.state_changed",
@@ -1057,8 +1068,6 @@ class SystemControlManager(EventEmitterMixin):
             except Exception as e:
                 logger.warning("system_control.reset_write_failed", error=str(e))
             self._assign_local(SystemState())
-            set_sc_enabled(True)
-            set_sc_dry_run(False)
             record_sc_state_change("reset")
             logger.info("system_control.system_state_reset_defaults")
             self._log_audit(
