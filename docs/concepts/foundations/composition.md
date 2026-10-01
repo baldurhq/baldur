@@ -85,9 +85,11 @@ raising, it degrades to the fallback when you set one.
 | Timeout — the wall-clock bound is hit | raises `TimeoutPolicyError` | serves the fallback |
 | CB-open — the breaker rejects the call | raises `CircuitBreakerOpenError` | serves the fallback |
 
-Two outcomes get past the fallback. A blocked idempotency duplicate raises
-`IdempotencyDuplicateError`, so the caller knows the work did not run a second time. And an error
-your client *returns* instead of raising, such as a response object carrying a 503 or a 429, comes
+Two kinds of outcome get past the fallback. The idempotency check runs before the pipeline, so its
+refusals reach the caller directly: a blocked duplicate raises `IdempotencyDuplicateError`, so the
+caller knows the work did not run a second time, and a check the dedup store could not answer
+raises `IdempotencyUnavailableError` by default. And an error your client *returns* instead of
+raising, such as a response object carrying a 503 or a 429, comes
 back to you untouched: the breaker counts it as a failure, but retry, the fallback, and the
 dead-letter queue all see a call that returned. When you want those layers to act on error
 statuses, have the protected function raise on them (call `response.raise_for_status()` inside it,
@@ -150,24 +152,26 @@ how many attempts?) without catching an exception, reach one level down for
   provider's own idempotency key. Baldur will not silently assume it is. See
   [Idempotency](../oss/idempotency.md) for the duplicate calls the key does block.
 - **`dlq=True` captures the final failure on either tier, with or without `retry=`.** A call that
-  raised, that exceeded its `timeout=`, or that an open breaker rejected is recorded. On the
-  decorator the entry carries a snapshot of the function's plain-value arguments, which is what a
-  replay re-runs; the `baldur.protect()` form has no arguments to read, so its entry holds only
-  what you pass as `context=`. With `retry=` the capture happens once retry gives up, so pair the
-  two only when the client does not already retry; an SDK's built-in retries stay where they are.
-  The `@dlq_protect` preset pins both on, which is the setting you want when losing the work is not
-  an option. The backlog is browsable in the web console, and entries can be retried once the
-  dependency recovers, with no PRO required. A replay runs the work again, so the safe-to-repeat
-  rule above applies to it as well. PRO adds the operate-at-scale surface: one-click batch replay,
-  adaptive pacing, and archive/purge retention.
+  raised, that exceeded its `timeout=`, or that an open breaker rejected is recorded, unless the
+  fallback answered it. On the decorator the entry carries a snapshot of the function's
+  plain-value arguments, which a replay hands to the replay handler you register for that name
+  (nothing replays without one); the `baldur.protect()` form has no arguments to read, so its
+  entry holds only what you pass as `context=`. With `retry=` the capture happens once retry gives
+  up, so pair the two only when the client does not already retry; an SDK's built-in retries stay
+  where they are. The `@dlq_protect` preset pins both on, which is the setting you want when losing
+  the work is not an option. The backlog is browsable in the web console, and entries can be
+  retried once the dependency recovers, with no PRO required. A replay runs the work again, so the
+  safe-to-repeat rule above applies to it as well. PRO adds the operate-at-scale surface: one-click
+  batch replay from the console and REST, and archive/purge retention.
   Limits: a second capture layer that fires for the same failure records its own entry as well —
   the Django middleware on the resulting 5xx, the Celery signal hook on the attempt Celery gives up
   on, or an enclosing call with `dlq=True` around another `dlq=True` call, where each site parks
   its own entry for the same work. The Celery hook and an enclosing `dlq=True` call skip only a
-  breaker rejection an inner site already parked, so use one layer per failure. Inside a task that Celery retries itself, each execution's
-  failure is parked, so one task can leave several entries for the same work. A sync call the
-  bound cut off may still be running when it is parked, and when it is replayed; on the sync path
-  `idempotency_key=` does not refuse that replay, because the key is released at the timeout (see
+  breaker rejection an inner site already parked, so use one layer per failure. Inside a task that
+  Celery retries itself, each execution's failure is parked, so one task can leave several entries
+  for the same work. A sync call the bound cut off may still be running when it is parked, and when
+  it is replayed; on the sync path `idempotency_key=` does not refuse that replay, because the key
+  is released at the timeout (see
   [Idempotency](../oss/idempotency.md#how-it-works-in-baldur)). See
   [what reaches the queue and how a replay re-runs it](dlq-replay.md).
 - **The fallback runs *outside* the timeout clock, so keep it cheap and local.** The timeout bounds
@@ -188,16 +192,17 @@ how many attempts?) without catching an exception, reach one level down for
   still works unchanged. (For outcome-level conditions beyond the error type, the lower-level
   builder in `baldur.resilience.policies` exposes a `predicate=` on its `FallbackPolicy`; the
   facade covers the common case through the error-aware callable above.)
-- **On `async def` functions**, the whole pipeline composes with the same guarantees as sync —
-  circuit breaker, retry, fallback, dead-letter, idempotency, and timeout — in the same order (the
-  fallback outermost, then the breaker, then timeout, then retry). A given `name` shares one breaker
-  across both call styles, so failures counted on a sync call and on an async call open the same
-  circuit. `@baldur.protected` detects whether the function is sync or async and dispatches
-  automatically; reach for `aprotect()` / `@baldur.aprotected` when you want the async path explicit
-  at the call site. The one thing the async path will not do silently: if you hand `retry=` a
+- **On `async def` functions**, the same patterns compose (circuit breaker, retry, fallback,
+  dead-letter, idempotency, and timeout) in the same order: the fallback outermost, then the
+  breaker, then timeout, then retry. A given `name` shares one breaker across both call styles, so
+  failures counted on a sync call and on an async call open the same circuit. `@baldur.protected`
+  detects whether the function is sync or async and dispatches automatically; reach for
+  `aprotect()` / `@baldur.aprotected` when you want the async path explicit at the call site. Two
+  things differ from sync. The async path awaits the fallback's return value, so give an async
+  function an `async def` fallback: a plain function or lambda there still runs, but its answer is
+  dropped with a warning in the log and the original error is raised. And if you hand `retry=` a
   hand-rolled sync policy object (anything other than a tenacity bridge, which Baldur auto-converts
-  to its async twin), it raises a clear error rather than run it unawaited — the framework's rule is
-  to say so loudly instead of failing silent.
+  to its async twin), it raises a clear error rather than run it unawaited.
 
 ## Configuration
 
