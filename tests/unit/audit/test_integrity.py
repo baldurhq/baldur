@@ -81,7 +81,7 @@ class TestHashChainManager:
             assert state["sequence"] == 1
 
 
-class TestHashChainVerifier:
+class TestHashChainVerifierBehavior:
     """Tests for HashChainVerifier."""
 
     def test_verify_chain_correct(self):

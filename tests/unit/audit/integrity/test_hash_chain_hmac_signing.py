@@ -331,7 +331,7 @@ class TestVerifierNoDowngrade:
         assert "hash mismatch" in error.lower()
 
 
-class TestVerifierConstantTimeCompare:
+class TestVerifierConstantTimeCompareBehavior:
     """Verify-side current_hash comparison is timing-safe (D8, SC #6)."""
 
     def test_verify_chain_compares_via_compare_digest(self, monkeypatch):

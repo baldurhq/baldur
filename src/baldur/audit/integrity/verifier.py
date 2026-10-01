@@ -59,6 +59,7 @@ ISSUE_CHAIN_BROKEN = "chain_broken"
 ISSUE_MISSING_ENTRY = "missing_entry"
 ISSUE_DUPLICATE_ENTRY = "duplicate_entry"
 ISSUE_UNREADABLE_ROW = "unreadable_row"
+ISSUE_UNCHAINED_ROW = "unchained_row"
 ISSUE_UNKEYED_ENTRY = "unkeyed_entry"
 ISSUE_SIGNING_KEY_MISSING = "signing_key_missing"
 ISSUE_SIGNING_KEY_MISMATCH = "signing_key_mismatch"
@@ -221,17 +222,23 @@ class TrailWalk:
         self._file_index: dict[str, int] = {}
         self._records: list[_Record] = []
         self._unchained: list[_Record] = []
+        self._foreign: list[tuple[_Record, str]] = []
         self._unreadable: list[dict[str, Any]] = []
         self._incomplete: list[dict[str, Any]] = []
         self._rows = 0
-        self._rows_without_chain = 0
+        self._rows_without_chain: list[tuple[str | None, int | None]] = []
 
     # ------------------------------------------------------------------
     # First pass: one row at a time
     # ------------------------------------------------------------------
 
     def add_row(
-        self, row: Any, *, file: str | None = None, line: int | None = None
+        self,
+        row: Any,
+        *,
+        file: str | None = None,
+        line: int | None = None,
+        foreign_partition: str | None = None,
     ) -> None:
         """Check one row's fingerprint and keep its compact record.
 
@@ -239,12 +246,15 @@ class TrailWalk:
             row: The parsed row.
             file: Where it was read from, if from a file.
             line: Its line number (or its position in a list).
+            foreign_partition: The partition the row's own (signed)
+                ``partition`` field names, when it is not this trail's: the
+                row was copied in from another partition's chain.
         """
         self._rows += 1
         file_index = self._intern_file(file)
         integrity = row.get("integrity") if isinstance(row, dict) else None
         if not isinstance(integrity, dict):
-            self._rows_without_chain += 1
+            self._rows_without_chain.append((file, line))
             return
 
         sequence = integrity.get("sequence")
@@ -272,7 +282,9 @@ class TrailWalk:
             stamped="source_reset" in integrity or bool(integrity.get("degraded")),
             verdict=self._fingerprint(row, integrity, stored_hash),
         )
-        if sequence > 0:
+        if foreign_partition is not None:
+            self._foreign.append((record, foreign_partition))
+        elif sequence > 0:
             self._records.append(record)
         else:
             self._unchained.append(record)
@@ -458,13 +470,20 @@ class _Linker:
 
     def run(self) -> TrailReport:
         self._report_fingerprints()
+        self._report_foreign()
 
         start = self._start
         previous_present = start.sequence
-        seen_above_start = False
         by_sequence: dict[int, list[_Record]] = {}
         for record in self._records:
             by_sequence.setdefault(record.sequence, []).append(record)
+        # A start the trail itself holds (a window's margin entry) is an entry
+        # read, so a gap right above it lies between two entries read: it is
+        # missing, not an unread head.
+        seen_above_start = start.hash is not None and any(
+            _equal(record.stored_hash, start.hash)
+            for record in by_sequence.get(start.sequence, ())
+        )
 
         for sequence, group in by_sequence.items():
             if sequence <= start.sequence:
@@ -509,6 +528,22 @@ class _Linker:
                 unkeyed_run.append(record)
         if unkeyed_run:
             self._report_unkeyed(unkeyed_run)
+
+    def _report_foreign(self) -> None:
+        for record, partition in self._walk._foreign:
+            self._issue(
+                record.sequence,
+                {
+                    "type": ISSUE_CHAIN_BROKEN,
+                    "sequence": record.sequence,
+                    **self._location(record),
+                    "message": (
+                        f"Chain broken at entry {record.sequence}: its signed "
+                        f"partition field names '{partition or 'default'}', not "
+                        "this trail's - copied in from another partition's chain"
+                    ),
+                },
+            )
 
     def _report_unkeyed(self, run: list[_Record]) -> None:
         first, last = run[0].sequence, run[-1].sequence
@@ -696,14 +731,35 @@ class _Linker:
     def _build_report(self) -> TrailReport:
         walk = self._walk
         notes = list(self._notes)
-        if walk._rows_without_chain:
+        chained = bool(walk._records or walk._unchained or walk._foreign)
+        chainless_issues: list[dict[str, Any]] = []
+        if walk._rows_without_chain and chained:
+            # Every writer chains every row while the chain is on, and a row
+            # with no integrity block needs no key to write: beside chained
+            # entries it is an insertion until shown otherwise.
+            chainless_issues = [
+                {
+                    "type": ISSUE_UNCHAINED_ROW,
+                    "sequence": None,
+                    "file": file,
+                    "line": line,
+                    "message": (
+                        "Row carries no integrity block in a chained trail: "
+                        "inserted, or written while the chain was off - the "
+                        "chain cannot tell them apart"
+                    ),
+                }
+                for file, line in walk._rows_without_chain
+            ]
+        elif walk._rows_without_chain:
+            count = len(walk._rows_without_chain)
             notes.append(
                 {
                     "type": NOTE_ROWS_WITHOUT_CHAIN,
-                    "count": walk._rows_without_chain,
+                    "count": count,
                     "message": (
-                        f"{walk._rows_without_chain} row(s) carry no integrity "
-                        "block: written while the chain was off"
+                        f"{count} row(s) carry no integrity block and no row "
+                        "is chained: written while the chain was off"
                     ),
                 }
             )
@@ -722,6 +778,7 @@ class _Linker:
         notes.extend(walk._incomplete)
 
         issues = list(walk._unreadable)
+        issues.extend(chainless_issues)
         issues.extend(
             issue for _, issue in sorted(self._issues, key=lambda pair: pair[0])
         )
@@ -732,7 +789,7 @@ class _Linker:
         return TrailReport(
             partition=walk._partition,
             intact=not issues,
-            entries=len(records) + len(walk._unchained),
+            entries=len(records) + len(walk._unchained) + len(walk._foreign),
             rows=walk._rows,
             first_sequence=records[0].sequence if records else None,
             last_sequence=records[-1].sequence if records else None,
@@ -747,13 +804,22 @@ def _row_partition(row: Any) -> str:
     return partition if isinstance(partition, str) else ""
 
 
+def _foreign_partition(row: Any, partition: str) -> str | None:
+    """The partition a row names when it is not ``partition``, else ``None``."""
+    named = _row_partition(row)
+    return named if named != partition else None
+
+
 class TrailSet:
     """The walk over several trails, one per partition.
 
     Two partitions are never one trail: each has its own sequence source, so
     merged, every shared sequence would read as a fork. A file whose name has
     the ledger's shape belongs to the partition its name carries; any other
-    file contributes each row to the partition the row names.
+    file contributes each row to the partition the row names. A row in a
+    file of fixed partition whose own (signed) ``partition`` field names
+    another one was copied in from that partition's chain, and is reported
+    as a break.
     """
 
     def __init__(self, *, key: Any = KEY_FROM_SETTINGS) -> None:
@@ -810,9 +876,14 @@ class TrailSet:
                             file=file, line=line, reason=str(e)
                         )
                     continue
+                foreign = None
                 if fixed is None:
                     current = _row_partition(row)
-                self.walk(current).add_row(row, file=file, line=line)
+                else:
+                    foreign = _foreign_partition(row, fixed)
+                self.walk(current).add_row(
+                    row, file=file, line=line, foreign_partition=foreign
+                )
                 yield row
 
     def read_window(self, window: LedgerWindow, *, partition: str) -> None:
@@ -826,7 +897,12 @@ class TrailSet:
                 except ValueError as e:
                     walk.add_unreadable(file=file, line=line, reason=str(e))
                     continue
-                walk.add_row(row, file=file, line=line)
+                walk.add_row(
+                    row,
+                    file=file,
+                    line=line,
+                    foreign_partition=_foreign_partition(row, partition),
+                )
             if part.unterminated is not None:
                 line, raw = part.unterminated
                 walk.add_incomplete_last_line(file=file, line=line)
@@ -834,7 +910,12 @@ class TrailSet:
                     row = json.loads(raw)
                 except ValueError:
                     continue
-                walk.add_row(row, file=file, line=line)
+                walk.add_row(
+                    row,
+                    file=file,
+                    line=line,
+                    foreign_partition=_foreign_partition(row, partition),
+                )
 
     def reports(self, **report_options: Any) -> list[TrailReport]:
         """Report every trail, ordered by partition (default first).
@@ -923,7 +1004,8 @@ def verify_ledger_window(
 
     The oldest :data:`LEDGER_TAIL_MIN_LINES` lines read are a margin: their
     highest entry is where the check begins, so entries appended out of order
-    across the window's lower edge are not read as absent. Only when the read
+    across the window's lower edge are not read as absent, while a gap right
+    above that entry, between two entries read, is. Only when the read
     covered the whole ledger does the check begin at the chain's own start,
     and even then an absent head is a note: the window vouches for what it
     read, not for files that are not there.

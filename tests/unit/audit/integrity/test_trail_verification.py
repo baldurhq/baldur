@@ -60,6 +60,10 @@ from baldur.audit.integrity.ledger_tail import (
     read_ledger_window,
 )
 from baldur.audit.integrity.models import compute_hash
+from baldur.audit.integrity.redis_manager import (
+    CHAIN_SEQUENCE_KEY,
+    chain_namespace_prefix,
+)
 from baldur.audit.integrity.verifier import (
     CHAIN_BEGINNING,
     GENESIS_HASH,
@@ -69,6 +73,7 @@ from baldur.audit.integrity.verifier import (
     ISSUE_MISSING_ENTRY,
     ISSUE_SIGNING_KEY_MISMATCH,
     ISSUE_SIGNING_KEY_MISSING,
+    ISSUE_UNCHAINED_ROW,
     ISSUE_UNKEYED_ENTRY,
     ISSUE_UNREADABLE_ROW,
     NOTE_CHAIN_FORK,
@@ -114,7 +119,6 @@ _FLEET_ORDER = ("a", "b", "b", "a", "b", "b", "a", "b", "b")
 
 _ADAPTER_CLOCK = "baldur.adapters.audit.hashchain_adapter.utc_now"
 _RECORDER_LOOKUP = "baldur.api.handlers.continuous_audit._recorder"
-_REDIS_SEQUENCE_KEY = "baldur:hashchain:default:audit:hash_chain:seq"
 
 
 @pytest.fixture(autouse=True)
@@ -382,6 +386,7 @@ class TestAuditVerificationConstantsContract:
             (ISSUE_MISSING_ENTRY, "missing_entry"),
             (ISSUE_DUPLICATE_ENTRY, "duplicate_entry"),
             (ISSUE_UNREADABLE_ROW, "unreadable_row"),
+            (ISSUE_UNCHAINED_ROW, "unchained_row"),
             (ISSUE_UNKEYED_ENTRY, "unkeyed_entry"),
             (ISSUE_SIGNING_KEY_MISSING, "signing_key_missing"),
             (ISSUE_SIGNING_KEY_MISMATCH, "signing_key_mismatch"),
@@ -509,13 +514,25 @@ class TestTrailWalkBehavior:
 
         assert _found(reversed_order.issues) == _found(in_order.issues)
 
-    def test_rows_without_an_integrity_block_are_a_counted_note(self):
-        rows = [{"event": "chain off"}, *_chain(3), {"event": "chain off again"}]
+    def test_rows_without_an_integrity_block_beside_chained_entries_fail(self):
+        # A row with no integrity block needs no key to write, so beside
+        # chained entries it is reported where it is, as an insertion
+        rows = [{"event": "chain off"}, *_chain(3), {"event": "forged"}]
 
         report = _walk(rows)
 
-        assert report.intact is True
+        assert report.intact is False
         assert (report.rows, report.entries) == (5, 3)
+        assert _found(report.issues) == [(ISSUE_UNCHAINED_ROW, None)] * 2
+        assert [issue["line"] for issue in report.issues] == [0, 4]
+        assert NOTE_ROWS_WITHOUT_CHAIN not in _types(report.notes)
+
+    def test_rows_without_an_integrity_block_and_no_chained_entry_are_a_note(
+        self,
+    ):
+        report = _walk([{"event": "chain off"}, {"event": "chain off again"}])
+
+        assert report.intact is True
         assert _types(report.notes) == [NOTE_ROWS_WITHOUT_CHAIN]
         assert report.notes[0]["count"] == 2
 
@@ -753,7 +770,11 @@ class TestForkAndDuplicateBehavior:
         with patch(_ADAPTER_CLOCK, return_value=_DAYS[0]):
             for index, name in enumerate(("a", "a", "a", "b", "reset", "a", "b")):
                 if name == "reset":
-                    assert redis.delete(_REDIS_SEQUENCE_KEY) == 1
+                    sequence_key = (
+                        chain_namespace_prefix(hosts["a"].redis_key_prefix, "")
+                        + CHAIN_SEQUENCE_KEY
+                    )
+                    assert redis.delete(sequence_key) == 1
                     continue
                 monkeypatch.setenv("HOSTNAME", f"host-{name}")
                 hosts[name].log(_config_entry(f"reset-{index}"))
@@ -871,7 +892,9 @@ class TestTrailSetBehavior:
         return trails.reports()
 
     def test_ledger_shaped_name_puts_the_file_in_its_partition(self, tmp_path):
-        path = _write_rows(tmp_path / "audit_2026-09-28_worker.jsonl", _chain(3))
+        path = _write_rows(
+            tmp_path / "audit_2026-09-28_worker.jsonl", _partition_chain(3, "worker")
+        )
 
         (report,) = self._read(path)
 
@@ -907,6 +930,24 @@ class TestTrailSetBehavior:
             ("worker", 3, True),
         ]
         assert all(report.notes == [] for report in reports)
+
+    def test_row_signed_for_another_partition_is_chain_broken_at_sequence_one(
+        self, tmp_path
+    ):
+        # Given a default-partition ledger, and the worker partition's entry 1
+        # (validly signed, linking to GENESIS) copied into it
+        worker_one = _worker_entry_one()
+        path = _write_rows(
+            tmp_path / "audit_2026-09-28.jsonl", [*_chain(3), worker_one]
+        )
+
+        # When the ledger is read
+        (report,) = self._read(path)
+
+        # Then the copy is a break at its own sequence, never a writer-made fork
+        assert _found(report.issues) == [(ISSUE_CHAIN_BROKEN, 1)]
+        assert report.issues[0]["line"] == 4
+        assert report.notes == []
 
     def test_explicit_partition_overrides_name_and_rows(self, tmp_path):
         path = _write_rows(tmp_path / "audit_2026-09-28_worker.jsonl", _chain(2))
@@ -977,6 +1018,22 @@ class TestTrailSetBehavior:
         reports = self._read(*paths)
 
         assert [report.partition for report in reports] == ["", "alpha", "zeta"]
+
+
+def _partition_chain(count: int, partition: str) -> list[dict[str, Any]]:
+    """``count`` entries of ``partition``'s chain, each signing its partition field."""
+    return _relinked(
+        [
+            {**row, "partition": partition}
+            for row in _chain(count, event_prefix=partition)
+        ]
+    )
+
+
+def _worker_entry_one() -> dict[str, Any]:
+    """Entry 1 of the ``worker`` partition's chain, its partition field signed."""
+    (row,) = _relinked([{**_chain(1, event_prefix="worker")[0], "partition": "worker"}])
+    return row
 
 
 def _relinked(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1053,8 +1110,12 @@ class TestLedgerWindowVerificationBehavior:
 
     @pytest.mark.parametrize(
         ("removed_sequence", "expected"),
-        [(70, []), (95, [(ISSUE_MISSING_ENTRY, 95)])],
-        ids=["inside_the_margin", "above_the_margin"],
+        [
+            (70, []),
+            (92, [(ISSUE_MISSING_ENTRY, 92)]),
+            (95, [(ISSUE_MISSING_ENTRY, 95)]),
+        ],
+        ids=["inside_the_margin", "directly_above_the_margin", "above_the_margin"],
     )
     def test_window_gap_is_reported_only_above_the_margin(
         self, tmp_path, removed_sequence, expected
@@ -1071,6 +1132,16 @@ class TestLedgerWindowVerificationBehavior:
         # read, a gap above it is
         assert _found(report.issues) == expected
         assert NOTE_HEAD_ABSENT not in _types(report.notes)
+
+    def test_row_signed_for_another_partition_in_the_window_is_chain_broken(
+        self, tmp_path
+    ):
+        _write_rows(tmp_path / "audit_all.jsonl", [*_chain(5), _worker_entry_one()])
+
+        report = _window_report(tmp_path, 100)
+
+        assert _found(report.issues) == [(ISSUE_CHAIN_BROKEN, 1)]
+        assert report.notes == []
 
     def test_out_of_order_append_across_the_lower_edge_is_not_a_gap(self, tmp_path):
         # Given entry 62 appended before entry 61, and a window whose lower
@@ -1102,8 +1173,10 @@ class TestLedgerWindowVerificationBehavior:
 
         report = _window_report(tmp_path, len(rows) - 2)
 
-        assert report.intact is True
+        # The chain starts at the lowest entry; the chainless rows beside it
+        # are reported as rows, never as a gap or an absent head
         assert report.first_sequence == 50
+        assert set(_types(report.issues)) == {ISSUE_UNCHAINED_ROW}
         assert NOTE_HEAD_ABSENT not in _types(report.notes)
 
 
@@ -1328,7 +1401,9 @@ class TestVerifyAuditIntegrityCliContract:
 
     def test_summary_report_has_a_line_per_trail_and_a_total(self, tmp_path, capsys):
         _write_rows(tmp_path / "audit_2026-09-28.jsonl", _chain(2))
-        _write_rows(tmp_path / "audit_2026-09-28_worker.jsonl", _chain(3))
+        _write_rows(
+            tmp_path / "audit_2026-09-28_worker.jsonl", _partition_chain(3, "worker")
+        )
         capsys.readouterr()
 
         code = _run_cli(tmp_path, "--format", "summary")

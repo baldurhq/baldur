@@ -109,7 +109,7 @@ class TestExportOptions:
 # ─────────────────────────────────────────────────────────────
 
 
-class TestAuditExporter:
+class TestAuditExporterBehavior:
     """AuditExporter tests."""
 
     def test_collect_input_files(self, sample_log_file):
@@ -433,7 +433,7 @@ class TestCLI:
 # ─────────────────────────────────────────────────────────────
 
 
-class TestIntegrityVerification:
+class TestIntegrityVerificationBehavior:
     """Integrity pass tests."""
 
     def test_broken_chain_detected(self, temp_dir):

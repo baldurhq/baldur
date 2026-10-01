@@ -154,7 +154,7 @@ class TestHashChainManager:
             assert state["sequence"] == 15
 
 
-class TestHashChainVerifier:
+class TestHashChainVerifierBehavior:
     """HashChainVerifier."""
 
     def _create_valid_chain(self, count: int = 5) -> list[dict[str, Any]]:
@@ -245,7 +245,7 @@ def _write_ledger(path: Path, entries: list[dict[str, Any]]) -> Path:
     return path
 
 
-class TestAuditIntegrityVerifier:
+class TestAuditIntegrityVerifierBehavior:
     """AuditIntegrityVerifier: every ledger file of one chain is one trail."""
 
     def _chain(self, count: int) -> list[dict[str, Any]]:
@@ -432,7 +432,7 @@ class TestWALVerification:
             assert result.total_entries == 8
 
 
-class TestOutputFormats:
+class TestOutputFormatsBehavior:
     """Output formats."""
 
     def _create_test_summary(self) -> VerificationSummary:
@@ -531,7 +531,7 @@ class TestOutputFormats:
         assert output.splitlines()[-1].startswith("PASS")
 
 
-class TestVerifyAuditLogIntegrity:
+class TestVerifyAuditLogIntegrityBehavior:
     """verify_audit_log_integrity."""
 
     def test_verify_valid_file(self):
