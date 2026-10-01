@@ -1271,9 +1271,10 @@ class TestProtectFallbackAnswerBehavior:
 
 
 class TestProtectTimeoutFallbackBehavior:
-    """799 D1 negative: a fallback that answered a timeout keeps the key
-    completed — the timed-out work may still be running, so a same-key repeat
-    is refused with ``SKIP`` instead of running beside it."""
+    """805 D10: a fallback that answered a timeout holds the key while the
+    timed-out work still runs — a same-key repeat is refused with ``ABORT``
+    instead of running beside it — and an async timeout, which cancels the
+    coroutine, leaves nothing running, so the key is released at once."""
 
     def test_protect_sync_timeout_fallback_holds_key_while_function_runs(self):
         # Given — a charge that keeps running past the facade's timeout.
@@ -1308,13 +1309,14 @@ class TestProtectTimeoutFallbackBehavior:
         finally:
             release.set()
 
-        # Then — the repeat was refused and the charge body ran once.
+        # Then — the repeat was refused as in flight and the charge body ran
+        # once.
         assert first == "pending"
-        assert exc_info.value.decision == "SKIP"
+        assert exc_info.value.decision == "ABORT"
         assert calls["n"] == 1
 
     @pytest.mark.asyncio
-    async def test_aprotect_timeout_fallback_refuses_repeat_with_skip(self):
+    async def test_aprotect_timeout_fallback_releases_key(self):
         # Given — a charge whose cancellation propagates unchanged.
         calls = {"n": 0}
 
@@ -1339,13 +1341,11 @@ class TestProtectTimeoutFallbackBehavior:
 
         # When
         first = await call()
-        with pytest.raises(IdempotencyDuplicateError) as exc_info:
-            await call()
+        repeat = await call()
 
-        # Then
-        assert first == "pending"
-        assert exc_info.value.decision == "SKIP"
-        assert calls["n"] == 1
+        # Then — the cancelled charge left nothing running: the repeat ran.
+        assert first == repeat == "pending"
+        assert calls["n"] == 2
 
 
 # =============================================================================

@@ -25,6 +25,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any, TypeVar
 
+from baldur.core.abandoned_work import record_abandoned
 from baldur.core.exceptions import TimeoutPolicyError
 from baldur.core.process_utils import fork_safe_lock
 from baldur.interfaces.resilience_policy import (
@@ -51,6 +52,10 @@ class TimeoutPolicy:
 
     The background thread cannot be forcibly killed (Python limitation)
     but the caller gets a timely timeout result via ``future.cancel()``.
+    Work the cancel could not stop (it was already running) is recorded as
+    abandoned work of the enclosing keyed call, so that call's idempotency
+    key stays held while the work runs and then follows how it ended; work
+    cancelled before it started is not recorded.
 
     The executor is process-shared (class-level DCL singleton mirroring
     ``baldur_pro.services.hedging.executor.HedgingExecutor._get_executor``)
@@ -155,7 +160,10 @@ class TimeoutPolicy:
             # business exception instead of reporting a policy timeout.
             if future.done() and future.exception() is e:
                 raise
-            future.cancel()
+            if not future.cancel():
+                # Running (or ended in the instant before the cancel): the
+                # work may still produce its side effect.
+                record_abandoned(future, origin=context)
             err = TimeoutPolicyError(self._timeout_seconds)
             err.__cause__ = e
             return PolicyResult(

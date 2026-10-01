@@ -4,6 +4,10 @@ Wraps a sync or async callable so concurrent or repeated invocations
 with the same key short-circuit (raising ``IdempotencyDuplicateError``)
 instead of running twice. Uses ``IdempotencyGate.check_and_acquire`` /
 ``mark_completed`` / ``mark_failed`` for atomic setnx-based delegation.
+
+A function that raised while work it abandoned to a timeout is still running
+(a nested ``protect(timeout=...)`` whose thread could not be stopped) keeps
+its key held until that work ends, then releases it.
 """
 
 # Reference: 458 §D1, §D3, §D5, §D6, §D8;
@@ -13,14 +17,22 @@ instead of running twice. Uses ``IdempotencyGate.check_and_acquire`` /
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import functools
 import inspect
 import logging
 from collections.abc import Callable
+from contextvars import Token
 from datetime import timedelta
 from typing import Any, TypeVar
 
 from baldur.adapters.cache.memory_adapter import InMemoryCacheAdapter
+from baldur.core.abandoned_work import (
+    WorkScope,
+    WorkSummary,
+    close_work_scope,
+    open_work_scope,
+)
 from baldur.core.exceptions import (
     IdempotencyDuplicateError,
     IdempotencyUnavailableError,
@@ -352,7 +364,7 @@ def idempotent(  # noqa: C901, PLR0915
                 raise IdempotencyUnavailableError(key=key, error=str(exc)) from exc
 
         def _mark_completed_fail_open(
-            gate: IdempotencyGate, key: str, retry_count: int
+            gate: IdempotencyGate, key: str, check: IdempotencyCheckResult
         ) -> None:
             """Best-effort ``mark_completed`` — fail-open.
 
@@ -363,7 +375,9 @@ def idempotent(  # noqa: C901, PLR0915
             hook / replay service best-effort mark pattern.
             """
             try:
-                gate.mark_completed(key, retry_count=retry_count, ttl=ttl)
+                gate.mark_completed(
+                    key, retry_count=check.retry_count, ttl=ttl, claim_id=check.claim_id
+                )
             except Exception as exc:
                 logger.warning(
                     "idempotency.mark_completed_failed",
@@ -371,7 +385,7 @@ def idempotent(  # noqa: C901, PLR0915
                 )
 
         def _mark_failed_fail_open(
-            gate: IdempotencyGate, key: str, error: str, retry_count: int
+            gate: IdempotencyGate, key: str, error: str, check: IdempotencyCheckResult
         ) -> None:
             """Best-effort ``mark_failed`` — fail-open.
 
@@ -380,12 +394,61 @@ def idempotent(  # noqa: C901, PLR0915
             about to re-raise.
             """
             try:
-                gate.mark_failed(key, error=error, retry_count=retry_count, ttl=ttl)
+                gate.mark_failed(
+                    key,
+                    error=error,
+                    retry_count=check.retry_count,
+                    ttl=ttl,
+                    claim_id=check.claim_id,
+                )
             except Exception as exc:
                 logger.warning(
                     "idempotency.mark_failed_failed",
                     extra={"key": key, "error": str(exc), "fail_open": True},
                 )
+
+        def _release_after_abandoned_work(
+            gate: IdempotencyGate,
+            key: str,
+            error: str,
+            check: IdempotencyCheckResult,
+            scope: WorkScope,
+            token: Token[WorkScope | None],
+        ) -> None:
+            """The function raised: mark failed now, or once the work it abandoned ends.
+
+            The decorator has no own timeout stage, so abandoned work never
+            decides the outcome — it only keeps the key held while it runs. A
+            late mark runs on the thread that finished the last piece, in a
+            copy of the caller's context.
+            """
+            captured = contextvars.copy_context()
+
+            def deferred(_summary: WorkSummary) -> None:
+                def body() -> None:
+                    try:
+                        gate.mark_failed(
+                            key,
+                            error=error,
+                            retry_count=check.retry_count,
+                            ttl=ttl,
+                            claim_id=check.claim_id,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "idempotency.deferred_mark_failed",
+                            extra={"key": key, "error": str(exc)},
+                        )
+
+                captured.copy().run(body)
+
+            if close_work_scope(scope, token, deferred) is None:
+                logger.info(
+                    "idempotency.mark_deferred",
+                    extra={"key": key, "pieces": scope.running_count},
+                )
+                return
+            _mark_failed_fail_open(gate, key, error, check)
 
         def _resolve_key(args: tuple, kwargs: dict) -> str:
             if key_fn is not None:
@@ -454,12 +517,16 @@ def idempotent(  # noqa: C901, PLR0915
                 check = _check_and_acquire(gate, key)
                 if check.decision is not IdempotencyDecision.CONTINUE:
                     _handle_decision(key, check.decision)
+                scope, token = open_work_scope(origin=None)
                 try:
                     result = await func(*args, **kwargs)
                 except Exception as exc:
-                    _mark_failed_fail_open(gate, key, str(exc), check.retry_count)
+                    _release_after_abandoned_work(
+                        gate, key, str(exc), check, scope, token
+                    )
                     raise
-                _mark_completed_fail_open(gate, key, check.retry_count)
+                close_work_scope(scope, token)
+                _mark_completed_fail_open(gate, key, check)
                 return result
 
             async_wrapper._reset_cached_gate = lambda: gate_state.update(  # type: ignore[attr-defined]
@@ -476,12 +543,14 @@ def idempotent(  # noqa: C901, PLR0915
             check = _check_and_acquire(gate, key)
             if check.decision is not IdempotencyDecision.CONTINUE:
                 _handle_decision(key, check.decision)
+            scope, token = open_work_scope(origin=None)
             try:
                 result = func(*args, **kwargs)
             except Exception as exc:
-                _mark_failed_fail_open(gate, key, str(exc), check.retry_count)
+                _release_after_abandoned_work(gate, key, str(exc), check, scope, token)
                 raise
-            _mark_completed_fail_open(gate, key, check.retry_count)
+            close_work_scope(scope, token)
+            _mark_completed_fail_open(gate, key, check)
             return result
 
         sync_wrapper._reset_cached_gate = lambda: gate_state.update(  # type: ignore[attr-defined]

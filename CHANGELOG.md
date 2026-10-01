@@ -41,11 +41,21 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `verify_audit_integrity` takes several paths and `--starts-at`; nothing verified exits 1.
 - The hash-chain adapter's `verify_integrity()` returns one flat issue list, not per-file groups.
 - `GET /audit/integrity/verify` checks the ledger's last 10,000 entries; `/state` shows its head.
+- Sync and async callers of one bulkhead compartment now share its capacity.
+- `/bulkheads` and the bulkhead gauges count a compartment's async callers too.
+- Async bulkhead waiters get no first-come order: an arriving caller may take a freed permit.
+- A sync bulkhead acquire with a timeout, on a thread running an event loop, answers at once.
+- A keyed sync call `timeout=` cut off holds its key while that work runs, then follows its end.
+- A keyed async call whose `timeout=` fired releases its key at once, with or without a fallback.
+- A keyed call that raised keeps its key while work a nested timeout cut off still runs.
 
 ### Added
 
 - `/system/status/` reports store reachability, state age, the refresher and the file-store path.
 - Gauge `baldur_control_state_refreshed_timestamp_seconds{key}`: each process's last store read.
+- `Bulkhead.try_acquire_async()` / `acquire_async()`, and `BulkheadState.queue_size`.
+- `TrafficGate.should_allow_async()`, `release_acquired()`, and `check_admission_async()`.
+- Idempotency claims carry a `claim_id`; `mark_completed()` / `mark_failed()` accept `claim_id=`.
 
 ### Removed
 
@@ -63,7 +73,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A forked worker no longer inherits Baldur, Redis-pool, log-stream or import locks its parent held.
 - A Django app calling `configure_baldur()` no longer fails to start without prometheus-client.
 - FastAPI and Flask apply the `X-Deadline-Remaining` fast-fail without prometheus-client too.
-- A fallback answering an error no longer marks the idempotency key done (timeouts excepted).
+- A fallback answering an error no longer marks the idempotency key done.
 - A state-store outage no longer slows protected calls or makes `is_baldur_enabled()` raise.
 - Two processes writing the file state store at once no longer corrupt it.
 - A process holding a stale switch state no longer overwrites a newer flip.
@@ -81,6 +91,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - The audit export's integrity check now reads the ledger's hash fields, before any filter.
 - A verifier without the signing key reports `signing_key_missing`, not every entry modified.
 - The self-healing demo no longer crashes when its output is not UTF-8 (a pipe, Git Bash).
+- A bulkhead waited on from a second event loop no longer raises `RuntimeError`.
+- A cancelled async bulkhead waiter no longer leaves its waiting count behind.
 
 ## [1.16.0] - 2026-09-28
 

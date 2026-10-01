@@ -700,7 +700,7 @@ class TestIdempotencyHookBehavior:
 
         # ttl=None → gate memory default (the guard threaded no per-call ttl).
         mock_gate.mark_completed.assert_called_once_with(
-            "my_key", retry_count=2, ttl=None
+            "my_key", retry_count=2, ttl=None, claim_id=None
         )
 
     @patch("baldur.resilience.policies.idempotency._ensure_policy_gate")
@@ -720,7 +720,7 @@ class TestIdempotencyHookBehavior:
 
         # ttl=None → gate memory default (the guard threaded no per-call ttl).
         mock_gate.mark_failed.assert_called_once_with(
-            "my_key", error="test error", retry_count=3, ttl=None
+            "my_key", error="test error", retry_count=3, ttl=None, claim_id=None
         )
 
     @patch("baldur.resilience.policies.idempotency._ensure_policy_gate")
@@ -743,7 +743,7 @@ class TestIdempotencyHookBehavior:
         hook.on_success("composer", PolicyResult(value=42), context=ctx)
 
         mock_gate.mark_completed.assert_called_once_with(
-            "my_key", retry_count=1, ttl=mem_ttl
+            "my_key", retry_count=1, ttl=mem_ttl, claim_id=None
         )
 
     @patch("baldur.resilience.policies.idempotency._ensure_policy_gate")
@@ -766,7 +766,7 @@ class TestIdempotencyHookBehavior:
         hook.on_failure("composer", ValueError("boom"), 1, context=ctx)
 
         mock_gate.mark_failed.assert_called_once_with(
-            "my_key", error="boom", retry_count=0, ttl=mem_ttl
+            "my_key", error="boom", retry_count=0, ttl=mem_ttl, claim_id=None
         )
 
     def test_on_success_noop_when_context_none(self):
@@ -888,23 +888,25 @@ _FALLBACK_ANSWER_ROWS = [
     (PolicyOutcome.SUCCESS, None, "completed"),
     (PolicyOutcome.SUCCESS_WITH_FALLBACK, PolicyOutcome.FAILURE, "failed"),
     (PolicyOutcome.SUCCESS_WITH_FALLBACK, PolicyOutcome.REJECTED, "failed"),
-    (PolicyOutcome.SUCCESS_WITH_FALLBACK, PolicyOutcome.TIMEOUT, "completed"),
+    (PolicyOutcome.SUCCESS_WITH_FALLBACK, PolicyOutcome.TIMEOUT, "failed"),
     (PolicyOutcome.SUCCESS_WITH_FALLBACK, None, "failed"),
 ]
 _FALLBACK_ANSWER_IDS = [
     "plain_success_completes",
     "failure_answer_releases",
     "rejected_answer_releases",
-    "timeout_answer_completes",
+    "timeout_answer_without_own_work_releases",
     "no_trigger_answer_releases",
 ]
 
 
 class TestIdempotencyHookFallbackAnswerBehavior:
-    """799 D1: both hooks mark the key by one rule. Only the function's own
-    return, or a fallback that answered a timeout (the timed-out work may still
-    run), keeps the key completed; a fallback that answered a failure or a
-    refusal leaves it failed, so the next call on the key re-claims it.
+    """799 D1 / 805 D10: both hooks mark the key by one rule. Only the
+    function's own return marks it completed at once; a fallback answer marks
+    it by the work the call abandoned — with no running or own work recorded
+    (the timed-out work never started, or nothing was abandoned) it is failed,
+    so the next call on the key re-claims it. A timeout whose own work still
+    runs is covered by the facade-level timeout-key tests.
 
     Runs over the real in-process gate so the effect is the stored record and
     the next acquire, not a mocked call."""
@@ -1006,7 +1008,11 @@ class TestIdempotencyHookFallbackAnswerBehavior:
             IdempotencyHook().on_success("composer", result, context=ctx)
 
         gate.mark_failed.assert_called_once_with(
-            "my_key", error="charge declined", retry_count=2, ttl=mem_ttl
+            "my_key",
+            error="charge declined",
+            retry_count=2,
+            ttl=mem_ttl,
+            claim_id=None,
         )
         gate.mark_completed.assert_not_called()
 
@@ -1037,7 +1043,11 @@ class TestIdempotencyHookFallbackAnswerBehavior:
             await AsyncIdempotencyHook().on_success("composer", result, context=ctx)
 
         gate.mark_failed.assert_awaited_once_with(
-            "my_key", error="charge declined", retry_count=2, ttl=mem_ttl
+            "my_key",
+            error="charge declined",
+            retry_count=2,
+            ttl=mem_ttl,
+            claim_id=None,
         )
         gate.mark_completed.assert_not_called()
 

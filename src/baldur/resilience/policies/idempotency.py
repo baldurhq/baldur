@@ -1,16 +1,23 @@
 """Idempotency Guard and Hook for PolicyComposer.
 
 Two-phase idempotency enforcement:
-- IdempotencyGuard (Phase 1): Pre-execution check+acquire via IdempotencyGate
-- IdempotencyHook (Phase 2): Post-execution mark — completed when the function
-  itself returned, or when a fallback answered a timeout (the timed-out work
-  may still be running); failed (re-claimable) when the call raised, or when a
-  fallback answered a failure or a refusal in the function's place
+- IdempotencyGuard (Phase 1): Pre-execution check+acquire via IdempotencyGate;
+  on CONTINUE it opens the call's work scope (``baldur.core.abandoned_work``)
+- IdempotencyHook (Phase 2): Post-execution mark. The function returned ->
+  completed now. Otherwise the key follows the work the call abandoned: it
+  stays held (a repeat reads ABORT) while any recorded work still runs, then
+  is marked completed if the call ended on a timeout and its own timed-out
+  work finished successfully, else failed (re-claimable). Work cancelled
+  before it started, and an async timeout (which cancels the coroutine),
+  leave nothing running, so the key is released at once.
 
-Key communication via context.extra["_idempotency_key"]; the guard also
-threads the per-call retry count and dedup memory window
-(context.extra["_idempotency_retry_count"] / ["_idempotency_ttl"]) so the
-hook marks with the same window the caller requested.
+Per-call record via context.extra: the guard writes the key, the per-call
+retry count, the dedup memory window, the claim id and the work scope
+(``_idempotency_key`` / ``_idempotency_retry_count`` / ``_idempotency_ttl`` /
+``_idempotency_claim_id`` / ``_idempotency_scope``); the hook reads them when
+the call ends, and a mark made later carries the values read then. Give each
+keyed call its own ``PolicyContext``: calls that share one overwrite each
+other's record.
 
 Fail behavior:
 - A gate *decision* of SKIP (already completed) or ABORT (a concurrent
@@ -36,7 +43,10 @@ the first call after a shared cache is wired resolves it.
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -44,6 +54,13 @@ import structlog
 
 from baldur.adapters.cache.async_memory_adapter import AsyncInMemoryCacheAdapter
 from baldur.adapters.cache.memory_adapter import InMemoryCacheAdapter
+from baldur.core.abandoned_work import (
+    WorkScope,
+    WorkSummary,
+    close_work_scope,
+    open_work_scope,
+)
+from baldur.core.exceptions import TimeoutPolicyError
 from baldur.interfaces.resilience_policy import (
     GuardResult,
     PolicyOutcome,
@@ -51,6 +68,8 @@ from baldur.interfaces.resilience_policy import (
 )
 
 if TYPE_CHECKING:
+    from contextvars import Token
+
     from baldur.core.idempotency_gate import AsyncIdempotencyGate, IdempotencyGate
     from baldur.interfaces.resilience_policy import PolicyContext
 
@@ -97,6 +116,10 @@ _ASYNC_POLICY_FALLBACK_CACHE = AsyncInMemoryCacheAdapter(
     key_prefix="idempotency_policy:"
 )
 _async_policy_gate_state: dict[str, Any] = {"initialized": False, "gate": None}
+
+# Late async marks scheduled on a caller's loop (in-process async ledger only),
+# held until done so the loop's weak task references cannot drop them.
+_DEFERRED_MARK_TASKS: set[asyncio.Task[None]] = set()
 
 
 def _ensure_policy_gate() -> IdempotencyGate:
@@ -176,13 +199,181 @@ def _reset_policy_gate() -> None:
     _reset_warned_layers()
 
 
+@dataclass(frozen=True)
+class _KeyedCall:
+    """One keyed call's record, read from ``context.extra`` when it ends.
+
+    A mark made later carries these values and never re-reads the slots, so a
+    later keyed call that reuses the ``PolicyContext`` cannot redirect it.
+    """
+
+    key: str
+    retry_count: int
+    ttl: timedelta | None
+    claim_id: str | None
+    scope: WorkScope | None
+    token: Token[WorkScope | None] | None
+
+
+def _write_keyed_call(
+    context: PolicyContext,
+    key: str,
+    retry_count: int,
+    ttl: timedelta | None,
+    claim_id: str | None,
+) -> None:
+    """Guard CONTINUE: write the per-call record and open the work scope."""
+    context.extra["_idempotency_key"] = key
+    context.extra["_idempotency_retry_count"] = retry_count
+    context.extra["_idempotency_ttl"] = ttl
+    context.extra["_idempotency_claim_id"] = claim_id
+    context.extra["_idempotency_scope"] = open_work_scope(origin=context)
+
+
+def _read_keyed_call(context: PolicyContext | None) -> _KeyedCall | None:
+    """Read the per-call record the guard wrote; None when the call is unkeyed."""
+    if context is None:
+        return None
+    extra = context.extra or {}
+    key = extra.get("_idempotency_key")
+    if not key:
+        return None
+    scope_slot = extra.get("_idempotency_scope")
+    scope, token = scope_slot if scope_slot is not None else (None, None)
+    return _KeyedCall(
+        key=key,
+        retry_count=extra.get("_idempotency_retry_count", 0),
+        ttl=extra.get("_idempotency_ttl"),
+        claim_id=extra.get("_idempotency_claim_id"),
+        scope=scope,
+        token=token,
+    )
+
+
+def _settled_as_completed(timed_out: bool, summary: WorkSummary) -> bool:
+    """The key rule for a call that did not return.
+
+    Completed only when the call ended on a timeout and its own timed-out work
+    finished successfully; any other work only extends the hold.
+    """
+    return timed_out and summary.own_succeeded
+
+
+def _close_call_scope(
+    call: _KeyedCall,
+    on_settled: Callable[[WorkSummary], None] | None,
+) -> WorkSummary | None:
+    """Close the call's work scope; the summary when nothing it holds runs."""
+    if call.scope is None:
+        return WorkSummary()
+    return close_work_scope(call.scope, call.token, on_settled)
+
+
+def _timed_out_trigger(result: PolicyResult) -> bool:
+    """True when a fallback answered a timeout in the function's place."""
+    return result.metadata.get("fallback_trigger") == PolicyOutcome.TIMEOUT.value
+
+
+def _async_ledger_is_process_local(gate: AsyncIdempotencyGate) -> bool:
+    """True when the async gate dedups in this process's own memory.
+
+    The shared (Redis) async ledger reuses the sync policy layer's keys, so a
+    late mark can go through the sync gate and survive the loop's teardown;
+    the in-process async ledger is reachable only from its own loop.
+    """
+    cache = gate._unwrap_cache(gate._cache) if gate._cache is not None else None
+    return isinstance(cache, AsyncInMemoryCacheAdapter)
+
+
+def _mark_sync(
+    gate: IdempotencyGate, call: _KeyedCall, completed: bool, error: str
+) -> None:
+    if completed:
+        gate.mark_completed(
+            call.key, retry_count=call.retry_count, ttl=call.ttl, claim_id=call.claim_id
+        )
+    else:
+        gate.mark_failed(
+            call.key,
+            error=error,
+            retry_count=call.retry_count,
+            ttl=call.ttl,
+            claim_id=call.claim_id,
+        )
+
+
+async def _mark_async(
+    gate: AsyncIdempotencyGate, call: _KeyedCall, completed: bool, error: str
+) -> None:
+    if completed:
+        await gate.mark_completed(
+            call.key, retry_count=call.retry_count, ttl=call.ttl, claim_id=call.claim_id
+        )
+    else:
+        await gate.mark_failed(
+            call.key,
+            error=error,
+            retry_count=call.retry_count,
+            ttl=call.ttl,
+            claim_id=call.claim_id,
+        )
+
+
+def _log_immediate_mark_failure(key: str, completed: bool, e: Exception) -> None:
+    # Fail-open: the call's outcome has already been served.
+    logger.warning(
+        "idempotency.mark_completed_failed"
+        if completed
+        else "idempotency.mark_failed_failed",
+        key=key,
+        error=str(e),
+        fail_open=True,
+    )
+
+
+def _log_deferred_mark_failure(key: str, e: Exception) -> None:
+    logger.warning(
+        "idempotency.deferred_mark_failed",
+        key=key,
+        error=str(e),
+        error_type=type(e).__name__,
+    )
+
+
+def _log_mark_deferred(call: _KeyedCall) -> None:
+    logger.info(
+        "idempotency.mark_deferred",
+        key=call.key,
+        pieces=call.scope.running_count if call.scope is not None else 0,
+    )
+
+
+async def _run_deferred_async_mark(
+    gate: AsyncIdempotencyGate, call: _KeyedCall, completed: bool, error: str
+) -> None:
+    try:
+        await _mark_async(gate, call, completed, error)
+    except Exception as e:
+        _log_deferred_mark_failure(call.key, e)
+
+
+def _spawn_deferred_async_mark(
+    gate: AsyncIdempotencyGate, call: _KeyedCall, completed: bool, error: str
+) -> None:
+    """Run on the caller's loop: start the late mark and hold its task."""
+    task = asyncio.ensure_future(_run_deferred_async_mark(gate, call, completed, error))
+    _DEFERRED_MARK_TASKS.add(task)
+    task.add_done_callback(_DEFERRED_MARK_TASKS.discard)
+
+
 class IdempotencyGuard:
     """Pre-execution idempotency check guard.
 
     Phase 1: Checks whether the operation is already completed (SKIP) or being
     executed concurrently (ABORT) via IdempotencyGate. On a CONTINUE decision it
-    stores the acquired key in context.extra for IdempotencyHook to complete
-    Phase 2; on SKIP/ABORT it rejects (fail-closed). A cache I/O error fails
+    stores the per-call record (key, claim id, windows) in context.extra and
+    opens the call's work scope for IdempotencyHook to complete Phase 2; on
+    SKIP/ABORT it rejects (fail-closed). A cache I/O error fails
     closed by default — opt into fail-open via ``fail_open`` /
     ``IdempotencySettings.fail_open_on_cache_error``.
 
@@ -281,11 +472,12 @@ class IdempotencyGuard:
                         "idempotency_key": key,
                     },
                 )
-            # CONTINUE — store key + retry_count + memory ttl for Hook to
-            # forward on mark (the guard is the single window source).
-            context.extra["_idempotency_key"] = key
-            context.extra["_idempotency_retry_count"] = result.retry_count
-            context.extra["_idempotency_ttl"] = self._ttl
+            # CONTINUE — store the per-call record for the hook (the guard is
+            # the single window source) and open the call's work scope, whose
+            # own work is what this context's timeout stage records.
+            _write_keyed_call(
+                context, key, result.retry_count, self._ttl, result.claim_id
+            )
             return GuardResult(allowed=True)
         except Exception as e:
             # Cache I/O fault (e.g. Redis down) or key-generation error. Log the
@@ -314,19 +506,20 @@ class IdempotencyHook:
     """Post-execution idempotency mark hook (fail-open).
 
     Phase 2 marks the key through IdempotencyGate by one rule, shared with
-    :class:`AsyncIdempotencyHook`:
+    :class:`AsyncIdempotencyHook` and the ``@idempotent`` decorator:
 
-    - The function returned → completed; a repeat is refused for the memory
-      window.
-    - A fallback answered a timeout → completed as well: the timed-out work may
-      still be running, and a repeat must not run beside it.
-    - A fallback answered a failure or a refusal (the function raised, retries
-      ran out, the circuit breaker refused the call) → failed, like a call that
-      raised, so a genuine repeat runs the function.
-    - The call failed, timed out or was rejected with no fallback answer →
-      failed.
+    - The function returned -> completed now; a repeat is refused for the
+      memory window.
+    - Otherwise (the call raised, timed out or was refused, with or without a
+      fallback answer) the key follows the work the call abandoned. While any
+      recorded work still runs, the claim stays executing and a repeat reads
+      ABORT. When nothing runs (at once, or when the last piece ends) the key
+      is marked completed if the call ended on a timeout and its own timed-out
+      work finished successfully, else failed — re-claimable by the next call.
 
-    A failed record is re-claimable by the next call on the key.
+    Every mark is scoped to the claim the guard took, so a late mark never
+    lands on a later claim of the same key. A late mark runs on the thread
+    that finished the last piece, in a copy of the caller's context.
     """
 
     def on_success(
@@ -335,41 +528,21 @@ class IdempotencyHook:
         result: PolicyResult,
         context: PolicyContext | None = None,
     ) -> None:
-        key = self._get_key(context)
-        if not key:
+        call = _read_keyed_call(context)
+        if call is None:
             return
-        if self._fallback_answered_failure(result):
+        if result.outcome == PolicyOutcome.SUCCESS:
+            _close_call_scope(call, None)
             try:
-                _ensure_policy_gate().mark_failed(
-                    key,
-                    error=str(result.metadata.get("original_error", "")),
-                    retry_count=self._get_retry_count(context),
-                    ttl=self._get_ttl(context),
-                )
+                _mark_sync(_ensure_policy_gate(), call, True, "")
             except Exception as e:
-                # Fail-open: the fallback's answer has already been served.
-                logger.warning(
-                    "idempotency.mark_failed_failed",
-                    key=key,
-                    error=str(e),
-                    fail_open=True,
-                )
+                _log_immediate_mark_failure(call.key, True, e)
             return
-        try:
-            _ensure_policy_gate().mark_completed(
-                key,
-                retry_count=self._get_retry_count(context),
-                ttl=self._get_ttl(context),
-            )
-        except Exception as e:
-            # Fail-open: the call already succeeded, so a mark failure must
-            # never raise. Log so the silent degradation is observable.
-            logger.warning(
-                "idempotency.mark_completed_failed",
-                key=key,
-                error=str(e),
-                fail_open=True,
-            )
+        self._settle(
+            call,
+            timed_out=_timed_out_trigger(result),
+            error=str(result.metadata.get("original_error", "")),
+        )
 
     def on_failure(
         self,
@@ -378,24 +551,39 @@ class IdempotencyHook:
         attempt: int,
         context: PolicyContext | None = None,
     ) -> None:
-        key = self._get_key(context)
-        if key:
-            try:
-                _ensure_policy_gate().mark_failed(
-                    key,
-                    error=str(error),
-                    retry_count=self._get_retry_count(context),
-                    ttl=self._get_ttl(context),
-                )
-            except Exception as e:
-                # Fail-open: marking the failure is best-effort; the original
-                # error has already propagated. Log the silent degradation.
-                logger.warning(
-                    "idempotency.mark_failed_failed",
-                    key=key,
-                    error=str(e),
-                    fail_open=True,
-                )
+        call = _read_keyed_call(context)
+        if call is None:
+            return
+        self._settle(
+            call,
+            timed_out=isinstance(error, TimeoutPolicyError),
+            error=str(error),
+        )
+
+    @staticmethod
+    def _settle(call: _KeyedCall, *, timed_out: bool, error: str) -> None:
+        """Mark now if nothing the call abandoned runs, else when it ends."""
+        captured = contextvars.copy_context()
+
+        def deferred(summary: WorkSummary) -> None:
+            def body() -> None:
+                try:
+                    completed = _settled_as_completed(timed_out, summary)
+                    _mark_sync(_ensure_policy_gate(), call, completed, error)
+                except Exception as e:
+                    _log_deferred_mark_failure(call.key, e)
+
+            captured.copy().run(body)
+
+        summary = _close_call_scope(call, deferred)
+        if summary is None:
+            _log_mark_deferred(call)
+            return
+        completed = _settled_as_completed(timed_out, summary)
+        try:
+            _mark_sync(_ensure_policy_gate(), call, completed, error)
+        except Exception as e:
+            _log_immediate_mark_failure(call.key, completed, e)
 
     def on_execute(
         self, policy_name: str, attempt: int, context: PolicyContext | None = None
@@ -416,48 +604,15 @@ class IdempotencyHook:
     ) -> None:
         pass
 
-    @staticmethod
-    def _fallback_answered_failure(result: PolicyResult) -> bool:
-        """True when a fallback answered a failure or a refusal for the function.
-
-        Only ``PolicyOutcome.SUCCESS`` means the function itself returned. A
-        fallback that answered a timeout is the one exception: its work may
-        still be running, so its key is held like a completed call's.
-        """
-        return (
-            result.outcome != PolicyOutcome.SUCCESS
-            and result.metadata.get("fallback_trigger") != PolicyOutcome.TIMEOUT.value
-        )
-
-    @staticmethod
-    def _get_key(context: PolicyContext | None) -> str | None:
-        if context is None:
-            return None
-        return (context.extra or {}).get("_idempotency_key")
-
-    @staticmethod
-    def _get_retry_count(context: PolicyContext | None) -> int:
-        if context is None:
-            return 0
-        return (context.extra or {}).get("_idempotency_retry_count", 0)
-
-    @staticmethod
-    def _get_ttl(context: PolicyContext | None) -> timedelta | None:
-        """Memory window threaded from the guard; ``None`` → gate default."""
-        if context is None:
-            return None
-        return (context.extra or {}).get("_idempotency_ttl")
-
 
 class AsyncIdempotencyGuard:
     """Async twin of :class:`IdempotencyGuard` (implements ``AsyncPolicyGuard``).
 
     Awaited natively by ``AsyncPolicyComposer`` — zero thread hop — driving the
     awaitable :class:`AsyncIdempotencyGate`. Same two-phase model, same
-    fail-CLOSED-by-default posture, same context-threading channel
-    (``_idempotency_key`` / ``_idempotency_retry_count`` / ``_idempotency_ttl``)
-    as the sync guard, so the async hook marks with the exact window the caller
-    requested. A ``CancelledError`` raised while awaiting the gate is a
+    fail-CLOSED-by-default posture, same per-call record in ``context.extra``
+    and the same work scope as the sync guard, so the async hook marks the
+    claim it took with the exact window the caller requested. A ``CancelledError`` raised while awaiting the gate is a
     ``BaseException`` and escapes the fail-open ``except Exception``, so
     cancellation still propagates.
     """
@@ -538,10 +693,10 @@ class AsyncIdempotencyGuard:
                         "idempotency_key": key,
                     },
                 )
-            # CONTINUE — thread key + retry_count + memory ttl to the hook.
-            context.extra["_idempotency_key"] = key
-            context.extra["_idempotency_retry_count"] = result.retry_count
-            context.extra["_idempotency_ttl"] = self._ttl
+            # CONTINUE — store the per-call record and open the work scope.
+            _write_keyed_call(
+                context, key, result.retry_count, self._ttl, result.claim_id
+            )
             return GuardResult(allowed=True)
         except Exception as e:
             # Cache I/O fault or key-generation error. Fail CLOSED by default to
@@ -567,13 +722,14 @@ class AsyncIdempotencyGuard:
 class AsyncIdempotencyHook:
     """Async twin of :class:`IdempotencyHook` (implements ``AsyncPolicyHook``).
 
-    Phase 2, awaited natively, by the sync hook's rule: completed when the
-    function returned or a fallback answered a timeout (a function that handed
-    its work to a thread keeps running after the cancel); failed (re-claimable)
-    when the call raised or a fallback answered a failure or a refusal.
-    Fail-open — a transient mark failure is logged but never raises. Reuses the
-    sync hook's context readers (same threading channel) and its
-    fallback-answer predicate.
+    Phase 2, awaited natively, by the sync hook's rule. An async timeout
+    cancels the coroutine before the hook runs, so it leaves nothing running
+    and the key is released at once; sync timed work the coroutine started
+    (directly, or inside ``asyncio.to_thread``) that is still running holds the
+    key until it ends. A late mark goes through the sync policy gate when the
+    async ledger is the shared (Redis) one — it survives the loop's teardown —
+    and is scheduled on the caller's loop when the ledger is in-process.
+    Fail-open — a transient mark failure is logged but never raises.
     """
 
     async def on_success(
@@ -582,38 +738,21 @@ class AsyncIdempotencyHook:
         result: PolicyResult,
         context: PolicyContext | None = None,
     ) -> None:
-        key = IdempotencyHook._get_key(context)
-        if not key:
+        call = _read_keyed_call(context)
+        if call is None:
             return
-        if IdempotencyHook._fallback_answered_failure(result):
+        if result.outcome == PolicyOutcome.SUCCESS:
+            _close_call_scope(call, None)
             try:
-                await _ensure_async_policy_gate().mark_failed(
-                    key,
-                    error=str(result.metadata.get("original_error", "")),
-                    retry_count=IdempotencyHook._get_retry_count(context),
-                    ttl=IdempotencyHook._get_ttl(context),
-                )
+                await _mark_async(_ensure_async_policy_gate(), call, True, "")
             except Exception as e:
-                logger.warning(
-                    "idempotency.mark_failed_failed",
-                    key=key,
-                    error=str(e),
-                    fail_open=True,
-                )
+                _log_immediate_mark_failure(call.key, True, e)
             return
-        try:
-            await _ensure_async_policy_gate().mark_completed(
-                key,
-                retry_count=IdempotencyHook._get_retry_count(context),
-                ttl=IdempotencyHook._get_ttl(context),
-            )
-        except Exception as e:
-            logger.warning(
-                "idempotency.mark_completed_failed",
-                key=key,
-                error=str(e),
-                fail_open=True,
-            )
+        await self._settle(
+            call,
+            timed_out=_timed_out_trigger(result),
+            error=str(result.metadata.get("original_error", "")),
+        )
 
     async def on_failure(
         self,
@@ -622,22 +761,51 @@ class AsyncIdempotencyHook:
         attempt: int,
         context: PolicyContext | None = None,
     ) -> None:
-        key = IdempotencyHook._get_key(context)
-        if key:
-            try:
-                await _ensure_async_policy_gate().mark_failed(
-                    key,
-                    error=str(error),
-                    retry_count=IdempotencyHook._get_retry_count(context),
-                    ttl=IdempotencyHook._get_ttl(context),
-                )
-            except Exception as e:
-                logger.warning(
-                    "idempotency.mark_failed_failed",
-                    key=key,
-                    error=str(e),
-                    fail_open=True,
-                )
+        call = _read_keyed_call(context)
+        if call is None:
+            return
+        await self._settle(
+            call,
+            timed_out=isinstance(error, TimeoutPolicyError),
+            error=str(error),
+        )
+
+    @staticmethod
+    async def _settle(call: _KeyedCall, *, timed_out: bool, error: str) -> None:
+        """Mark now if nothing the call abandoned runs, else when it ends."""
+        loop = asyncio.get_running_loop()
+        captured = contextvars.copy_context()
+
+        def deferred(summary: WorkSummary) -> None:
+            def body() -> None:
+                completed = _settled_as_completed(timed_out, summary)
+                try:
+                    async_gate = _ensure_async_policy_gate()
+                    if _async_ledger_is_process_local(async_gate):
+                        loop.call_soon_threadsafe(
+                            _spawn_deferred_async_mark,
+                            async_gate,
+                            call,
+                            completed,
+                            error,
+                            context=captured.copy(),
+                        )
+                    else:
+                        _mark_sync(_ensure_policy_gate(), call, completed, error)
+                except Exception as e:
+                    _log_deferred_mark_failure(call.key, e)
+
+            captured.copy().run(body)
+
+        summary = _close_call_scope(call, deferred)
+        if summary is None:
+            _log_mark_deferred(call)
+            return
+        completed = _settled_as_completed(timed_out, summary)
+        try:
+            await _mark_async(_ensure_async_policy_gate(), call, completed, error)
+        except Exception as e:
+            _log_immediate_mark_failure(call.key, completed, e)
 
     async def on_execute(
         self, policy_name: str, attempt: int, context: PolicyContext | None = None
