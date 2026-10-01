@@ -17,10 +17,14 @@ All tests use stdlib sqlite3 in-memory — no infra required.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time, timedelta
+from decimal import Decimal
+from enum import Enum
 from unittest.mock import MagicMock
+from uuid import UUID
 
 import pytest
 
@@ -77,6 +81,35 @@ class TestGenericSQLRepositorySerializerBehavior:
 
         with pytest.raises(TypeError):
             GenericSQLRepository._dumps_json({"x": Unsupported()})
+
+    def test_dumps_json_encodes_every_snapshot_primitive(self):
+        """A context snapshot keeps these argument types as is; the SQL JSON
+        column must hold each one instead of refusing the entry."""
+
+        class Level(Enum):
+            HIGH = 1
+
+        payload = GenericSQLRepository._dumps_json(
+            {
+                "amount": Decimal("9.99"),
+                "ref": UUID("12345678-1234-5678-1234-567812345678"),
+                "due": date(2026, 10, 1),
+                "at": time(12, 30),
+                "level": Level.HIGH,
+                "raw": b"xy",
+                "window": timedelta(minutes=5),
+            }
+        )
+
+        assert json.loads(payload) == {
+            "amount": "9.99",
+            "ref": "12345678-1234-5678-1234-567812345678",
+            "due": "2026-10-01",
+            "at": "12:30:00",
+            "level": 1,
+            "raw": "b'xy'",
+            "window": "0:05:00",
+        }
 
     def test_dt_from_db_parses_iso_string(self):
         iso = "2026-04-14T12:00:00+00:00"

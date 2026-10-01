@@ -23,7 +23,11 @@ from enum import Enum
 from typing import Any
 from uuid import UUID
 
-__all__ = ["ALLOWED_PRIMITIVE_TYPES", "is_primitive_annotation"]
+__all__ = [
+    "ALLOWED_PRIMITIVE_TYPES",
+    "is_primitive_annotation",
+    "primitive_json_default",
+]
 
 # Primitive types that the decorator layer is willing to fold into cache keys
 # (``@idempotent``) or context snapshots (``@protected`` / ``@dlq_protect``)
@@ -62,3 +66,25 @@ def is_primitive_annotation(annotation: Any) -> bool:
     if isinstance(annotation, type):
         return issubclass(annotation, ALLOWED_PRIMITIVE_TYPES)
     return False
+
+
+def primitive_json_default(value: Any) -> Any:
+    """JSON ``default=`` hook for the whitelisted primitives JSON cannot hold.
+
+    A context snapshot keeps every ``ALLOWED_PRIMITIVE_TYPES`` value as is, so
+    a store that encodes the snapshot as JSON must accept all of them, or the
+    entry carrying one is refused. Enum members encode as their value and
+    temporal values as ISO-8601, the forms orjson writes natively, so a value
+    reads back the same from every store; ``Decimal``, ``UUID``, ``bytes`` and
+    ``timedelta`` encode as ``str(value)``. Any other type still raises
+    ``TypeError``.
+
+    Usable with both ``json.dumps(default=...)`` and ``orjson.dumps(default=...)``.
+    """
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, (datetime, date, dtime)):
+        return value.isoformat()
+    if isinstance(value, (Decimal, UUID, bytes, timedelta)):
+        return str(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")

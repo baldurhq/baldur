@@ -73,6 +73,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A `RetryPolicyConfig` without `domain=` files DLQ entries under the call's name, not `default`.
 - An enclosing `dlq=True` call no longer parks a breaker rejection an inner one already parked.
 - A replay handler declared as `Payment-API` now replays what a `Payment-API` call parked.
+- A `dlq=True` call with a `Decimal`, `bytes`, `UUID` or date argument is parked, not refused.
 - A `domain_configs` retry overlay that is not a mapping no longer fails every `retry=True` call.
 - An untouched audit trail older than one day no longer fails its integrity check.
 - The admin verify route no longer reports every untouched audit entry as modified.

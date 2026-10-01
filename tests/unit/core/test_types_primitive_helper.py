@@ -12,19 +12,49 @@ arguments consistently.
 # would defeat the boundary tests below.
 
 import inspect
+import json
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
 from typing import Any
 from uuid import UUID
 
+import orjson
 import pytest
 
-from baldur.core.types import ALLOWED_PRIMITIVE_TYPES, is_primitive_annotation
+from baldur.core.types import (
+    ALLOWED_PRIMITIVE_TYPES,
+    is_primitive_annotation,
+    primitive_json_default,
+)
 
 
 class _Color(str, Enum):
     RED = "red"
+
+
+class _Level(Enum):
+    HIGH = 1
+
+
+# One sample per ``ALLOWED_PRIMITIVE_TYPES`` member. The coverage test below
+# fails when the whitelist gains a member with no sample here, so a new type
+# cannot reach a context snapshot without the JSON stores being able to hold it.
+_SAMPLES: dict[type, Any] = {
+    int: 7,
+    str: "s",
+    bool: True,
+    float: 1.5,
+    Decimal: Decimal("9.99"),
+    bytes: b"xy",
+    UUID: UUID("12345678-1234-5678-1234-567812345678"),
+    Enum: _Level.HIGH,
+    type(None): None,
+    datetime: datetime(2026, 10, 1, 12, 30),
+    date: date(2026, 10, 1),
+    time: time(12, 30),
+    timedelta: timedelta(minutes=5),
+}
 
 
 # =============================================================================
@@ -104,3 +134,72 @@ class TestIsPrimitiveAnnotationBehavior:
 
     def test_returns_false_for_typing_any(self):
         assert is_primitive_annotation(Any) is False
+
+
+# =============================================================================
+# Contract — primitive_json_default lets a JSON store hold every whitelisted type
+# =============================================================================
+
+
+class TestPrimitiveJsonDefaultContract:
+    """A context snapshot keeps every whitelisted value as is, so both JSON
+    encoders the DLQ stores use must accept each one through this hook."""
+
+    def test_every_whitelisted_type_has_a_sample(self):
+        assert set(_SAMPLES) == set(ALLOWED_PRIMITIVE_TYPES)
+
+    @pytest.mark.parametrize(
+        "value", list(_SAMPLES.values()), ids=[t.__name__ for t in _SAMPLES]
+    )
+    def test_stdlib_json_encodes_every_whitelisted_type(self, value):
+        encoded = json.dumps({"v": value}, default=primitive_json_default)
+
+        assert json.loads(encoded).keys() == {"v"}
+
+    @pytest.mark.parametrize(
+        "value", list(_SAMPLES.values()), ids=[t.__name__ for t in _SAMPLES]
+    )
+    def test_orjson_encodes_every_whitelisted_type(self, value):
+        encoded = orjson.dumps({"v": value}, default=primitive_json_default)
+
+        assert orjson.loads(encoded).keys() == {"v"}
+
+    @pytest.mark.parametrize(
+        "value", list(_SAMPLES.values()), ids=[t.__name__ for t in _SAMPLES]
+    )
+    def test_stdlib_json_and_orjson_read_back_the_same_value(self, value):
+        via_stdlib = json.loads(
+            json.dumps({"v": value}, default=primitive_json_default)
+        )
+        via_orjson = orjson.loads(
+            orjson.dumps({"v": value}, default=primitive_json_default)
+        )
+
+        assert via_stdlib == via_orjson
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (Decimal("9.99"), "9.99"),
+            (
+                UUID("12345678-1234-5678-1234-567812345678"),
+                "12345678-1234-5678-1234-567812345678",
+            ),
+            (b"xy", "b'xy'"),
+            (timedelta(minutes=5), "0:05:00"),
+            (_Level.HIGH, 1),
+            (_Color.RED, "red"),
+            (datetime(2026, 10, 1, 12, 30), "2026-10-01T12:30:00"),
+            (date(2026, 10, 1), "2026-10-01"),
+            (time(12, 30), "12:30:00"),
+        ],
+    )
+    def test_encoded_form_of_each_non_native_type(self, value, expected):
+        assert primitive_json_default(value) == expected
+
+    def test_a_type_outside_the_whitelist_still_raises(self):
+        class Unsupported:
+            pass
+
+        with pytest.raises(TypeError, match="Unsupported"):
+            primitive_json_default(Unsupported())

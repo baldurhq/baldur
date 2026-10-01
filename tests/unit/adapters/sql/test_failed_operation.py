@@ -20,8 +20,10 @@ Coverage:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from unittest.mock import MagicMock
+from uuid import UUID
 
 import pytest
 
@@ -83,6 +85,28 @@ class TestSQLFailedOperationCrudBehavior:
         assert fetched.metadata == {"trace_id": "abc"}
         assert fetched.max_retries == 5
         assert fetched.recommended_action == "retry_later"
+
+    def test_create_holds_snapshot_primitives_json_cannot_encode(self, dlq):
+        """A ``Decimal`` amount or a ``UUID`` / ``date`` argument in the
+        snapshot is stored, not refused, and reads back in string form."""
+        created = dlq.create(
+            domain="payment",
+            failure_type="t",
+            request_data={
+                "amount": Decimal("9.99"),
+                "ref": UUID("12345678-1234-5678-1234-567812345678"),
+                "due": date(2026, 10, 1),
+            },
+        )
+
+        restored = dlq.get_by_id(created.id)
+
+        assert restored is not None
+        assert restored.request_data == {
+            "amount": "9.99",
+            "ref": "12345678-1234-5678-1234-567812345678",
+            "due": "2026-10-01",
+        }
 
     def test_get_by_id_returns_none_for_missing_id(self, dlq):
         assert dlq.get_by_id(9999) is None

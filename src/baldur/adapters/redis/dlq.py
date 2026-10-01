@@ -395,11 +395,12 @@ class RedisDLQRepository(
         optional zlib compress when ``entry_payload_compression_enabled``
         is True.
         """
+        from baldur.core.types import primitive_json_default
         from baldur.utils.serialization import fast_dumps_str_compact
 
-        encoded = fast_dumps_str_compact(data, defaults=_ENTRY_FIELD_DEFAULTS).encode(
-            "utf-8"
-        )
+        encoded = fast_dumps_str_compact(
+            data, defaults=_ENTRY_FIELD_DEFAULTS, default=primitive_json_default
+        ).encode("utf-8")
 
         if self._compression_enabled():
             return zlib.compress(encoded)

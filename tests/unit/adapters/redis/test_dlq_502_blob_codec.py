@@ -22,7 +22,10 @@ import base64
 import os
 import threading
 from collections import OrderedDict
+from datetime import date, timedelta
+from decimal import Decimal
 from unittest.mock import MagicMock, patch
+from uuid import UUID
 
 from baldur.adapters.redis.dlq import (
     _ZLIB_MAGIC_BYTE,
@@ -275,6 +278,33 @@ class TestRedisDLQCreateBlobBehavior:
         repo.create(domain="payment", failure_type="t", error_message=message)
         decoded = repo._decode_entry(self._created_blob(repo))
         assert decoded["error_message"] == message
+
+    def test_create_accepts_snapshot_primitives_orjson_cannot_encode(self):
+        """A context snapshot keeps Decimal / bytes / timedelta arguments, so
+        the blob encoder must hold them instead of refusing the whole entry."""
+        repo = _make_repo(compression_enabled=False)
+        ref = UUID("12345678-1234-5678-1234-567812345678")
+
+        repo.create(
+            domain="payment",
+            failure_type="t",
+            request_data={
+                "amount": Decimal("9.99"),
+                "raw": b"xy",
+                "window": timedelta(minutes=5),
+                "ref": ref,
+                "due": date(2026, 10, 1),
+            },
+        )
+
+        decoded = repo._decode_entry(self._created_blob(repo))
+        assert decoded["request_data"] == {
+            "amount": "9.99",
+            "raw": "b'xy'",
+            "window": "0:05:00",
+            "ref": "12345678-1234-5678-1234-567812345678",
+            "due": "2026-10-01",
+        }
 
 
 # =============================================================================

@@ -35,6 +35,7 @@ from typing import Any
 import structlog
 
 from baldur.core.process_utils import fork_safe_lock
+from baldur.core.types import primitive_json_default
 from baldur.settings.sql import SQLDialect, get_sql_settings
 from baldur.utils.time import utc_now
 
@@ -357,11 +358,7 @@ class GenericSQLRepository:
 
     @staticmethod
     def _json_default(value: Any) -> Any:
-        if isinstance(value, datetime):
-            return value.isoformat()
-        raise TypeError(
-            f"Object of type {type(value).__name__} is not JSON serializable"
-        )
+        return primitive_json_default(value)
 
     @staticmethod
     def _dt_to_db(value: datetime | None) -> Any:
