@@ -28,8 +28,8 @@ DLQ + Replay turns that permanent loss into a recoverable backlog:
   captured together with the forensic context (what was being done, the request data, the failure
   reason, the per-attempt retry history) needed to understand and re-run it. That includes the calls
   an already-open circuit breaker rejected before they ran, and the entries still buffered in memory
-  when a worker process exits. The failures that skip the queue, each by a stated rule that leaves
-  a log record, are listed under *How it works in Baldur*.
+  when a worker process exits. The failures that skip the queue, each by a stated rule, are listed
+  under *How it works in Baldur*.
 - **Recover on your schedule.** When the dependency comes back, replay the backlog instead of
   rebuilding lost work from log files.
 - **Catch-up can be automatic.** Once its prerequisites are in place (see *Closing the loop*),
@@ -45,12 +45,14 @@ DLQ + Replay turns that permanent loss into a recoverable backlog:
 ## How it works in Baldur
 
 When an operation Baldur protects with `dlq=True` fails for good, it is captured as an **entry** in
-the dead letter queue, recording the context needed to replay it later. That holds whatever ended
-the call: retries that ran out, retry switched off (`BALDUR_RETRY_ENABLED=false`), a
+the dead letter queue, recording the context needed to replay it later. That holds whichever of
+these ended the call: retries that ran out, retry switched off (`BALDUR_RETRY_ENABLED=false`), a
 `TenacityBridgePolicy` as `retry=`, Baldur's own `timeout=` cutting the call off (retry or not), or
-a full bulkhead refusing it. The entry is filed under the name the call is protected under; the one
-exception is a `RetryPolicyConfig` that names its own `domain=`, whose retry stage files the
-failures it ends under that domain. A call that never ran because
+a full bulkhead refusing it. The entry is filed under the name the call is protected under, in its
+domain form: lowercased, with a character such as `-` turned into `_`, so a `Payment-API` call is
+filed as `payment_api` and its replay handler must name that form. The one exception is a
+`RetryPolicyConfig` that names its own `domain=`, whose retry stage files the failures it ends
+under that domain. A call that never ran because
 its circuit breaker was already open is captured as well: the breaker rejects it in microseconds,
 but the work that call carried is parked under the breaker's own name with the failure type
 `CIRCUIT_BREAKER_OPEN`, so an outage's fast-rejected calls are recoverable alongside the ones that
@@ -65,7 +67,7 @@ that is not in the queue:
 |---|---|
 | a `fallback=` answered it (the caller got a value) | `policy_chain.fallback_applied` (WARNING) |
 | the call's own idempotency guard (`idempotency_key=`) refused it — already completed, still in flight, or unverifiable | `idempotency.duplicate_blocked`, `idempotency.execution_blocked`, `idempotency.guard_check_failed` (WARNING) |
-| a preset pipeline's error-budget guard refused it | `policy_pipeline.execution_rejected` (WARNING) |
+| a preset pipeline's error-budget guard refused it (**PRO**) | `policy_pipeline.execution_rejected` (WARNING) |
 | Baldur runs observe-only (dry-run, shadow, evaluation) | `execution_mode.intervention_suppressed` with `action="dlq_store"` (INFO) |
 | open-circuit capture is switched off (`BALDUR_DLQ_OPEN_CIRCUIT_CAPTURE_ENABLED=false`) | `dlq_sink.capture_skipped` with `reason="open_circuit_capture_disabled"` (DEBUG) |
 | its `retry=` is a `RetryPolicy` you built with `enable_dlq=False` and that stage ended it (a call `timeout=` cuts off first is parked) | `dlq_sink.capture_skipped` with `reason="stage_declined"` (DEBUG) |
@@ -81,9 +83,13 @@ seconds most would-store records are among those dropped.
 Two switches exclude every call of a process at once rather than one call, so they log no
 per-call record: the kill switch, which makes Baldur step aside and is logged once per process when
 it changes, and `BALDUR_PROTECT_ENABLED=false`, under which a protected function runs bare and
-nothing is logged. Capturing a failure is designed to
+nothing is logged. An async call cancelled from outside, by a task cancel or by the caller's own
+`asyncio.wait_for` running out, is not parked either and leaves no record: the cancellation passes
+through Baldur untouched. Bound the call with Baldur's `timeout=` when its expiry should be parked.
+Capturing a failure is designed to
 stay off the request's critical path: by default the write to the store happens in the background,
-so the call that already failed pays only for handing the entry over. If the queue's storage
+so the call that already failed does not wait for storage; it pays only for masking the entry and
+handing it over. If the queue's storage
 backend is itself unreachable at capture time, the entry falls back to a local on-disk record (and,
 as a last resort, to the process's error stream) instead of being silently lost. Each entry then
 moves through a lifecycle you can watch in the Web Console DLQ panel or query over the REST API:
@@ -114,8 +120,9 @@ You have three ways to replay the queued work:
   default): instead of a fixed batch size, Baldur watches the success rate of each batch and adjusts
   the next one, shrinking the batch when too many replays are still failing and growing it again
   after several clean batches, staying between a floor and a ceiling you set. With PRO active, batch
-  replay is also a one-click Web Console action and a REST endpoint; that one selects pending entries
-  (optionally of one domain) rather than a failure type, 50 per call by default. Either way the batch
+  replay is also a one-click Web Console action and a REST endpoint; both select pending entries
+  rather than a failure type, 50 per call by default, and the REST endpoint can narrow them to one
+  domain. Either way the batch
   runs its entries directly, one after another; PRO additionally ships a standalone replay queue
   with rate limiting and backpressure that your own code can pace replay work through.
 - **Automatic on recovery.** When a dependency's circuit breaker closes again after an outage, Baldur
@@ -143,7 +150,7 @@ force-redrive can never turn a poison-pill into an endless loop.
 | A call appears in the queue as a `CIRCUIT_BREAKER_OPEN` failure without ever having run | the dependency's circuit breaker is open and rejects the call at a `dlq=True` call site with no `fallback=` |
 | You retry or resolve a single entry | an operator action from the Web Console DLQ panel or the REST API |
 | You force-redrive an entry parked for review | an admin action over the REST API |
-| A batch of queued entries replays in one call | `batch_replay_by_failure_type` from code (one failure type, 100 entries by default), or the console/REST batch replay (**PRO**; pending entries, optionally of one domain, 50 by default) |
+| A batch of queued entries replays in one call | `batch_replay_by_failure_type` from code (one failure type, 100 entries by default), or the console/REST batch replay (**PRO**; pending entries, 50 by default, optionally of one domain over REST) |
 | Queued work drains on its own | a dependency's circuit breaker recovers and an automatic replay sweep runs |
 | A drain stops with work still queued, and says why | the recovery's continuation bound was reached, a circuit for that domain re-opened, a pass made no progress, or a pass errored (a `DLQ_REPLAY_BLOCKED` event whose `block_reason` names which) |
 | A batch replay grows or shrinks batch by batch | adaptive batch sizing was opted in (`use_adaptive=True`) and the recent replay success rate changes |
@@ -155,7 +162,7 @@ force-redrive can never turn a poison-pill into an endless loop.
 When the queue reaches its size limit, the **overflow strategy** decides what gives:
 
 - `drop_oldest` evicts the oldest entries to make room for new failures (the default; the eviction
-  happens synchronously, as each entry is stored).
+  happens synchronously, inside the store call).
 - `reject` refuses new entries so nothing already queued is displaced.
 - `compress_oldest` (**PRO**) summarizes the oldest entries into a compact record before evicting
   them, so an aggregate trace of what failed survives even after the raw entries are gone. These
@@ -190,10 +197,11 @@ hooks when they are wired, and from the `atexit` hook when they are not; the
 [gunicorn graceful-shutdown runbook](https://github.com/baldurhq/baldur/blob/main/docs/runbooks/gunicorn-graceful-shutdown.md)
 shows the two ways to wire the hooks and how the budget fits gunicorn's own timeouts.
 
-With PRO active, two things change for deployments that cannot tolerate losing even
-queued-but-not-yet-written work across a process crash: the outbox gains a disk-durable mode, and
-the Meta-Watchdog daemon actively probes the liveness of its background drain worker, so a stalled
-drain is detected rather than silently backing up.
+With PRO active, two things change. The outbox gains an opt-in disk-durable mode, in which the
+background writer saves each entry it takes from the buffer to a local disk buffer before writing
+it to the store, so an entry already taken is kept on disk across a process crash; one still
+waiting in the in-memory buffer is not. And the Meta-Watchdog daemon actively probes the liveness
+of that background writer, so a stalled drain is detected rather than silently backing up.
 
 ### Trace continuity: from the original failure to its replay
 
@@ -257,7 +265,10 @@ backend or the in-memory fallback — so the flag is not about infrastructure. I
 stored.
 
 To be replayable, an entry has to carry the work itself: capture records a snapshot of the failing
-call's arguments — the request data a replay re-runs. That snapshot is your domain data: order ids,
+call's arguments — the request data a replay re-runs. Only arguments of simple types are
+snapshotted (numbers, strings, ids, dates and the like). A `dict`, list or object argument is left
+out, so a call that takes one carries that work only if you pass `context_from=` a function that
+builds the context, payload included. That snapshot is your domain data: order ids,
 amounts, user ids. Sensitive-looking fields are masked by rule-based patterns, but no generic rule
 set can know which of *your* values are sensitive, so domain values survive masking by design.
 Persisting that data is therefore a decision Baldur leaves to you, made explicitly per call site,
@@ -293,7 +304,7 @@ The knobs an operator sets most often. The full list lives in the API reference.
 
 If you don't use automatic replay, turn it off rather than leaving it half-configured: with
 `BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_ENABLED=false`, recovery events skip the replay dispatch
-entirely, and the per-recovery WARNING about a missing replay worker disappears with it (the arming
+entirely, and the per-recovery WARNING that Celery is missing disappears with it (the arming
 surface reports `disabled`).
 
 ### Closing the loop — making automatic replay actually drain
@@ -333,9 +344,11 @@ needs open-circuit capture on (`open_circuit_capture_disabled` when it is off). 
     register_replay_handler(PaymentReplayHandler())
     ```
 
-    Without a registered handler, every replay for that domain fails per-entry and the entry ends
-    up parked for review once its replay budget is spent. The arming surface reports
-    `handler_missing`. Registration is per process: the on-recovery sweep runs inside the Celery
+    Without a registered handler, every replay for that domain fails per-entry: an entry the
+    on-recovery sweep replays is parked for review at once, and one replayed by hand once its replay
+    budget is spent. The arming surface reports `handler_missing` only while no handler at all is
+    registered; it does not check that each domain you capture has one. Registration is per
+    process: the on-recovery sweep runs inside the Celery
     worker, so the worker must register the handler too, and the arming surface can only vouch
     for the process that answers it.
 
@@ -353,8 +366,9 @@ needs open-circuit capture on (`open_circuit_capture_disabled` when it is off). 
     is the very one that rejected them, so they need no map entry. On recovery they are swept for
     that breaker's domain whenever the breaker's name resolves to a domain of its own (not the
     unclassified catch-all) with a replay handler registered for it, map or no map. That is the
-    open-circuit lane: on the shipped defaults a plain `dlq=True` deployment with an empty mapping
-    reads `armed: true`, with `lanes.mapped` reporting `map_unconfigured` on its own — the sweep
+    open-circuit lane: with the shared prerequisites in place, a plain `dlq=True` deployment on the
+    shipped defaults with an empty mapping reads `armed: true`, with `lanes.mapped` reporting
+    `map_unconfigured` on its own — the sweep
     that drains its captures runs, the one that has nothing to select by does not.
 
 3. **Run a Celery worker on the `dlq_processing` queue.** On-recovery replay execution is dispatched to Celery.
@@ -468,7 +482,10 @@ operate-at-scale surface on top.
   `compress_oldest` overflow strategy and its compressed summaries become available, evictions move
   off the capture path to a background water-level worker, the outbox gains its disk-durable mode
   and Meta-Watchdog probing of its drain worker's liveness, scheduled archive/purge retention ages
-  old entries out, and synthetic test entries can be created for debugging and load tests.
+  old entries out, and synthetic test entries can be created for debugging and load tests. The
+  background eviction, the compressed summaries' aging and the archive/purge retention all run as
+  Celery Beat tasks: without Beat, a PRO queue past its size limit under `drop_oldest` or
+  `compress_oldest` is never trimmed.
 
 ## See also
 
