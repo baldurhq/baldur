@@ -11,7 +11,6 @@ Environment Variables:
     BALDUR_DLQ_OUTBOX_FLUSH_INTERVAL_SECONDS=0.1
     BALDUR_DLQ_OUTBOX_DROP_RATE_THRESHOLD=0.01
     BALDUR_DLQ_OUTBOX_JOIN_TIMEOUT_SECONDS=5.0
-    BALDUR_DLQ_OUTBOX_DURABLE=false
 """
 
 from __future__ import annotations
@@ -82,14 +81,6 @@ class DLQOutboxSettings(BaseSettings):
             "max_requests recycle, a celery maxtasksperchild recycle). Size it "
             "below the process watchdog that will kill the worker anyway "
             "(gunicorn --timeout, Kubernetes terminationGracePeriodSeconds)."
-        ),
-    )
-    durable: bool = Field(
-        default=False,
-        description=(
-            "PRO opt-in: route worker drain through DiskPersistentBuffer "
-            "(LMDB) before dispatching to the DLQ DB. Producer hot path is "
-            "unaffected (RingBuffer-only)."
         ),
     )
 

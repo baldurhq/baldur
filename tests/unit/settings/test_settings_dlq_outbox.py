@@ -54,11 +54,6 @@ class TestDLQOutboxSettingsContract:
         s = DLQOutboxSettings()
         assert s.join_timeout_seconds == 5.0
 
-    def test_durable_default_is_false(self):
-        """OSS default — DiskPersistentBuffer is PRO opt-in."""
-        s = DLQOutboxSettings()
-        assert s.durable is False
-
 
 # =============================================================================
 # B. Behavior — boundary validation

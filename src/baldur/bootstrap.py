@@ -3252,15 +3252,6 @@ def _start_dlq_outbox_if_enabled() -> None:
         )
         return
 
-    # PRO durable wrapper (D1, G8) — must install BEFORE setup_dlq_outbox
-    # so the worker captures the wrapped sync_writer.
-    try:
-        from baldur_pro.services.dlq_outbox import setup_durable_outbox_if_enabled
-
-        setup_durable_outbox_if_enabled()
-    except ImportError:
-        pass
-
     try:
         from baldur.services.dlq_outbox import setup_dlq_outbox
 
@@ -4852,9 +4843,8 @@ def _start_dlq_outbox_starter() -> None:
     ``store_failure`` reports success, and the buffer has no WAL behind it, so
     the entries are lost at exit rather than deferred.
 
-    A plain delegation to the ``init()``-time starter, so the settings gate,
-    the PRO durable-wrapper install and the ImportError shield stay
-    single-sourced. ``setup_dlq_outbox()`` is fork-aware at its own entry
+    A plain delegation to the ``init()``-time starter, so the settings gate
+    and the ImportError shield stay single-sourced. ``setup_dlq_outbox()`` is fork-aware at its own entry
     point: it re-owns the inherited singleton and respawns the writer before
     reaching its idempotence guard, so there is nothing to pre-condition here.
 

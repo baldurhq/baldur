@@ -197,7 +197,7 @@ Python × Django test grid, and the version support policy.
 Baldur PRO adds the fleet-level machinery on top of the same API — nothing in
 the core gets relicensed or replaced:
 [DLQ at scale](https://baldur.sh/concepts/foundations/dlq-replay/) (batch replay from the
-console, success-rate-driven pacing, a disk-durable outbox, and archive/purge
+console, success-rate-driven pacing, and archive/purge
 retention), a hash-chained [audit trail](https://baldur.sh/concepts/pro/audit/),
 [unified notifications](https://baldur.sh/concepts/pro/unified-notification/),
 [emergency mode](https://baldur.sh/concepts/pro/emergency-mode/),

@@ -4,7 +4,7 @@
 ``DLQCaptureService`` durably captures a failed operation into the DLQ store
 and routes it through the async outbox / local disk fallback. This is the
 OSS-tier capture core; the PRO ``DLQService`` inherits it and overlays
-lazy-eviction overflow, disk-durable outbox, and throttled replay.
+lazy-eviction overflow and throttled replay.
 
 Fallback strategy (zero data loss):
     1. Primary: FailedOperationRepository (Redis / in-memory DI fallback)

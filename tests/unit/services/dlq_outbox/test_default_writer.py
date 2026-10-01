@@ -22,8 +22,8 @@ from baldur.services.dlq_outbox import outbox
 
 _RESOLVE = "baldur.services.dlq_capture.resolve_dlq_backing"
 
-# Captured at import (collection) time, before any test runs. The PRO durable
-# install (and other tests) RAW-reassign ``outbox._default_sync_writer`` /
+# Captured at import (collection) time, before any test runs. Other tests
+# RAW-reassign ``outbox._default_sync_writer`` /
 # ``_default_emergency_dump``; a leaked swap would otherwise make these tests
 # call the wrong writer under xdist ordering. Restore the pristine functions
 # around each test so this file is isolated from (and does not leak) that swap.

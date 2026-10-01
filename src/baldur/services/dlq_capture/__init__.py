@@ -3,7 +3,7 @@
 ``DLQCaptureService`` is the OSS-tier DLQ capture core — it durably captures
 failed operations, dispatches through the async outbox, and falls back to local
 disk storage. The PRO ``DLQService`` inherits it and overlays lazy-eviction
-overflow, disk-durable outbox, and throttled replay.
+overflow and throttled replay.
 """
 
 from __future__ import annotations

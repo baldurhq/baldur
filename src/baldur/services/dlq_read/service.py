@@ -11,7 +11,7 @@ actions find ``_execute_replay`` / ``_emit_replay_exhausted`` / ``resolve_entry`
 
 The PRO ``DLQService`` inherits these read + single-entry mixins and adds the
 batch/scale/management overlay (batch + throttle-aware replay, archive/purge
-lifecycle, background eviction, disk-durable outbox). This backing is NOT
+lifecycle, background eviction). This backing is NOT
 registered into ``ProviderRegistry.dlq_service`` — the read handlers resolve it
 through a handler-layer chain (registry-first, OSS fallback), never the slot.
 """

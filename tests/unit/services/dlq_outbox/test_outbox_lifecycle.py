@@ -244,7 +244,6 @@ class TestOutboxFromSettingsContract:
                 flush_interval_seconds=0.05,
                 drop_rate_threshold=0.07,
                 join_timeout_seconds=2.0,
-                durable=False,
             ),
         ):
             captured_writer = lambda kwargs: None  # noqa: E731

@@ -180,7 +180,9 @@ _MOCK_CREATION_BUDGETS: dict[str, int] = {
     # control-state handler / shutdown mocks: -3 — the two new REST-outcome
     # cases autospec the system-control manager, and the shutdown fixture's
     # redundant spec-less attribute mock went (the fixture's mock supplies it).
-    "oss": 4310,
+    # durable outbox removal: -6 — the writer-wrapper suite was deleted with
+    # the never-read-back disk-durable mode it covered.
+    "oss": 4304,
     "pro": 1800,
     "dormant": 401,
 }

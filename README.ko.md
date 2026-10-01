@@ -191,7 +191,7 @@ AI 코딩 어시스턴트(Claude Code, Cursor, Copilot, Codex)로 개발하고 �
 Baldur PRO는 동일한 API 위에 플릿 단위 운영을 위한 기계 장치를 더합니다 — 코어의
 어떤 것도 라이선스가 바뀌거나 대체되지 않습니다.
 [대규모 DLQ](https://baldur.sh/concepts/foundations/dlq-replay/)(콘솔에서의 일괄 재실행,
-성공률 기반 속도 조절, 디스크에 지속되는 아웃박스, 아카이브/삭제 보존 정책),
+성공률 기반 속도 조절, 아카이브/삭제 보존 정책),
 해시 체인 [감사 추적](https://baldur.sh/concepts/pro/audit/),
 [통합 알림](https://baldur.sh/concepts/pro/unified-notification/),
 [비상 모드](https://baldur.sh/concepts/pro/emergency-mode/),
