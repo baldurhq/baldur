@@ -80,6 +80,7 @@ class BulkheadDetailView(APIView):
                 "max_concurrent": state.max_concurrent,
                 "active_count": state.active_count,
                 "waiting_count": state.waiting_count,
+                "queue_size": state.queue_size,
                 "rejected_count": state.rejected_count,
                 "available_permits": state.available_permits,
                 "utilization_percent": round(state.utilization_percent, 2),

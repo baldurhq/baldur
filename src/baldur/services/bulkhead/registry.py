@@ -60,7 +60,7 @@ class BulkheadRegistry:
     Features:
     - Automatic registration of default bulkheads per ConnectionType
     - Custom domain support
-    - Automatic creation of asynchronous bulkheads
+    - Async views that share each compartment's seats
     - Fine-grained bulkheads per DB alias / cache instance
     """
 
@@ -256,22 +256,25 @@ class BulkheadRegistry:
 
     def get_async(self, name: str | ConnectionType) -> AsyncSemaphoreBulkhead:
         """
-        Look up an asynchronous bulkhead.
+        Look up the async view of a registered compartment.
 
-        Creates/returns the asynchronous version deriving its capacity from the
-        synchronous twin. Strict: a domain with no synchronous twin is treated
-        identically to ``get()`` — provisioning must precede the async lookup, so
-        the async twin can never be a registry-invisible, default-capacity mint.
+        Returns a handle over the registered compartment itself, so async
+        callers take their seats on the same count as its sync callers and
+        appear in its state. Strict: a domain with no registered compartment is
+        treated identically to ``get()`` — provisioning must precede the async
+        lookup.
 
         Args:
             name: Domain name or ConnectionType
 
         Returns:
-            AsyncSemaphoreBulkhead instance
+            AsyncSemaphoreBulkhead handle (cached per name; replaced when the
+            name is registered again)
 
         Raises:
-            BulkheadNotFoundError: No synchronous twin for ``name``. Subclasses
-                ``KeyError``; message lists the registered compartments.
+            BulkheadNotFoundError: No compartment registered for ``name``.
+                Subclasses ``KeyError``; message lists the registered
+                compartments.
         """
         key = name.value if isinstance(name, ConnectionType) else name
 
@@ -281,11 +284,7 @@ class BulkheadRegistry:
                 if sync_bh is None:
                     # Read names directly under the held lock (lock-symmetry).
                     raise BulkheadNotFoundError(key, list(self._bulkheads.keys()))
-                # Derive capacity from the synchronous twin.
-                self._async_bulkheads[key] = AsyncSemaphoreBulkhead(
-                    name=key,
-                    max_concurrent=sync_bh.get_state().max_concurrent,
-                )
+                self._async_bulkheads[key] = AsyncSemaphoreBulkhead._over(sync_bh)
             return self._async_bulkheads[key]
 
     def get_for_database(self, alias: str = "default") -> Bulkhead:
@@ -338,8 +337,8 @@ class BulkheadRegistry:
         permanently replaces a settings-owned protection compartment, so a
         WARNING is emitted to flag the footgun.
 
-        The async twin for the same name is invalidated so async callees pick up
-        the new capacity on next access.
+        The async view for the same name is invalidated so async callers reach
+        the new compartment on next access.
 
         Args:
             bulkhead: Bulkhead to register
@@ -361,7 +360,7 @@ class BulkheadRegistry:
         """
         Unregister a bulkhead.
 
-        The async twin for the same name is invalidated alongside the sync entry.
+        The async view for the same name is invalidated alongside the sync entry.
 
         Args:
             name: Domain name

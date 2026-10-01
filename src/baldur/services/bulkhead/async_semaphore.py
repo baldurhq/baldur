@@ -1,32 +1,30 @@
 """
-Async Semaphore Bulkhead - asyncio.Semaphore-based async bulkhead.
+Async Semaphore Bulkhead - the async view of one bulkhead compartment.
 
-Suited to I/O-bound async work.
-Unlike threading.Semaphore, it does not block the event loop.
+An ``AsyncSemaphoreBulkhead`` takes its seats on the same count as the
+compartment's sync callers, so sync and async callers of one compartment
+together never exceed its capacity. Waiting never blocks the event loop and is
+not bound to any one loop.
 
 Usage:
     bulkhead = AsyncSemaphoreBulkhead("database", max_concurrent=10)
 
     async with bulkhead.acquire(timeout=1.0):
         await async_db_operation()
+
+    # The registry's async view of a registered compartment shares its seats:
+    async_bulkhead = get_bulkhead_registry().get_async("database")
 """
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from datetime import datetime
 
 import structlog
 
-from baldur.services.bulkhead.base import (
-    BulkheadState,
-    BulkheadType,
-)
-from baldur.services.bulkhead.exceptions import BulkheadFullError
-from baldur.services.bulkhead.metrics import increment_rejected_count
-from baldur.utils.time import utc_now
+from baldur.services.bulkhead.base import Bulkhead, BulkheadState
+from baldur.services.bulkhead.semaphore import SemaphoreBulkhead
 
 logger = structlog.get_logger()
 
@@ -35,16 +33,20 @@ __all__ = ["AsyncSemaphoreBulkhead"]
 
 class AsyncSemaphoreBulkhead:
     """
-    Async semaphore-based bulkhead.
+    Async handle over one bulkhead compartment.
 
-    Limits concurrency in an asyncio environment to prevent resource exhaustion.
-    Does not block the event loop; suited to async I/O work.
+    Constructed directly, it builds its own :class:`SemaphoreBulkhead`. The
+    registry's ``get_async(name)`` returns a handle over the registered
+    compartment instead, so the async callers it admits count against that
+    compartment's capacity and appear in its state.
 
     Features:
-    - asyncio.Semaphore-based non-blocking wait
-    - asyncio.wait_for-based timeout
-    - Rejection statistics tracking
+    - Seats shared with the compartment's sync callers
+    - Timeout-bounded waiting on the running loop (any loop)
+    - Rejection statistics tracked by the compartment
     """
+
+    _compartment: Bulkhead
 
     def __init__(
         self,
@@ -56,29 +58,29 @@ class AsyncSemaphoreBulkhead:
             name: Bulkhead name (domain identifier)
             max_concurrent: Maximum concurrent executions
         """
-        self._name = name
-        self._max_concurrent = max_concurrent
-        self._semaphore = asyncio.Semaphore(max_concurrent)
-        self._lock = asyncio.Lock()
+        self._compartment = SemaphoreBulkhead(name=name, max_concurrent=max_concurrent)
 
-        # Statistics
-        self._active_count = 0
-        self._waiting_count = 0
-        self._rejected_count = 0
-        self._last_rejection_time: datetime | None = None
+    @classmethod
+    def _over(cls, compartment: Bulkhead) -> AsyncSemaphoreBulkhead:
+        """Build a handle over an existing compartment (registry path)."""
+        handle = cls.__new__(cls)
+        handle._compartment = compartment
+        return handle
 
     @property
     def name(self) -> str:
         """Bulkhead name."""
-        return self._name
+        return self._compartment.name
 
     @asynccontextmanager
     async def acquire(self, timeout: float | None = None) -> AsyncGenerator[None, None]:
         """
-        Acquire a resource asynchronously.
+        Hold a seat for the body of an ``async with`` block.
 
         Args:
-            timeout: Wait timeout (seconds). None fails immediately (non-blocking).
+            timeout: Upper bound on waiting (seconds). None fails immediately
+                (non-blocking). A thread-pool compartment always gives the
+                immediate verdict.
 
         Yields:
             None
@@ -86,61 +88,8 @@ class AsyncSemaphoreBulkhead:
         Raises:
             BulkheadFullError: When resource acquisition fails
         """
-        acquired = False
-        try:
-            async with self._lock:
-                self._waiting_count += 1
-
-            # timeout=None tries immediately (non-blocking)
-            if timeout is None:
-                # locked() True means the semaphore is at 0, so fail immediately
-                if self._semaphore.locked():
-                    acquired = False
-                else:
-                    # Try to acquire immediately
-                    try:
-                        await asyncio.wait_for(
-                            self._semaphore.acquire(),
-                            timeout=0.001,  # near-instant
-                        )
-                        acquired = True
-                    except TimeoutError:
-                        acquired = False
-            else:
-                try:
-                    await asyncio.wait_for(
-                        self._semaphore.acquire(),
-                        timeout=timeout,
-                    )
-                    acquired = True
-                except TimeoutError:
-                    acquired = False
-
-            async with self._lock:
-                self._waiting_count -= 1
-                if acquired:
-                    self._active_count += 1
-                else:
-                    self._rejected_count += 1
-                    self._last_rejection_time = utc_now()
-
-            if not acquired:
-                # Emit outside the lock — the prometheus client takes its own
-                # lock, so recording under self._lock would nest two locks.
-                increment_rejected_count(self._name)
-                raise BulkheadFullError(
-                    bulkhead_name=self._name,
-                    max_concurrent=self._max_concurrent,
-                    active_count=self._active_count,
-                )
-
+        async with self._compartment.acquire_async(timeout=timeout):
             yield
-
-        finally:
-            if acquired:
-                self._semaphore.release()
-                async with self._lock:
-                    self._active_count -= 1
 
     async def try_acquire(self, timeout: float | None = None) -> bool:
         """
@@ -152,57 +101,14 @@ class AsyncSemaphoreBulkhead:
                 (immediate verdict).
 
         Returns:
-            True on success, False on failure
+            True on success (release it with :meth:`release`), False on failure
         """
-        # timeout=None tries immediately (non-blocking)
-        if timeout is None:
-            # locked() True means the semaphore is at 0, so fail immediately
-            if self._semaphore.locked():
-                acquired = False
-            else:
-                try:
-                    await asyncio.wait_for(
-                        self._semaphore.acquire(),
-                        timeout=0.001,  # near-instant
-                    )
-                    acquired = True
-                except TimeoutError:
-                    acquired = False
-        else:
-            try:
-                await asyncio.wait_for(
-                    self._semaphore.acquire(),
-                    timeout=timeout,
-                )
-                acquired = True
-            except TimeoutError:
-                acquired = False
-
-        async with self._lock:
-            if acquired:
-                self._active_count += 1
-            else:
-                self._rejected_count += 1
-                self._last_rejection_time = utc_now()
-        if not acquired:
-            # Emit outside the lock (see acquire()).
-            increment_rejected_count(self._name)
-        return acquired
+        return await self._compartment.try_acquire_async(timeout)
 
     async def release(self) -> None:
         """Release the resource."""
-        self._semaphore.release()
-        async with self._lock:
-            self._active_count = max(0, self._active_count - 1)
+        self._compartment.release()
 
     def get_state(self) -> BulkheadState:
-        """Return the current state (synchronous method)."""
-        return BulkheadState(
-            name=self._name,
-            bulkhead_type=BulkheadType.SEMAPHORE,
-            max_concurrent=self._max_concurrent,
-            active_count=self._active_count,
-            waiting_count=self._waiting_count,
-            rejected_count=self._rejected_count,
-            last_rejection_time=self._last_rejection_time,
-        )
+        """Return the compartment's state (sync and async callers alike)."""
+        return self._compartment.get_state()

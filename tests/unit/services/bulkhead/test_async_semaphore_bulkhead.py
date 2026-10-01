@@ -273,23 +273,26 @@ class TestAsyncSemaphoreBulkheadTryAcquire:
 
 class TestAsyncSemaphoreBulkheadRejectionMetric:
     """644 D3: each reject path increments baldur_bulkhead_rejected_total via
-    increment_rejected_count, emitted *outside* self._lock.
+    increment_rejected_count, emitted *outside* the compartment lock.
 
-    self._lock is an asyncio.Lock; emitting under it while the prometheus client
-    takes its own lock would nest two locks. Asserting lock.locked() is False at
-    emit time proves the call site is outside the critical section; called_once
-    proves the +1 wiring (the never-populated series 644 D3 wired)."""
+    The handle admits on its compartment's seat count (805 D3), whose lock is a
+    plain thread lock; emitting under it while the prometheus client takes its
+    own lock would nest two locks. Asserting lock.locked() is False at emit time
+    proves the call site is outside the critical section; called_once proves the
+    +1 wiring (the never-populated series 644 D3 wired)."""
 
     @pytest.mark.asyncio
     async def test_acquire_rejection_emits_counter_outside_lock(self):
-        """acquire() rejection emits the counter once, outside self._lock."""
+        """acquire() rejection emits the counter once, outside the lock."""
         bulkhead = AsyncSemaphoreBulkhead("test", max_concurrent=1)
         lock_held_at_emit: list[bool] = []
 
         with patch(
-            "baldur.services.bulkhead.async_semaphore.increment_rejected_count",
+            "baldur.services.bulkhead.semaphore.increment_rejected_count",
             autospec=True,
-            side_effect=lambda name: lock_held_at_emit.append(bulkhead._lock.locked()),
+            side_effect=lambda name: lock_held_at_emit.append(
+                bulkhead._compartment._lock.locked()
+            ),
         ) as mock_inc:
             async with bulkhead.acquire():
                 with pytest.raises(BulkheadFullError):
@@ -301,14 +304,16 @@ class TestAsyncSemaphoreBulkheadRejectionMetric:
 
     @pytest.mark.asyncio
     async def test_try_acquire_rejection_emits_counter_outside_lock(self):
-        """try_acquire() rejection emits the counter once, outside self._lock."""
+        """try_acquire() rejection emits the counter once, outside the lock."""
         bulkhead = AsyncSemaphoreBulkhead("test", max_concurrent=1)
         lock_held_at_emit: list[bool] = []
 
         with patch(
-            "baldur.services.bulkhead.async_semaphore.increment_rejected_count",
+            "baldur.services.bulkhead.semaphore.increment_rejected_count",
             autospec=True,
-            side_effect=lambda name: lock_held_at_emit.append(bulkhead._lock.locked()),
+            side_effect=lambda name: lock_held_at_emit.append(
+                bulkhead._compartment._lock.locked()
+            ),
         ) as mock_inc:
             assert await bulkhead.try_acquire() is True
             assert await bulkhead.try_acquire(timeout=None) is False

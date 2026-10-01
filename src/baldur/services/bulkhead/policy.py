@@ -15,7 +15,8 @@ Exception handling contract (same as CircuitBreakerPolicy):
 
 Composition:
 - BulkheadPolicy: synchronous bulkhead (any Bulkhead ABC implementation)
-- AsyncBulkheadPolicy: asynchronous bulkhead (AsyncSemaphoreBulkhead)
+- AsyncBulkheadPolicy: asynchronous bulkhead (AsyncSemaphoreBulkhead — the
+  async view of a compartment, sharing its seats with sync callers)
 - bulkhead_policy(): synchronous factory (BulkheadRegistry singleton integration)
 - async_bulkhead_policy(): asynchronous factory (BulkheadRegistry singleton integration)
 """
@@ -180,8 +181,12 @@ class AsyncBulkheadPolicy:
     Wraps AsyncSemaphoreBulkhead and returns results in PolicyResult form.
     Follows the same exception handling contract as the synchronous BulkheadPolicy.
 
-    Since AsyncSemaphoreBulkhead is a separate class that does not inherit from Bulkhead(ABC),
-    it is implemented as a class fully separated from the synchronous BulkheadPolicy.
+    The seats it takes are the compartment's own: an AsyncSemaphoreBulkhead from
+    the registry is the async view of the registered compartment, so the async
+    callers this policy admits and the sync callers of the same compartment
+    together never exceed its capacity. ``timeout`` bounds the wait for a seat
+    only; on a thread-pool compartment the verdict is immediate and the
+    coroutine runs on its caller's loop while holding the seat.
     """
 
     def __init__(
@@ -193,6 +198,7 @@ class AsyncBulkheadPolicy:
         Args:
             async_bulkhead: AsyncSemaphoreBulkhead instance (DI).
             timeout: Resource acquisition timeout (seconds). If None, fail immediately.
+                Waiting never blocks the event loop.
         """
         self._async_bulkhead = async_bulkhead
         self._timeout = timeout
@@ -303,29 +309,28 @@ def async_bulkhead_policy(
     """
     AsyncBulkheadPolicy factory — BulkheadRegistry singleton integration.
 
-    Calls the Registry's get_async() to guarantee a single
-    global AsyncSemaphoreBulkhead instance for the same name.
+    Calls the Registry's get_async() so the policy admits on the registered
+    compartment's own seat count, shared with its sync callers.
 
     Args:
         name: Domain name (Registry key)
         max_concurrent: Maximum concurrent execution count (Registry default if None).
                         The synchronous Bulkhead is provisioned first (so the domain
                         is registry-visible to the admin API, metrics, and shutdown
-                        iteration) and used as the configuration basis for the
-                        asynchronous instance.
+                        iteration); the async view takes its seats.
         timeout: Resource acquisition timeout (fail immediately if None)
 
     Returns:
-        AsyncBulkheadPolicy instance (uses the Registry singleton AsyncSemaphoreBulkhead)
+        AsyncBulkheadPolicy instance (uses the registered compartment's async view)
     """
     from baldur.services.bulkhead.registry import get_bulkhead_registry
 
     registry = get_bulkhead_registry()
 
-    # Provision the synchronous twin unconditionally so the domain is
-    # registry-visible and get_async() derives capacity from it (async is based
-    # on sync configuration). get_or_create() falls back to the registry default
-    # when max_concurrent is None.
+    # Provision the compartment unconditionally so the domain is
+    # registry-visible and get_async() returns its async view (one seat count
+    # for sync and async callers). get_or_create() falls back to the registry
+    # default when max_concurrent is None.
     registry.get_or_create(name=name, max_concurrent=max_concurrent)
 
     async_bh = registry.get_async(name)

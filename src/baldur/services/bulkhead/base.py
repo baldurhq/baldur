@@ -12,13 +12,15 @@ Supported types:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Generator
-from contextlib import contextmanager
+from collections.abc import AsyncGenerator, Callable, Generator
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from functools import wraps
 from typing import Any, TypeVar
+
+from baldur.services.bulkhead.exceptions import BulkheadFullError
 
 T = TypeVar("T")
 
@@ -46,19 +48,26 @@ class BulkheadState:
     """Bulkhead type"""
 
     max_concurrent: int
-    """Maximum allowed concurrent execution count"""
+    """Capacity — the number of seats the compartment admits at once. For a
+    thread-pool compartment this is its worker count plus its queue size."""
 
     active_count: int
-    """Number of currently running tasks"""
+    """Seats taken — by sync and async callers alike. For a thread-pool
+    compartment this counts running, queued and held calls."""
 
     waiting_count: int
-    """Number of waiting tasks"""
+    """Callers waiting — for a seat (semaphore compartment) or, for a
+    thread-pool compartment, admitted tasks no worker has started yet"""
 
     rejected_count: int
     """Total number of rejected requests"""
 
     last_rejection_time: datetime | None = None
     """Last rejection time"""
+
+    queue_size: int = 0
+    """Waiting-queue seats included in ``max_concurrent`` (thread-pool
+    compartments; 0 for a semaphore compartment)"""
 
     @property
     def available_permits(self) -> int:
@@ -135,6 +144,57 @@ class Bulkhead(ABC):
     def release(self) -> None:
         """Release the resource."""
         pass
+
+    async def try_acquire_async(self, timeout: float | None = None) -> bool:  # noqa: ARG002 - immediate verdict; see docstring
+        """
+        Attempt to acquire a seat from a coroutine.
+
+        Takes a seat on the same count as :meth:`try_acquire`, so sync and
+        async callers of one compartment share its capacity. This default
+        gives the immediate verdict (``self.try_acquire(None)``) for any
+        ``timeout`` — it never waits and never touches the event loop, which
+        satisfies the contract (``timeout`` is an upper bound on waiting).
+        Implementations that can wait without blocking the loop override it.
+
+        Non-abstract so existing third-party subclasses stay instantiable.
+
+        Args:
+            timeout: Upper bound on waiting (seconds). None means no waiting.
+
+        Returns:
+            True if a seat was taken (release it with :meth:`release`)
+        """
+        return self.try_acquire(None)
+
+    @asynccontextmanager
+    async def acquire_async(
+        self, timeout: float | None = None
+    ) -> AsyncGenerator[None, None]:
+        """
+        Hold a seat for the body of an ``async with`` block.
+
+        Built on :meth:`try_acquire_async` and :meth:`release`.
+
+        Args:
+            timeout: Upper bound on waiting (seconds). None means no waiting.
+
+        Yields:
+            None
+
+        Raises:
+            BulkheadFullError: When no seat is available within ``timeout``
+        """
+        if not await self.try_acquire_async(timeout):
+            state = self.get_state()
+            raise BulkheadFullError(
+                bulkhead_name=self.name,
+                max_concurrent=state.max_concurrent,
+                active_count=state.active_count,
+            )
+        try:
+            yield
+        finally:
+            self.release()
 
     @abstractmethod
     def get_state(self) -> BulkheadState:
