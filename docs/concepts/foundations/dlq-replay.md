@@ -163,7 +163,10 @@ When the queue reaches its size limit, the **overflow strategy** decides what gi
 
 - `drop_oldest` evicts the oldest entries to make room for new failures (the default; the eviction
   happens synchronously, inside the store call).
-- `reject` refuses new entries so nothing already queued is displaced.
+- `reject` refuses new entries so nothing already queued is displaced. On the defaults the
+  per-domain limit is checked only on every tenth store while the queue as a whole is under 80% of
+  its size limit, so until then a domain at its own limit still takes about nine of every ten new
+  failures.
 - `compress_oldest` (**PRO**) summarizes the oldest entries into a compact record before evicting
   them, so an aggregate trace of what failed survives even after the raw entries are gone. These
   summaries are grouped by domain, failure type, and error code, stay queryable over the REST API,
