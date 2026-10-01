@@ -9,6 +9,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
+from baldur.utils.domain_validation import FALLBACK_DOMAIN, resolve_stored_domain
+
 from .models import ReplayResult
 
 if TYPE_CHECKING:
@@ -130,9 +132,30 @@ class DefaultReplayHandler(ReplayHandler):
 _replay_handlers: dict[str, ReplayHandler] = {}
 
 
+def _registry_key(domain: str) -> str:
+    """The key a handler is filed and looked up under: its domain's stored form.
+
+    A dead letter is stored under the stored form of the name it was captured
+    under (``Payment-API`` -> ``payment_api``), and every lookup passes that
+    form, so a handler keyed on its raw ``domain`` would never be found. A
+    name with no domain identity of its own keeps its raw key: the shared
+    unclassifiable bucket pools every such name, so filing a handler there
+    would hand it other names' entries.
+    """
+    if domain == FALLBACK_DOMAIN:
+        return domain
+    stored = resolve_stored_domain(domain)
+    return domain if stored == FALLBACK_DOMAIN else stored
+
+
 def register_replay_handler(handler: ReplayHandler) -> None:
-    """Register a replay handler for a domain."""
-    _replay_handlers[handler.domain] = handler
+    """Register a replay handler for a domain.
+
+    The handler is filed under the stored form of its ``domain``, the form
+    the dead letters it replays are stored under, so a handler declared as
+    ``"Payment-API"`` replays the entries a ``"Payment-API"`` call parked.
+    """
+    _replay_handlers[_registry_key(handler.domain)] = handler
 
 
 def has_replay_handler(domain: str) -> bool:
@@ -144,7 +167,7 @@ def has_replay_handler(domain: str) -> bool:
     budget on a guaranteed failure and escalate them to review, so it asks this
     first instead.
     """
-    return domain in _replay_handlers
+    return _registry_key(domain) in _replay_handlers
 
 
 def get_replay_handler(domain: str) -> ReplayHandler:
@@ -157,8 +180,9 @@ def get_replay_handler(domain: str) -> ReplayHandler:
     Returns:
         ReplayHandler instance for the domain
     """
-    if domain in _replay_handlers:
-        return _replay_handlers[domain]
+    handler = _replay_handlers.get(_registry_key(domain))
+    if handler is not None:
+        return handler
 
     # Return default handler if no specific handler exists
     return DefaultReplayHandler(domain)

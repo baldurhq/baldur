@@ -50,7 +50,8 @@ these ended the call: retries that ran out, retry switched off (`BALDUR_RETRY_EN
 `TenacityBridgePolicy` as `retry=`, Baldur's own `timeout=` cutting the call off (retry or not), or
 a full bulkhead refusing it. The entry is filed under the name the call is protected under, in its
 domain form: lowercased, with a character such as `-` turned into `_`, so a `Payment-API` call is
-filed as `payment_api` and its replay handler must name that form. The one exception is a
+filed as `payment_api`. A replay handler is filed the same way, so one declared as `Payment-API`
+replays those entries. The one exception is a
 `RetryPolicyConfig` that names its own `domain=`, whose retry stage files the failures it ends
 under that domain. A call that never ran because
 its circuit breaker was already open is captured as well: the breaker rejects it in microseconds,

@@ -68,6 +68,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A `dlq=True` call a full bulkhead refuses is parked, and so are a preset's open-breaker refusals.
 - A `RetryPolicyConfig` without `domain=` files DLQ entries under the call's name, not `default`.
 - An enclosing `dlq=True` call no longer parks a breaker rejection an inner one already parked.
+- A replay handler declared as `Payment-API` now replays what a `Payment-API` call parked.
 - A `domain_configs` retry overlay that is not a mapping no longer fails every `retry=True` call.
 
 ## [1.16.0] - 2026-09-28
