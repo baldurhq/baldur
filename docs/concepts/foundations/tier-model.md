@@ -22,7 +22,7 @@ A lot of reliability tooling forces a decision before you have any context: pick
 integrate. Baldur inverts that. The OSS tier is meant to be **good enough to get hooked** — you
 adopt it as an individual developer because it solves a real problem today, for free. You only reach
 for PRO once the project is load-bearing enough that a team operates it in production and the
-cost of *being blind to a failure* — or of working a growing failure backlog by hand — has become
+cost of *being blind to a failure*, or of working a growing failure backlog by hand, has become
 real.
 
 That keeps the choice honest:
@@ -31,8 +31,9 @@ That keeps the choice honest:
 - **You reach for PRO when production starts to hurt.** The trigger is a problem you can already
   feel — a dead-letter backlog too big to work one entry at a time, an incident you only hear about
   after it's over — not a plan you committed to up front. The need pulls you in; nothing pushes you.
-- **Upgrading is not a migration.** PRO is the same framework. You add a package and a license key;
-  your existing `@baldur.protected` code keeps working and the PRO capabilities become available
+- **Upgrading is not a migration.** PRO is the same framework. You add a package and a license key
+  (in production, also the two settings listed under [Configuration](#configuration)); your
+  existing `@baldur.protected` code keeps working and the PRO capabilities become available
   behind it.
 
 ## How it works in Baldur
@@ -61,7 +62,8 @@ survive a dependency failing, with zero infrastructure to start:
 - [Health Check](../oss/health-check.md) and [Graceful Shutdown](../oss/graceful-shutdown.md) — tell
   a load balancer the truth and drain in-flight work cleanly when the process restarts.
 - [DLQ + Replay](dlq-replay.md) — at a `dlq=True` call site, a call that raises and fails for good
-  is captured with the context needed to run it again, unless a `fallback=` answered it or another
+  is captured with the context needed to run it again, unless a `fallback=` answered it, a
+  cancellation from outside the call ended it (an `asyncio.wait_for` around it, say), or another
   [stated rule](dlq-replay.md#how-it-works-in-baldur) excludes it. With a replay handler registered
   for that work, the backlog can be replayed once the dependency recovers, automatically when its
   on-recovery prerequisites (a Celery worker among them) are in place.
@@ -102,9 +104,8 @@ def charge(order_id: str) -> dict:
 and the capture is already real: a charge that still raises once retry gives up is set aside with
 the context needed to run it again, you can browse the backlog in the web console, and entries
 retry there one at a time through a replay handler you register. What changes with PRO is how you
-*operate* that backlog. Add the PRO package and a license key and the **exact same code** gains
-one-click batch replay and archive/purge retention in the console, plus a disk-durable outbox you
-can switch on: the difference between working a large backlog one entry at a time in the console
+*operate* that backlog. With PRO active, the **exact same code** gains one-click batch replay and
+archive/purge retention in the console, plus a disk-durable outbox you can switch on: the difference between working a large backlog one entry at a time in the console
 and clearing it in one action. On either tier, a retried or replayed call executes the work again,
 so give `retry=` and `dlq=True` only to operations
 [safe to run a second time (a charge that must not double needs a dedup guard first)](dlq-replay.md).
@@ -119,10 +120,14 @@ supplied through one of these:
 | `BALDUR_LICENSE_KEY` | The PRO license, provided inline as a value |
 | `BALDUR_LICENSE_FILE` | Path to a file that holds the PRO license |
 
+In production (`BALDUR_ENVIRONMENT=production`), a process with an active license also refuses to
+start without two more settings: `BALDUR_SECRETS_AUDIT_SIGNING_KEY`, which signs the audit records
+PRO writes, and a SQL store for its incident records (`BALDUR_SQL_DSN`, or Django's `DATABASES`).
+
 Individual PRO features carry their own settings, documented in their own guides and the
-[environment variable reference](../../reference/env-vars.md). If the PRO package or a valid license
-is absent, PRO-only knobs are simply inert — an OSS install never breaks because a PRO setting was
-left in place.
+[environment variable reference](../../reference/env-vars.md). If the PRO package is absent,
+PRO-only knobs are simply inert: an OSS install never breaks because a PRO setting was left in
+place.
 
 ## See also
 
