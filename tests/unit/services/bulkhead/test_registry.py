@@ -349,7 +349,7 @@ class _FakeThreadPoolBulkhead:
     """
 
 
-class TestBulkheadRegistryGetAsync:
+class TestBulkheadRegistryGetAsyncBehavior:
     """Asynchronous bulkhead lookup tests."""
 
     def test_get_async_creates_async_bulkhead(self):

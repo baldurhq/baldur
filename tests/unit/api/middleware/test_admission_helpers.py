@@ -353,7 +353,7 @@ class TestCheckAdmissionProGate:
 # =============================================================================
 
 
-class TestAdmissionReleaseIdempotency:
+class TestAdmissionReleaseIdempotencyBehavior:
     """The release closure releases the slot exactly once, however often called."""
 
     def test_release_returns_the_slot_the_decision_acquired(self):

@@ -271,7 +271,7 @@ class TestAsyncSemaphoreBulkheadTryAcquire:
         await bulkhead.release()
 
 
-class TestAsyncSemaphoreBulkheadRejectionMetric:
+class TestAsyncSemaphoreBulkheadRejectionMetricBehavior:
     """644 D3: each reject path increments baldur_bulkhead_rejected_total via
     increment_rejected_count, emitted *outside* the compartment lock.
 

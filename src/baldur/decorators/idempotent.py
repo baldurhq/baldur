@@ -374,6 +374,10 @@ def idempotent(  # noqa: C901, PLR0915
             fail-open. Swallow + log so the guarantee holds, matching the policy
             hook / replay service best-effort mark pattern.
             """
+            if check.claim_id is None:
+                # No claim was taken (cache-error fail-open, or no cache): the
+                # only record a mark could reach is another call's live claim.
+                return
             try:
                 gate.mark_completed(
                     key, retry_count=check.retry_count, ttl=ttl, claim_id=check.claim_id
@@ -393,6 +397,8 @@ def idempotent(  # noqa: C901, PLR0915
             down cache must never mask the original function exception that is
             about to re-raise.
             """
+            if check.claim_id is None:
+                return  # no claim taken — see _mark_completed_fail_open
             try:
                 gate.mark_failed(
                     key,
@@ -420,8 +426,12 @@ def idempotent(  # noqa: C901, PLR0915
             The decorator has no own timeout stage, so abandoned work never
             decides the outcome — it only keeps the key held while it runs. A
             late mark runs on the thread that finished the last piece, in a
-            copy of the caller's context.
+            copy of the caller's context. A call that took no claim marks
+            nothing (see :func:`_mark_completed_fail_open`).
             """
+            if check.claim_id is None:
+                close_work_scope(scope, token)
+                return
             captured = contextvars.copy_context()
 
             def deferred(_summary: WorkSummary) -> None:
@@ -525,6 +535,12 @@ def idempotent(  # noqa: C901, PLR0915
                         gate, key, str(exc), check, scope, token
                     )
                     raise
+                except BaseException:
+                    # Cancelled from outside: the claim stays as it is, but the
+                    # scope leaves the context so a long-lived task does not
+                    # chain one scope per cancelled call.
+                    close_work_scope(scope, token)
+                    raise
                 close_work_scope(scope, token)
                 _mark_completed_fail_open(gate, key, check)
                 return result
@@ -548,6 +564,9 @@ def idempotent(  # noqa: C901, PLR0915
                 result = func(*args, **kwargs)
             except Exception as exc:
                 _release_after_abandoned_work(gate, key, str(exc), check, scope, token)
+                raise
+            except BaseException:
+                close_work_scope(scope, token)  # see async_wrapper
                 raise
             close_work_scope(scope, token)
             _mark_completed_fail_open(gate, key, check)

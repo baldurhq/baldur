@@ -14,6 +14,8 @@ Verification techniques applied:
 - Deadlock detection: an abandoned holder finalized by the garbage collector
   on a thread that holds the compartment lock, or is inside ``get_state()``,
   or while another thread waits for its seat.
+- Fault injection: a thread waiter whose wait an exception interrupts leaves
+  the queue; an exception inside a locked section never leaves the lock held.
 - Randomized invariant (seeded): sync / async acquire, cancel, timeout and
   abandon-and-collect, then taken + free = capacity and N admitted.
 - Contract: the ``Bulkhead`` ABC's async defaults, ``BulkheadState.queue_size``.
@@ -40,6 +42,7 @@ from baldur.api.handlers.bulkhead import bulkhead_status
 from baldur.core.connection_health import ConnectionType
 from baldur.interfaces.web_framework import HttpMethod, RequestContext
 from baldur.services.bulkhead import metrics as bulkhead_metrics
+from baldur.services.bulkhead import semaphore as semaphore_module
 from baldur.services.bulkhead.async_semaphore import AsyncSemaphoreBulkhead
 from baldur.services.bulkhead.base import Bulkhead, BulkheadState, BulkheadType
 from baldur.services.bulkhead.exceptions import BulkheadFullError
@@ -554,6 +557,99 @@ async def _hold_once(bulkhead: SemaphoreBulkhead, timeout: float) -> bool:
         return False
     bulkhead.release()
     return True
+
+
+# =============================================================================
+# A thread waiter's exception exit — no orphan waiter, no lock left held
+# =============================================================================
+
+
+class _Interrupt(BaseException):
+    """Stands in for an exception a signal handler raises into a thread."""
+
+
+class _InterruptedToken:
+    """A wake token whose timed wait is interrupted by ``_Interrupt``."""
+
+    def __init__(self, token: Any) -> None:
+        self._token = token
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if blocking and timeout != -1:
+            raise _Interrupt
+        return self._token.acquire(blocking)
+
+    def release(self) -> None:
+        self._token.release()
+
+
+class _InterruptedThreadWaiter(semaphore_module._ThreadWaiter):
+    """A thread waiter whose wait a signal handler's exception interrupts."""
+
+    def __init__(self, deadline: float) -> None:
+        super().__init__(deadline)
+        self.token = _InterruptedToken(self.token)
+
+
+class TestSemaphoreThreadWaiterExceptionBehavior:
+    """A thread waiter that leaves by an exception leaves nothing behind."""
+
+    def test_interrupted_wait_leaves_queue_and_next_waiter_gets_the_seat(self):
+        """No orphan waiter absorbs the wake a release sends."""
+        # Given — the only seat held; a waiter's wait is interrupted.
+        bulkhead = SemaphoreBulkhead("interrupted", max_concurrent=1)
+        assert bulkhead.try_acquire() is True
+        with patch.object(semaphore_module, "_ThreadWaiter", _InterruptedThreadWaiter):
+            with pytest.raises(_Interrupt):
+                bulkhead.try_acquire(_LONG_DEADLINE_S)
+        orphaned = _waiting(bulkhead)
+
+        # When — a live thread waits behind it, then the seat is released.
+        admitted: list[bool] = []
+        waiter = threading.Thread(
+            daemon=True,
+            target=lambda: admitted.append(bulkhead.try_acquire(_LONG_DEADLINE_S)),
+        )
+        waiter.start()
+        assert _eventually(lambda: _waiting(bulkhead) == 1)
+        bulkhead.release()
+        _join_all([waiter])
+
+        # Then — the interrupted waiter left; the live one was woken.
+        assert orphaned == 0
+        assert admitted == [True]
+        bulkhead.release()
+        _assert_idle_and_admits_capacity(bulkhead)
+
+    def test_exception_while_settling_never_leaves_lock_held(self):
+        """An exception inside a locked section unlocks before it propagates."""
+        # Given — the first settle raises.
+        bulkhead = SemaphoreBulkhead("settle-raises", max_concurrent=1)
+        real_settle = SemaphoreBulkhead._settle
+        raised = {"n": 0}
+
+        def _settle_raising_once(self: SemaphoreBulkhead) -> None:
+            if raised["n"] == 0:
+                raised["n"] += 1
+                raise _Interrupt
+            real_settle(self)
+
+        with patch.object(SemaphoreBulkhead, "_settle", _settle_raising_once):
+            with pytest.raises(_Interrupt):
+                bulkhead.try_acquire()
+
+        # When — another thread uses the compartment.
+        admitted: list[bool] = []
+        caller = threading.Thread(
+            daemon=True, target=lambda: admitted.append(bulkhead.try_acquire())
+        )
+        caller.start()
+        _join_all([caller])
+
+        # Then — the lock was free and the seat count untouched.
+        assert admitted == [True]
+        bulkhead.release()
+        _assert_idle_and_admits_capacity(bulkhead)
 
 
 # =============================================================================

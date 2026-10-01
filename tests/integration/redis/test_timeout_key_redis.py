@@ -12,6 +12,11 @@ scope the timeout worker records into, and the late mark the finishing worker
 writes through the sync gate (sync Redis adapter) — observable only against a
 real Redis, since the in-process async ledger marks on its own loop.
 
+Test Categories:
+    A. Async key held past the loop's close (Redis ledger):
+        - nested sync timed work called directly in the coroutine
+        - nested sync timed work run inside ``asyncio.to_thread``
+
 Requires a running Redis instance (auto-skipped via ``requires_redis``).
 """
 
@@ -87,10 +92,24 @@ class _LateMarkSignal:
 class TestAprotectTimeoutKeyRedisIntegration:
     """SC5 (Redis ledger): held after the loop closed, released when the work ends."""
 
-    @pytest.mark.parametrize("hop", ["direct", "to_thread"])
+    @pytest.mark.parametrize(
+        "hop", ["direct", "to_thread"], ids=["direct_call", "asyncio_to_thread"]
+    )
     def test_async_key_held_past_loop_close_then_released_by_sync_gate(
         self, redis_ledger, hop
     ):
+        """
+        Purpose:
+            Verify that an async keyed call's claim on the shared Redis ledger
+            stays held after ``asyncio.run`` closed its loop while nested sync
+            timed work still runs, and that the work's end releases it through
+            the sync policy gate.
+        Expected:
+            - while the work runs, the record is ``executing`` with a claim id
+              and a same-key repeat reads ``ABORT``
+            - once the work ends, the late mark writes ``failed`` (the call
+              raised) and an immediate retry reads ``CONTINUE``
+        """
         # Given — a nested sync timed call whose work keeps running.
         signal = _LateMarkSignal()
         order_id = uuid4().hex

@@ -215,14 +215,24 @@ class SemaphoreBulkhead(Bulkhead):
     # ------------------------------------------------------------------
 
     def _enter(self) -> None:
-        """Take the compartment lock (blocking) and bring the state current."""
+        """Take the compartment lock (blocking) and bring the state current.
+
+        An exception raised while settling (a signal handler's, on any
+        bytecode) unlocks before it propagates, so the lock is never left held.
+        """
         self._lock.acquire()
-        self._settle()
+        try:
+            self._settle()
+        except BaseException:
+            self._lock.release()
+            raise
 
     def _exit(self) -> None:
         """Apply queued operations, unlock, then pick up any queued meanwhile."""
-        self._settle()
-        self._lock.release()
+        try:
+            self._settle()
+        finally:
+            self._lock.release()
         self._apply_pending_nonblocking()
 
     def _apply_pending_nonblocking(self) -> None:
@@ -390,8 +400,16 @@ class SemaphoreBulkhead(Bulkhead):
     def _wait_as_thread(self, waiter: _ThreadWaiter) -> bool:
         while True:
             remaining = waiter.deadline - time.monotonic()
-            if remaining > 0:
-                waiter.token.acquire(True, remaining)
+            try:
+                if remaining > 0:
+                    waiter.token.acquire(True, remaining)
+            except BaseException:
+                # A signal handler's exception interrupted the wait (POSIX lock
+                # waits are interruptible): leave the queue — passing on a
+                # wake this waiter received — without waiting for the lock.
+                self._pending.append(waiter)
+                self._apply_pending_nonblocking()
+                raise
             self._enter()
             try:
                 if self._take_seat_locked():

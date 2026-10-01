@@ -93,6 +93,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - The self-healing demo no longer crashes when its output is not UTF-8 (a pipe, Git Bash).
 - A bulkhead waited on from a second event loop no longer raises `RuntimeError`.
 - A cancelled async bulkhead waiter no longer leaves its waiting count behind.
+- An `@idempotent` call let through on a cache error no longer marks a key another call holds.
 
 ## [1.16.0] - 2026-09-28
 

@@ -41,6 +41,7 @@ Verification techniques applied:
 # parameters[name].annotation`` and only fires when annotations are real
 # types (not deferred PEP 563 strings).
 
+import asyncio
 import functools
 import logging
 import os
@@ -52,7 +53,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from baldur.core.abandoned_work import record_abandoned
+from baldur.core.abandoned_work import current_work_scope, record_abandoned
 from baldur.core.exceptions import (
     AdapterNotFoundError,
     IdempotencyDuplicateError,
@@ -1374,8 +1375,9 @@ class TestIdempotentWindowThreadingBehavior:
             patch(
                 "baldur.core.idempotency_gate.IdempotencyGate.check_and_acquire",
                 autospec=True,
+                # A CONTINUE from the real gate always carries its claim id.
                 return_value=IdempotencyCheckResult(
-                    decision=IdempotencyDecision.CONTINUE
+                    decision=IdempotencyDecision.CONTINUE, claim_id="claim-1"
                 ),
             ) as mock_check,
             patch(
@@ -1404,8 +1406,9 @@ class TestIdempotentWindowThreadingBehavior:
             patch(
                 "baldur.core.idempotency_gate.IdempotencyGate.check_and_acquire",
                 autospec=True,
+                # A CONTINUE from the real gate always carries its claim id.
                 return_value=IdempotencyCheckResult(
-                    decision=IdempotencyDecision.CONTINUE
+                    decision=IdempotencyDecision.CONTINUE, claim_id="claim-1"
                 ),
             ) as mock_check,
             patch(
@@ -1685,6 +1688,90 @@ class TestIdempotentAbandonedWorkBehavior:
         assert held.value.decision == "ABORT"
         assert repeat == "charged"
         assert calls["n"] == 2
+
+    def test_call_without_claim_never_marks_a_later_claim(self):
+        """A call that took no claim (cache-error fail-open) leaves a later one alone."""
+        # Given — the first check fails open; that call abandons running work
+        # and raises, and the work ends while a later call holds the key.
+        from baldur.settings.idempotency import IdempotencySettings
+
+        piece: Future = Future()
+        real_check = IdempotencyGate.check_and_acquire
+        checks = {"n": 0}
+
+        def _check(gate, key, ttl=None):
+            checks["n"] += 1
+            if checks["n"] == 1:
+                raise ConnectionError("cache down")
+            return real_check(gate, key, ttl=ttl)
+
+        calls: list[str] = []
+
+        @idempotent(key_fn=lambda order_id, who: f"no-claim:{order_id}")
+        def charge(order_id, who):
+            calls.append(who)
+            if who == "first":
+                record_abandoned(piece, origin=None)
+                raise TimeoutPolicyError(1.0)
+            if who == "second":
+                piece.set_result("done")
+            return who
+
+        oid = _unique_key("oid")
+        with (
+            patch(
+                "baldur.settings.layered_provider.get_layered_settings_cached",
+                return_value=IdempotencySettings(fail_open_on_cache_error=True),
+            ),
+            patch.object(
+                IdempotencyGate, "check_and_acquire", autospec=True, side_effect=_check
+            ),
+        ):
+            with pytest.raises(TimeoutPolicyError):
+                charge(oid, "first")
+
+            # When — the second call claims and completes; a third repeats.
+            second = charge(oid, "second")
+            with pytest.raises(IdempotencyDuplicateError) as repeat:
+                charge(oid, "third")
+
+        # Then — the second claim was marked by the second call only.
+        assert second == "second"
+        assert repeat.value.decision == "SKIP"
+        assert calls == ["first", "second"]
+
+    def test_interrupted_call_leaves_no_scope_on_the_thread(self):
+        """A BaseException exit closes the call's scope (no chain per exit)."""
+
+        class _Interrupt(BaseException):
+            pass
+
+        @idempotent(key_fn=lambda order_id: f"interrupt-scope:{order_id}")
+        def charge(order_id):
+            raise _Interrupt
+
+        before = current_work_scope()
+        for _ in range(3):
+            with pytest.raises(_Interrupt):
+                charge(_unique_key("oid"))
+
+        assert current_work_scope() is before
+
+    @pytest.mark.asyncio
+    async def test_cancelled_call_leaves_no_scope_in_the_task(self):
+        """A call cancelled from outside does not leave its scope current."""
+
+        @idempotent(key_fn=lambda order_id: f"cancel-scope:{order_id}")
+        async def charge(order_id):
+            await asyncio.Event().wait()
+
+        before = current_work_scope()
+        for _ in range(3):
+            with pytest.raises(TimeoutError):
+                async with asyncio.timeout(0.01):
+                    await charge(_unique_key("oid"))
+
+        assert current_work_scope() is before
 
     def test_raise_with_nothing_running_releases_at_once(self):
         calls = {"n": 0}
