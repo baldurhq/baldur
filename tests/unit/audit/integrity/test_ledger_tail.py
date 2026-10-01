@@ -19,6 +19,11 @@ Verification techniques (per UNIT_TEST_GUIDELINES §8):
   larger than the window cap, an exhausted walk budget).
 - Boundary analysis (initial window, the 32-line floor, the head probe).
 - Side effects (the ``ledger_tail.window_capped`` WARNING and its byte count).
+
+The trail check (804) adds two readers here: a file's partition read back out
+of its name, and the recent window the admin route verifies — whose one hard
+rule is that a file capped before its first line ends the window, since an
+older file read past it would leave the capped file's middle as a gap.
 """
 
 from __future__ import annotations
@@ -37,9 +42,12 @@ from baldur.audit.integrity.ledger_tail import (
     LEDGER_TAIL_MAX_TOTAL_BYTES,
     LEDGER_TAIL_MAX_WINDOW_BYTES,
     LEDGER_TAIL_MIN_LINES,
+    PARTITIONED_LEDGER_FILENAME_PATTERN,
     LedgerTailReader,
+    ledger_file_partition,
     ledger_filename_regex,
     list_ledger_files,
+    read_ledger_window,
 )
 from tests.factories.writable_dir import log_events
 
@@ -668,3 +676,258 @@ class TestLedgerTailReaderConstructionContract:
         reader = LedgerTailReader(str(tmp_path))
 
         assert isinstance(reader.log_dir, Path)
+
+
+# =============================================================================
+# Contract — a file's partition, read back out of the ledger's name
+# =============================================================================
+
+
+class TestLedgerFileShapeContract:
+    """The default ledger names, and which partition each one belongs to.
+
+    A check that has no adapter to ask groups files by this shape, so a name it
+    misreads either merges two partitions into one trail (every shared sequence
+    a fork) or reads the chain manager's state file as a ledger.
+    """
+
+    @pytest.mark.parametrize(
+        ("name", "partition"),
+        [
+            ("audit_2026-09-07.jsonl", ""),
+            ("audit_all.jsonl", ""),
+            ("audit_2026-09-07_worker.jsonl", "worker"),
+            ("audit_all_worker.jsonl", "worker"),
+            ("audit_2026-09-07_celery_worker.jsonl", "celery_worker"),
+        ],
+        ids=[
+            "daily_default",
+            "unrotated_default",
+            "daily_partition",
+            "unrotated_partition",
+            "partition_with_an_underscore",
+        ],
+    )
+    def test_ledger_shaped_name_yields_its_partition(self, name, partition):
+        assert ledger_file_partition(name) == partition
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "audit_2026-09-07_.jsonl",
+            ".hash_chain_state.json",
+            ".hash_chain_state.worker.json",
+            ".hash_chain_state.lock",
+            ".hash_chain_state.json.4242.tmp",
+            "audit_2026-9-7.jsonl",
+            "audit_2026-09-07.jsonl.bak",
+            "export.jsonl",
+        ],
+        ids=[
+            "empty_partition_segment",
+            "state_file",
+            "partition_state_file",
+            "lock_file",
+            "atomic_save_temp",
+            "short_date",
+            "suffix_noise",
+            "foreign_name",
+        ],
+    )
+    def test_name_without_the_ledger_shape_yields_none(self, name):
+        assert ledger_file_partition(name) is None
+
+    @pytest.mark.parametrize(
+        ("rotate_daily", "name", "matches"),
+        [
+            (None, "audit_2026-09-07_worker.jsonl", True),
+            (None, "audit_all_worker.jsonl", True),
+            (True, "audit_all_worker.jsonl", False),
+            (False, "audit_2026-09-07_worker.jsonl", False),
+        ],
+        ids=[
+            "either_accepts_a_date",
+            "either_accepts_all",
+            "rotating_rejects_all",
+            "unrotated_rejects_a_date",
+        ],
+    )
+    def test_rotate_daily_none_accepts_a_date_or_all(self, rotate_daily, name, matches):
+        regex = ledger_filename_regex(PARTITIONED_LEDGER_FILENAME_PATTERN, rotate_daily)
+
+        assert bool(regex.fullmatch(name)) is matches
+
+    def test_partition_token_is_captured_as_the_partition_group(self):
+        regex = ledger_filename_regex(
+            PARTITIONED_LEDGER_FILENAME_PATTERN, rotate_daily=None
+        )
+
+        match = regex.fullmatch("audit_2026-09-07_payments.jsonl")
+
+        assert match is not None
+        assert match.group("partition") == "payments"
+
+
+# =============================================================================
+# Behavior — the recent window the admin route verifies
+# =============================================================================
+
+
+def _numbered(part) -> list[int | None]:
+    """The line numbers a window file carries, oldest first."""
+    return [number for number, _ in part.lines]
+
+
+def _sequences(part) -> list[int]:
+    """The sequences of a window file's lines, oldest first."""
+    return [json.loads(raw)["integrity"]["sequence"] for _, raw in part.lines]
+
+
+class TestLedgerWindowBehavior:
+    """``read_ledger_window``: the ledger's newest complete lines, across files."""
+
+    @pytest.mark.parametrize(
+        ("line_count_delta", "reaches_start"),
+        [(-1, False), (0, True), (1, True)],
+        ids=["one_short_of_the_file", "exactly_the_file", "one_past_the_file"],
+    )
+    def test_window_reaches_ledger_start_only_when_it_holds_every_line(
+        self, tmp_path, line_count_delta, reaches_start
+    ):
+        # Given a one-file ledger of ten lines
+        total = 10
+        _write_ledger(
+            tmp_path / "audit_all.jsonl", [_row(seq) for seq in range(1, total + 1)]
+        )
+        regex = ledger_filename_regex("audit_{date}.jsonl", rotate_daily=False)
+
+        # When the window asks for one line fewer, exactly as many, or one more
+        window = read_ledger_window(tmp_path, regex, total + line_count_delta)
+
+        # Then only a window holding the file's first line reached the start
+        assert window.reached_ledger_start is reaches_start
+        assert window.files[0].reached_file_start is reaches_start
+        assert window.line_count == min(total, total + line_count_delta)
+
+    def test_window_lines_are_the_newest_with_their_line_numbers(self, tmp_path):
+        _write_ledger(tmp_path / "audit_all.jsonl", [_row(seq) for seq in range(1, 11)])
+        regex = ledger_filename_regex("audit_{date}.jsonl", rotate_daily=False)
+
+        window = read_ledger_window(tmp_path, regex, 4)
+
+        assert _numbered(window.files[0]) == [7, 8, 9, 10]
+        assert _sequences(window.files[0]) == [7, 8, 9, 10]
+
+    @pytest.mark.parametrize("line_count", [0, -1], ids=["zero", "negative"])
+    def test_line_count_below_one_raises(self, tmp_path, line_count):
+        regex = ledger_filename_regex("audit_{date}.jsonl")
+
+        with pytest.raises(ValueError, match="at least 1"):
+            read_ledger_window(tmp_path, regex, line_count)
+
+    def test_window_spans_files_newest_first_and_returns_them_oldest_first(
+        self, tmp_path
+    ):
+        # Given two daily files of five lines each
+        _write_ledger(
+            tmp_path / "audit_2026-09-07.jsonl", [_row(seq) for seq in range(1, 6)]
+        )
+        _write_ledger(
+            tmp_path / "audit_2026-09-08.jsonl", [_row(seq) for seq in range(6, 11)]
+        )
+        regex = ledger_filename_regex("audit_{date}.jsonl")
+
+        # When the window wants seven lines
+        window = read_ledger_window(tmp_path, regex, 7)
+
+        # Then it took all of the newer file and the last two of the older one
+        assert [part.path.name for part in window.files] == [
+            "audit_2026-09-07.jsonl",
+            "audit_2026-09-08.jsonl",
+        ]
+        assert _sequences(window.files[0]) == [4, 5]
+        assert _sequences(window.files[1]) == [6, 7, 8, 9, 10]
+        assert window.line_count == 7
+        assert window.reached_ledger_start is False
+
+    def test_empty_newest_file_reads_on_into_the_older_one(self, tmp_path):
+        _write_ledger(
+            tmp_path / "audit_2026-09-07.jsonl", [_row(seq) for seq in range(1, 4)]
+        )
+        (tmp_path / "audit_2026-09-08.jsonl").write_bytes(b"")
+        regex = ledger_filename_regex("audit_{date}.jsonl")
+
+        window = read_ledger_window(tmp_path, regex, 10)
+
+        assert [len(part.lines) for part in window.files] == [3, 0]
+        assert window.reached_ledger_start is True
+
+    def test_file_capped_before_its_first_line_is_the_last_file_read(self, tmp_path):
+        # Given an older file and a newer file larger than the (patched) cap
+        row_bytes = 300
+        cap = 2048
+        _write_ledger(
+            tmp_path / "audit_2026-09-07.jsonl",
+            [_row(seq, pad_to=row_bytes) for seq in range(1, 6)],
+        )
+        newest = tmp_path / "audit_2026-09-08.jsonl"
+        _write_ledger(newest, [_row(seq, pad_to=row_bytes) for seq in range(6, 46)])
+        regex = ledger_filename_regex("audit_{date}.jsonl")
+        assert newest.stat().st_size > cap
+
+        # When the window wants far more lines than the capped read holds
+        with (
+            patch.object(ledger_tail_module, "LEDGER_TAIL_INITIAL_WINDOW_BYTES", 1024),
+            patch.object(ledger_tail_module, "LEDGER_TAIL_MAX_WINDOW_BYTES", cap),
+        ):
+            window = read_ledger_window(tmp_path, regex, 1000)
+
+        # Then the window ends at the capped file: the older one is not read,
+        # so the capped file's unread middle is never a gap between two reads
+        assert [part.path for part in window.files] == [newest]
+        assert window.files[0].reached_file_start is False
+        assert window.reached_ledger_start is False
+        assert _sequences(window.files[0])[-1] == 45
+        assert 0 < window.line_count < 40
+        assert all(number is None for number in _numbered(window.files[0]))
+
+    def test_row_larger_than_the_cap_raises(self, tmp_path):
+        _write_ledger(
+            tmp_path / "audit_2026-09-08.jsonl",
+            [_row(1, pad_to=300), _row(2, pad_to=4096)],
+        )
+        regex = ledger_filename_regex("audit_{date}.jsonl")
+
+        with (
+            patch.object(ledger_tail_module, "LEDGER_TAIL_INITIAL_WINDOW_BYTES", 1024),
+            patch.object(ledger_tail_module, "LEDGER_TAIL_MAX_WINDOW_BYTES", 2048),
+        ):
+            with pytest.raises(OSError, match="no complete line"):
+                read_ledger_window(tmp_path, regex, 10)
+
+    def test_unterminated_final_line_is_kept_apart_with_its_line_number(self, tmp_path):
+        _write_ledger(
+            tmp_path / "audit_all.jsonl",
+            [_row(1), _row(2), _row(3)],
+            trailing_newline=False,
+        )
+        regex = ledger_filename_regex("audit_{date}.jsonl", rotate_daily=False)
+
+        window = read_ledger_window(tmp_path, regex, 10)
+
+        part = window.files[0]
+        assert _numbered(part) == [1, 2]
+        assert part.unterminated is not None
+        assert part.unterminated[0] == 3
+        assert json.loads(part.unterminated[1])["integrity"]["sequence"] == 3
+
+    def test_blank_lines_are_skipped_without_shifting_line_numbers(self, tmp_path):
+        (tmp_path / "audit_all.jsonl").write_text(
+            f"{_row(1)}\n\n{_row(2)}\n", encoding="utf-8"
+        )
+        regex = ledger_filename_regex("audit_{date}.jsonl", rotate_daily=False)
+
+        window = read_ledger_window(tmp_path, regex, 10)
+
+        assert _numbered(window.files[0]) == [1, 3]
+        assert window.files[0].unterminated is None

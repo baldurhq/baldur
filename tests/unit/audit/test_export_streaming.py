@@ -1,20 +1,33 @@
-"""Unit tests for audit/export.py streaming/format changes (308-C)."""
+"""Unit tests for audit/export.py streaming/format changes (308-C).
+
+The integrity pass (804) walks every entry read, before the time / action /
+actor filters, from the lowest entry present, and says where each trail's
+check began. It used to compare fields the ledger never writes, so an altered
+trail exported with zero integrity errors.
+"""
 
 import csv
 import io
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from baldur.audit.export import (
     AuditExporter,
     ExportFormat,
     ExportOptions,
+    ExportStats,
     ExportTarget,
+    integrity_summary_lines,
+    main,
     parse_datetime,
 )
+from baldur.audit.integrity import HashChainManager
+from baldur.settings.secrets import reset_secrets_settings
 
 
 class TestExportFormatContract:
@@ -334,3 +347,199 @@ class TestMatchesFiltersBehavior:
         exporter = self._make_exporter_with_filters(start_time=start)
         entry = {"timestamp": "2026-06-01T00:00:00+00:00"}
         assert exporter._matches_filters(entry) is True
+
+
+# =============================================================================
+# The integrity pass over a hash-chain ledger
+# =============================================================================
+
+_KEY_ENV = "BALDUR_SECRETS_AUDIT_SIGNING_KEY"
+_DAY_FILES = ("audit_2025-01-15.jsonl", "audit_2025-01-16.jsonl")
+_PER_DAY = 4
+# One entry per day carries this action; the rest are config changes.
+_FILTERED_ACTION = "cb_force_open"
+
+
+@pytest.fixture
+def _writer_key():
+    """Pin the signing key the trail is written and verified with."""
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(_KEY_ENV, "export-integrity-writer-key")
+        reset_secrets_settings()
+        yield
+    reset_secrets_settings()
+
+
+def _write_jsonl(path: Path, rows: list[dict]) -> Path:
+    with open(path, "w", encoding="utf-8", newline="\n") as handle:
+        for row in rows:
+            handle.write(json.dumps(row) + "\n")
+    return path
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def _export_trail(directory: Path) -> list[Path]:
+    """An untouched chain over two daily files, written by the chain manager."""
+    manager = HashChainManager()
+    paths = []
+    for day, name in enumerate(_DAY_FILES):
+        rows = [
+            manager.add_integrity(
+                {
+                    "timestamp": f"2025-01-{15 + day}T1{n}:00:00+00:00",
+                    "action": _FILTERED_ACTION if n == 1 else "config_change",
+                    "actor_id": "user1",
+                }
+            )
+            for n in range(_PER_DAY)
+        ]
+        paths.append(_write_jsonl(directory / name, rows))
+    return paths
+
+
+def _untouched(paths: list[Path]) -> None:
+    """Leave the trail as written."""
+
+
+def _alter_an_entry_the_filter_leaves_out(paths: list[Path]) -> None:
+    """Edit day two's first entry, a config change, its hash kept."""
+    rows = _read_jsonl(paths[1])
+    rows[0]["actor_id"] = "mallory"
+    _write_jsonl(paths[1], rows)
+
+
+def _export(paths: list[Path], output: Path, **options) -> ExportStats:
+    return AuditExporter(
+        ExportOptions(
+            input_paths=[str(path) for path in paths],
+            target=ExportTarget.FILE,
+            output_path=str(output),
+            **options,
+        )
+    ).export()
+
+
+@pytest.mark.usefixtures("_writer_key")
+class TestExportIntegrityBehavior:
+    """The export's integrity pass sees every entry read, before the filters."""
+
+    @pytest.mark.parametrize(
+        ("actions", "expected_exported"),
+        [(None, len(_DAY_FILES) * _PER_DAY), ([_FILTERED_ACTION], len(_DAY_FILES))],
+        ids=["no_filter", "action_filter"],
+    )
+    @pytest.mark.parametrize(
+        ("mutate", "expected_errors"),
+        [(_untouched, 0), (_alter_an_entry_the_filter_leaves_out, 1)],
+        ids=["untouched", "altered"],
+    )
+    def test_integrity_errors_count_tampering_with_and_without_an_action_filter(
+        self, tmp_path, mutate, expected_errors, actions, expected_exported
+    ):
+        # Given a two-day trail, untouched or with one entry altered that the
+        # action filter does not export
+        paths = _export_trail(tmp_path)
+        mutate(paths)
+
+        # When it is exported, with or without the action filter
+        stats = _export(paths, tmp_path / "out.jsonl", actions=actions)
+
+        # Then the pass counted what it read, not what the filter kept
+        assert stats.exported_entries == expected_exported
+        assert stats.integrity_errors == expected_errors
+
+    def test_integrity_partial_input_reports_zero_errors_and_prints_its_first_sequence(
+        self, tmp_path, capsys
+    ):
+        # Given only the later day's file of an untouched trail as input
+        paths = _export_trail(tmp_path)
+        capsys.readouterr()
+
+        # When the CLI exports it
+        code = main(
+            [
+                "--input",
+                str(paths[1]),
+                "--target",
+                "file",
+                "--output",
+                str(tmp_path / "out.jsonl"),
+            ]
+        )
+
+        # Then nothing is an error, and the summary says where the check began
+        err = capsys.readouterr().err
+        assert code == 0
+        assert "Integrity errors" not in err
+        assert f"Integrity checked from sequence {_PER_DAY + 1};" in err
+
+    def test_integrity_full_input_with_start_reports_a_removed_first_of_day_entry(
+        self, tmp_path
+    ):
+        # Given every file as input and day two's first entry removed
+        paths = _export_trail(tmp_path)
+        _write_jsonl(paths[1], _read_jsonl(paths[1])[1:])
+
+        # When the export starts at day two
+        with capture_logs() as logs:
+            stats = _export(
+                paths,
+                tmp_path / "out.jsonl",
+                start_time=datetime(2025, 1, 16, tzinfo=UTC),
+            )
+
+        # Then the time filter did not begin the walk mid-chain: the removal
+        # is a missing entry, reported once in the WARNING
+        assert stats.integrity_errors == 1
+        assert stats.exported_entries == _PER_DAY - 1
+        (warning,) = [
+            log for log in logs if log["event"] == "audit_export.integrity_check_failed"
+        ]
+        assert warning["log_level"] == "warning"
+        assert [
+            (issue["type"], issue["sequence"]) for issue in warning["first_issues"]
+        ] == [("missing_entry", _PER_DAY + 1)]
+
+    def test_integrity_input_globs_reaching_one_file_read_it_once(self, tmp_path):
+        # Read twice, every entry of the file would be a duplicate_entry.
+        paths = _export_trail(tmp_path)
+        (tmp_path / "sub").mkdir()
+        same_file_spelled_differently = tmp_path / "sub" / ".." / paths[0].name
+
+        stats = AuditExporter(
+            ExportOptions(
+                input_paths=[
+                    str(tmp_path / "*.jsonl"),
+                    str(same_file_spelled_differently),
+                ],
+                target=ExportTarget.FILE,
+                output_path=str(tmp_path / "out.json"),
+            )
+        ).export()
+
+        assert stats.total_entries == len(_DAY_FILES) * _PER_DAY
+        assert stats.integrity_errors == 0
+
+    def test_skip_integrity_runs_no_walk_over_an_altered_trail(self, tmp_path):
+        paths = _export_trail(tmp_path)
+        _alter_an_entry_the_filter_leaves_out(paths)
+
+        stats = _export(paths, tmp_path / "out.jsonl", verify_integrity=False)
+
+        assert stats.integrity_errors == 0
+        assert stats.integrity_first_sequences == {}
+
+    def test_integrity_summary_lines_name_errors_and_each_late_trail_start(self):
+        stats = ExportStats(
+            integrity_errors=2,
+            integrity_first_sequences={"": 1, "worker": 7},
+        )
+
+        assert integrity_summary_lines(stats) == [
+            "!! Integrity errors: 2",
+            "Integrity checked from sequence 7 (partition worker); its link to 6 "
+            "was not checked - add the earlier files to --input to check it",
+        ]
