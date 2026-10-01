@@ -53,9 +53,11 @@ def charge(order_id: str) -> Receipt:
 
 From then on, when the wrapped call raises a *retryable* error, Baldur waits for a backoff delay and
 tries again, up to a configured maximum number of attempts, each wait longer than the last under the
-default curve. Retry reacts only to a raise: a value the call returns counts as success, even an HTTP
-response carrying a 503, so raise on an error response inside the function (`@retry` also takes a
-`retry_on_result=` predicate for this). The same decorator covers `async def` functions: it detects
+default curve. Retry tries again only after a raise: a value the call returns counts as success, even
+an HTTP response carrying a 503, so raise on an error response inside the function (`@retry` also
+takes a `retry_on_result=` predicate for this). A returned 429 response also comes back as the call's
+value, but it starts the shared 429 cooldown described below, so later calls under the same name wait
+it out or are refused. The same decorator covers `async def` functions: it detects
 the call style and dispatches automatically, so synchronous and asynchronous Python share one
 surface.
 
@@ -84,13 +86,14 @@ stateDiagram-v2
 That loop is the easy half. What decides whether retrying is *safe* is everything around it:
 
 - **Backoff grows between attempts.** Under the default exponential curve each pause roughly doubles,
-  so you don't hammer the dependency. Linear, constant, and decorrelated jitter are available too
-  (constant holds the wait flat), and a random jitter is mixed in so failures that happen together
-  don't all retry in lockstep. A 429 answer sets the pace instead, on the facade and on a `@retry`
-  given a `domain`: the next attempt waits at least the dependency's `Retry-After` (about five
-  seconds on a first 429 that sends none), and every call under the same name waits with it, across
-  processes once Redis is configured. When that wait would outlast its cap (60 seconds, or the
-  remaining retry budget when one is set), retry stops rather than sleep through it.
+  up to a one-minute ceiling per wait, so you don't hammer the dependency. Linear, constant, and
+  decorrelated jitter are available too (constant holds the wait flat), and a random jitter is mixed
+  in so failures that happen together don't all retry in lockstep. A 429 answer sets the pace
+  instead, on the facade and on a `@retry` given a `domain`: the next attempt waits at least the
+  dependency's `Retry-After` (about five seconds on a first 429 that sends none), and every call
+  under the same name waits with it, across processes once Redis is configured. When that wait would
+  outlast its cap (60 seconds, or the remaining retry budget when one is set), retry stops rather
+  than sleep through it.
 - **Retryable vs. non-retryable.** The default is deliberately broad: every exception is retried
   except a circuit-breaker rejection and Baldur's own 429 deferral, which stop the ladder at once
   (retrying a call the breaker has already cut off is the thing the breaker exists to prevent).
@@ -114,9 +117,11 @@ That loop is the easy half. What decides whether retrying is *safe* is everythin
   an idempotency key of your own, or make the write conditional on state you check first.
 
   `idempotency_key=` solves the neighboring problem, one level up. It blocks a duplicate *call*
-  from entering the pipeline at all: a double-submit, a redelivered queue message, a client that
-  retried the request itself. The guard is evaluated once per call, before the retry stage runs, so
-  it deduplicates callers rather than attempts.
+  (a double-submit, a redelivered queue message, a client that retried the request itself) from
+  entering the pipeline at all, while the first call is still running or after it succeeded. A first
+  call that raised releases its key, so a duplicate sent after that failure runs the function again.
+  The guard is evaluated once per call, before the retry stage runs, so it deduplicates callers
+  rather than attempts.
 
   ```python
   @baldur.protected("payments", retry=True, idempotency_key="order_id")
@@ -132,9 +137,9 @@ That loop is the easy half. What decides whether retrying is *safe* is everythin
   error on its `last_error`, and it wraps a non-retryable error the same way after the one attempt,
   so catch that type rather than your own; a 429 wait past its cap raises `RateLimitDeferredError`
   instead, whose `not_before` says when the call may go out. `@baldur.protected` re-raises the
-  original error (or runs your fallback, if you supplied one). With DLQ routing enabled and no
-  fallback answering, the failed operation is also preserved in the Dead Letter Queue (DLQ) for
-  inspection or later replay.
+  original error, or `RateLimitDeferredError` when a 429 cooldown refused the call before it ran (or
+  runs your fallback, if you supplied one). With DLQ routing enabled and no fallback answering, the
+  failed operation is also preserved in the Dead Letter Queue (DLQ) for inspection or later replay.
 - **DLQ routing is opt-in, not automatic.** Retry and backoff run on their own; the Dead Letter
   Queue captures an exhausted operation only where you asked for it (`dlq=True`). Without that flag,
   an exhausted retry still surfaces the error to the caller, and the pipeline doesn't capture the
@@ -146,7 +151,7 @@ That loop is the easy half. What decides whether retrying is *safe* is everythin
 | What you observe | When it happens |
 |------------------|-----------------|
 | The call is retried after a growing pause, or after a 429's `Retry-After` | a retryable error was raised and attempts remain |
-| The call fails with no further attempt | the circuit breaker rejected the call, the error is one you declared non-retryable, or a 429's wait would outlast its cap |
+| The call fails with no further attempt | the circuit breaker rejected the call, the error is one you declared non-retryable, a 429's wait would outlast its cap, or the next wait would overrun the time budget (`BALDUR_RETRY_MAX_ELAPSED`, or a deadline the request carried in) |
 | An error is raised, and with DLQ routing enabled the operation lands in the DLQ | every attempt was used up, with no fallback |
 | Your fallback's value comes back, and nothing lands in the DLQ | every attempt was used up under a `fallback=` |
 | The call succeeds with no error surfaced | a later attempt finally worked |
