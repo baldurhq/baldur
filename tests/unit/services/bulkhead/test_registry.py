@@ -382,16 +382,17 @@ class TestBulkheadRegistryGetAsync:
         with pytest.raises(KeyError):
             registry.get_async("never_registered")
 
-    def test_get_async_after_provisioning_derives_capacity(self):
-        """After provisioning, the async twin derives capacity from the sync twin."""
+    def test_get_async_after_provisioning_reports_registered_compartment(self):
+        """After provisioning, the async handle is a view of the registered compartment."""
         registry = BulkheadRegistry()
 
         # 7 differs from the registry default (default_max_concurrent=10), proving
-        # the capacity is derived from the sync twin, not a blind default mint.
-        registry.get_or_create("provisioned_async", max_concurrent=7)
+        # the handle reads the registered compartment, not a blind default mint.
+        compartment = registry.get_or_create("provisioned_async", max_concurrent=7)
         async_bh = registry.get_async("provisioned_async")
 
         assert async_bh.get_state().max_concurrent == 7
+        assert async_bh._compartment is compartment
 
 
 class TestBulkheadRegistryGetForDatabase:

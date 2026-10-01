@@ -643,6 +643,10 @@ _CONTEXT_VARS_DEFAULTS: list[tuple[str, str, Any]] = [
     ("baldur.context.cell_context", "_current_cell_id", None),
     ("baldur.context.actor_context", "_current_actor", None),
     ("baldur.context.causation_context", "_current_causation", None),
+    # A keyed call's work scope: a guard check made without its hook (a
+    # guard-only test) would otherwise leave the scope current for every
+    # later test on the same thread.
+    ("baldur.core.abandoned_work", "_current_scope", None),
     ("baldur.decorators.domain_tag", "_current_domain", None),
     ("baldur.core.test_mode_context", "_is_synthetic_request", False),
     ("baldur.core.test_mode_context", "_synthetic_session_id", None),

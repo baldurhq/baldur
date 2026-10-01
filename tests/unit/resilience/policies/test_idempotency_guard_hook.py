@@ -12,19 +12,39 @@ Covers:
   memory ``ttl`` → ``context.extra["_idempotency_ttl"]`` → hook ``mark_*``;
   fail-open cache error stores neither threading key
 - 799 D1 fallback-answer mark rule, shared by the sync and async hooks —
-  completed on plain success and on a timeout-answered fallback, failed
-  (re-claimable) on a failure- or refusal-answered fallback; a mark fault on
-  the release branch logs ``idempotency.mark_failed_failed``
+  completed on plain success, failed (re-claimable) on a fallback answer with
+  no work left running; a mark fault on the release branch logs
+  ``idempotency.mark_failed_failed``
+- 805 D10 abandoned-work rule: while recorded work runs the claim stays
+  ``executing`` (a repeat reads ABORT); when it ends the key is completed only
+  for a timeout whose own work returned, else failed — claim-scoped, carrying
+  the record read at close, run in a copy of the caller's context; the async
+  hook marks through the sync gate on the shared ledger and on its own loop on
+  the in-process one; ``idempotency.mark_deferred`` /
+  ``idempotency.deferred_mark_failed`` logs
 """
 
+import asyncio
+import contextvars
+import threading
+import time
+from concurrent.futures import Future
 from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
 from structlog.testing import capture_logs
 
-from baldur.interfaces.resilience_policy import PolicyOutcome, PolicyResult
+from baldur.core.abandoned_work import record_abandoned
+from baldur.core.exceptions import TimeoutPolicyError
+from baldur.core.idempotency_gate import IdempotencyDecision, IdempotencyGate
+from baldur.interfaces.resilience_policy import (
+    PolicyContext,
+    PolicyOutcome,
+    PolicyResult,
+)
 from baldur.resilience.policies.idempotency import (
+    AsyncIdempotencyGuard,
     AsyncIdempotencyHook,
     IdempotencyGuard,
     IdempotencyHook,
@@ -1352,3 +1372,426 @@ class TestGuardRealCacheDedupBehavior:
         second = guard.check(context=make_context())
         assert second.allowed is False
         assert "Already processed" in (second.reason or "")
+
+
+# =============================================================================
+# 805 D10 — the key follows the work the call abandoned
+# =============================================================================
+
+# Upper bound on any wait the test expects to end.
+_WAIT_S = 5.0
+_ABANDONED_KEY = "abandoned-work-key"
+_CALLER_VAR: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "hook_test_caller", default="unset"
+)
+
+
+def _eventually(predicate, timeout: float = _WAIT_S) -> bool:
+    """Poll a mark another thread or loop writes."""
+    poll = threading.Event()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        poll.wait(0.002)
+    return bool(predicate())
+
+
+def _claim(key: str = _ABANDONED_KEY) -> PolicyContext:
+    """A keyed call that passed the guard: the record is in ``context.extra``
+    and its work scope is current."""
+    context = PolicyContext(domain="abandoned", extra={})
+    assert IdempotencyGuard(key_generator=lambda c: key).check(context).allowed
+    return context
+
+
+def _finish(piece: Future, outcome: str) -> None:
+    if outcome == "returned":
+        piece.set_result("charged")
+    else:
+        piece.set_exception(ConnectionError("gateway reset"))
+
+
+def _end_call(context: PolicyContext, ended_by: str) -> None:
+    """End the keyed call the way the composer does for ``ended_by``."""
+    hook = IdempotencyHook()
+    if ended_by == "timeout_error":
+        hook.on_failure("composer", TimeoutPolicyError(1.0), 1, context=context)
+    elif ended_by == "timeout_fallback":
+        hook.on_success(
+            "composer",
+            _fallback_answer_result(
+                PolicyOutcome.SUCCESS_WITH_FALLBACK, PolicyOutcome.TIMEOUT
+            ),
+            context=context,
+        )
+    elif ended_by == "other_error":
+        hook.on_failure("composer", ValueError("declined"), 1, context=context)
+    else:
+        hook.on_success(
+            "composer",
+            _fallback_answer_result(
+                PolicyOutcome.SUCCESS_WITH_FALLBACK, PolicyOutcome.FAILURE
+            ),
+            context=context,
+        )
+
+
+def _status(key: str = _ABANDONED_KEY):
+    record = _ensure_policy_gate()._cache.get(key)
+    return None if record is None else record["status"]
+
+
+class _RecordingGate:
+    """Delegates marks to the real policy gate, recording where each ran."""
+
+    def __init__(self, real, raise_on_mark: bool = False) -> None:
+        self._real = real
+        self._raise = raise_on_mark
+        self.marks: list[dict] = []
+        self.marked = threading.Event()
+
+    def _record(self, kind: str, key: str, kwargs: dict) -> None:
+        self.marks.append(
+            {
+                "kind": kind,
+                "key": key,
+                "claim_id": kwargs.get("claim_id"),
+                "caller_var": _CALLER_VAR.get(),
+                "thread": threading.current_thread().name,
+            }
+        )
+        self.marked.set()
+        if self._raise:
+            raise ConnectionError("ledger unreachable")
+
+    def mark_completed(self, key, **kwargs):
+        self._record("completed", key, kwargs)
+        self._real.mark_completed(key, **kwargs)
+
+    def mark_failed(self, key, **kwargs):
+        self._record("failed", key, kwargs)
+        self._real.mark_failed(key, **kwargs)
+
+
+# (how the call ended, how its own running piece ended) -> status once it ends
+_DEFERRED_ROWS = [
+    ("timeout_error", "returned", "completed"),
+    ("timeout_error", "raised", "failed"),
+    ("timeout_fallback", "returned", "completed"),
+    ("timeout_fallback", "raised", "failed"),
+    ("other_error", "returned", "failed"),
+    ("failure_fallback", "returned", "failed"),
+]
+_DEFERRED_IDS = [
+    "timeout_own_returned_completes",
+    "timeout_own_raised_releases",
+    "timeout_answer_own_returned_completes",
+    "timeout_answer_own_raised_releases",
+    "raise_own_returned_releases",
+    "failure_answer_own_returned_releases",
+]
+
+
+class TestIdempotencyHookAbandonedWorkBehavior:
+    """805 D10 decision table over the real in-process gate: a call that did
+    not return keeps its claim ``executing`` while recorded work runs, then
+    marks completed only for a timeout whose own work returned."""
+
+    @pytest.fixture(autouse=True)
+    def _iso(self, policy_gate_isolation):
+        return
+
+    @pytest.mark.parametrize(
+        ("ended_by", "outcome", "expected"), _DEFERRED_ROWS, ids=_DEFERRED_IDS
+    )
+    def test_running_own_piece_holds_key_then_marks_by_rule(
+        self, ended_by, outcome, expected
+    ):
+        # Given — a keyed call whose own timed-out work is still running.
+        context = _claim()
+        piece = Future()
+        record_abandoned(piece, origin=context)
+
+        # When — the call ends; a repeat arrives; then the work ends.
+        _end_call(context, ended_by)
+        status_while_running = _status()
+        repeat = _ensure_policy_gate().check_and_acquire(_ABANDONED_KEY)
+        _finish(piece, outcome)
+
+        # Then
+        assert status_while_running == "executing"
+        assert repeat.decision == IdempotencyDecision.ABORT
+        assert _status() == expected
+
+    @pytest.mark.parametrize(
+        ("ended_by", "outcome", "expected"),
+        [
+            ("timeout_error", "returned", "completed"),
+            ("timeout_error", "raised", "failed"),
+            ("timeout_error", None, "failed"),
+            ("other_error", "returned", "failed"),
+        ],
+        ids=[
+            "timeout_own_done_returned",
+            "timeout_own_done_raised",
+            "timeout_nothing_recorded",
+            "raise_own_done_returned",
+        ],
+    )
+    def test_nothing_running_marks_at_once(self, ended_by, outcome, expected):
+        """Own work that ended before the close, or none at all, marks now."""
+        context = _claim()
+        if outcome is not None:
+            piece = Future()
+            record_abandoned(piece, origin=context)
+            _finish(piece, outcome)
+
+        _end_call(context, ended_by)
+
+        assert _status() == expected
+
+    def test_return_marks_completed_while_other_work_runs(self):
+        context = _claim()
+        piece = Future()
+        record_abandoned(piece, origin=None)
+
+        IdempotencyHook().on_success("composer", PolicyResult(value=1), context=context)
+
+        assert _status() == "completed"
+        piece.set_result("done")
+        assert _status() == "completed"
+
+    def test_late_mark_runs_on_finishing_thread_in_copy_of_caller_context(self):
+        # Given — the caller set a context variable before the call ended.
+        real = _ensure_policy_gate()
+        recording = _RecordingGate(real)
+        context = _claim()
+        piece = Future()
+        record_abandoned(piece, origin=context)
+        caller_token = _CALLER_VAR.set("caller")
+        try:
+            with patch(
+                "baldur.resilience.policies.idempotency._ensure_policy_gate",
+                return_value=recording,
+            ):
+                _end_call(context, "timeout_error")
+                _CALLER_VAR.set("changed-after-close")
+
+                # When — another thread ends the work.
+                finisher = threading.Thread(
+                    target=piece.set_result, args=("charged",), name="finisher"
+                )
+                finisher.start()
+                finisher.join(_WAIT_S)
+        finally:
+            _CALLER_VAR.reset(caller_token)
+
+        # Then — one mark, on that thread, seeing the caller's value at close.
+        assert len(recording.marks) == 1
+        mark = recording.marks[0]
+        assert mark["kind"] == "completed"
+        assert mark["thread"] == "finisher"
+        assert mark["caller_var"] == "caller"
+        assert _CALLER_VAR.get() == "unset"
+
+    @pytest.mark.parametrize(
+        "outcome", ["returned", "raised"], ids=["late_completed", "late_failed"]
+    )
+    def test_late_mark_is_claim_scoped_against_later_claim(self, outcome):
+        """A takeover while the work ran keeps its claim through either late mark."""
+        # Given — the call deferred; its record went stale and was taken over.
+        context = _claim()
+        piece = Future()
+        record_abandoned(piece, origin=context)
+        _end_call(context, "timeout_error")
+        gate = _ensure_policy_gate()
+        gate._cache.get(_ABANDONED_KEY)["started_at"] = 0
+        later = gate.check_and_acquire(_ABANDONED_KEY)
+        assert later.decision == IdempotencyDecision.CONTINUE
+
+        # When — the abandoned work ends, so the late mark is completed or failed.
+        _finish(piece, outcome)
+
+        # Then
+        record = gate._cache.get(_ABANDONED_KEY)
+        assert record["status"] == "executing"
+        assert record["claim_id"] == later.claim_id
+
+    def test_late_mark_uses_record_read_at_close_not_reused_context(self):
+        """A later keyed call on the same PolicyContext cannot redirect the mark."""
+        # Given — call A deferred; call B then reused A's context object.
+        context = _claim("key-a")
+        piece = Future()
+        record_abandoned(piece, origin=context)
+        _end_call(context, "timeout_error")
+        assert IdempotencyGuard(key_generator=lambda c: "key-b").check(context).allowed
+        IdempotencyHook().on_success("composer", PolicyResult(value=1), context=context)
+
+        # When — A's work ends and fails.
+        piece.set_exception(ConnectionError("gateway reset"))
+
+        # Then — A's key is released; B's key keeps B's outcome.
+        assert _status("key-a") == "failed"
+        assert _status("key-b") == "completed"
+
+    def test_deferral_logs_mark_deferred_with_running_pieces(self):
+        context = _claim()
+        pieces = [Future(), Future()]
+        record_abandoned(pieces[0], origin=context)
+        record_abandoned(pieces[1], origin=None)
+
+        with capture_logs() as logs:
+            _end_call(context, "timeout_error")
+
+        deferred = [log for log in logs if log["event"] == "idempotency.mark_deferred"]
+        assert len(deferred) == 1
+        assert deferred[0]["log_level"] == "info"
+        assert deferred[0]["key"] == _ABANDONED_KEY
+        assert deferred[0]["pieces"] == 2
+        for piece in pieces:
+            piece.set_result("done")
+
+    def test_late_mark_failure_logs_warning_and_does_not_raise(self):
+        recording = _RecordingGate(_ensure_policy_gate(), raise_on_mark=True)
+        context = _claim()
+        piece = Future()
+        record_abandoned(piece, origin=context)
+
+        with (
+            patch(
+                "baldur.resilience.policies.idempotency._ensure_policy_gate",
+                return_value=recording,
+            ),
+            capture_logs() as logs,
+        ):
+            _end_call(context, "timeout_error")
+            piece.set_result("charged")
+
+        failed = [
+            log for log in logs if log["event"] == "idempotency.deferred_mark_failed"
+        ]
+        assert recording.marked.is_set()
+        assert len(failed) == 1
+        assert failed[0]["log_level"] == "warning"
+        assert failed[0]["key"] == _ABANDONED_KEY
+        assert failed[0]["error_type"] == "ConnectionError"
+
+
+class TestAsyncIdempotencyHookAbandonedWorkBehavior:
+    """805 D10 on the async hook: the late mark goes through the sync gate on
+    the shared ledger, and is scheduled on the hook's loop on the in-process
+    one."""
+
+    @pytest.fixture(autouse=True)
+    def _iso(self, policy_gate_isolation):
+        return
+
+    @staticmethod
+    async def _claim_async(key: str = _ABANDONED_KEY) -> PolicyContext:
+        context = PolicyContext(domain="abandoned", extra={})
+        guard = AsyncIdempotencyGuard(key_generator=lambda c: key)
+        assert (await guard.check(context)).allowed
+        return context
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("outcome", "expected"),
+        [("returned", "completed"), ("raised", "failed")],
+        ids=["own_returned", "own_raised"],
+    )
+    async def test_in_process_ledger_late_mark_runs_on_hook_loop(
+        self, outcome, expected
+    ):
+        # Given — an async keyed call whose own sync timed work still runs.
+        gate = _ensure_async_policy_gate()
+        context = await self._claim_async()
+        piece = Future()
+        record_abandoned(piece, origin=context)
+
+        # When — the call ends on the timeout, then another thread ends the work.
+        await AsyncIdempotencyHook().on_failure(
+            "composer", TimeoutPolicyError(1.0), 1, context=context
+        )
+        held = (await gate._cache.aget(_ABANDONED_KEY))["status"]
+        finisher = threading.Thread(target=_finish, args=(piece, outcome))
+        finisher.start()
+        finisher.join(_WAIT_S)
+
+        # Then — the mark lands once the loop runs the scheduled task.
+        for _ in range(500):
+            if (await gate._cache.aget(_ABANDONED_KEY))["status"] != "executing":
+                break
+            await asyncio.sleep(0.002)
+        assert held == "executing"
+        assert (await gate._cache.aget(_ABANDONED_KEY))["status"] == expected
+
+    @pytest.mark.asyncio
+    async def test_shared_ledger_late_mark_goes_through_sync_gate(self):
+        """With a Redis async ledger the late mark goes through the sync gate."""
+        from baldur.adapters.cache.async_redis_adapter import AsyncRedisCacheAdapter
+        from baldur.core.idempotency_gate import AsyncIdempotencyGate
+
+        # Given — the claim was taken; when the call ends the async ledger is
+        # the shared Redis one (its client is never reached: the mark goes to
+        # the sync gate).
+        context = await self._claim_async()
+        claim_id = context.extra["_idempotency_claim_id"]
+        piece = Future()
+        record_abandoned(piece, origin=context)
+        sync_gate = MagicMock(spec=IdempotencyGate)
+        redis_async_gate = AsyncIdempotencyGate(
+            cache=AsyncRedisCacheAdapter(client=object(), key_prefix="")
+        )
+
+        with (
+            patch(
+                "baldur.resilience.policies.idempotency._ensure_async_policy_gate",
+                return_value=redis_async_gate,
+            ),
+            patch(
+                "baldur.resilience.policies.idempotency._ensure_policy_gate",
+                return_value=sync_gate,
+            ),
+        ):
+            await AsyncIdempotencyHook().on_failure(
+                "composer", TimeoutPolicyError(1.0), 1, context=context
+            )
+            # When — the work ends on another thread.
+            finisher = threading.Thread(target=piece.set_result, args=("charged",))
+            finisher.start()
+            finisher.join(_WAIT_S)
+
+        # Then — marked on the finishing thread through the sync gate, claim-scoped.
+        sync_gate.mark_completed.assert_called_once_with(
+            _ABANDONED_KEY, retry_count=0, ttl=None, claim_id=claim_id
+        )
+        sync_gate.mark_failed.assert_not_called()
+
+    def test_in_process_ledger_late_mark_on_closed_loop_logs_warning(self):
+        """The hook's loop is gone when the work ends: logged, claim left to the window."""
+        # Given — the call ended on a loop that is then closed.
+        loop = asyncio.new_event_loop()
+        piece = Future()
+
+        async def _call_ends() -> None:
+            context = await self._claim_async()
+            record_abandoned(piece, origin=context)
+            await AsyncIdempotencyHook().on_failure(
+                "composer", TimeoutPolicyError(1.0), 1, context=context
+            )
+
+        loop.run_until_complete(_call_ends())
+        loop.close()
+
+        # When
+        with capture_logs() as logs:
+            piece.set_result("charged")
+
+        # Then
+        failed = [
+            log for log in logs if log["event"] == "idempotency.deferred_mark_failed"
+        ]
+        assert len(failed) == 1
+        assert failed[0]["log_level"] == "warning"
+        assert failed[0]["error_type"] == "RuntimeError"

@@ -8,7 +8,12 @@ fallback leg — no registry mocking.
 
 from __future__ import annotations
 
+from collections.abc import Generator
+from contextlib import contextmanager
+
 import pytest
+
+from baldur.services.bulkhead.base import Bulkhead, BulkheadState, BulkheadType
 
 pytest.importorskip("django")
 
@@ -65,3 +70,55 @@ class TestBulkheadDetailViewBareInstallBehavior:
         assert response.status_code == 404
         available = response.data["available_bulkheads"]
         assert {ct.value for ct in ConnectionType} <= set(available)
+
+
+class TestBulkheadDetailViewQueueSizeContract:
+    """The detail payload carries the compartment's ``queue_size`` (805 D5)."""
+
+    def test_detail_payload_carries_compartment_queue_size(self):
+        from baldur.api.django.views.bulkhead import BulkheadDetailView
+        from baldur.services.bulkhead.registry import get_bulkhead_registry
+
+        get_bulkhead_registry().register(_QueuedCompartment())
+
+        response = BulkheadDetailView.as_view()(_make_get(), name="queued")
+
+        assert response.status_code == 200
+        assert response.data["queue_size"] == 7
+        assert response.data["max_concurrent"] == 12
+
+    def test_semaphore_detail_payload_reports_zero_queue(self):
+        from baldur.api.django.views.bulkhead import BulkheadDetailView
+
+        response = BulkheadDetailView.as_view()(_make_get(), name="database")
+
+        assert response.data["queue_size"] == 0
+
+
+class _QueuedCompartment(Bulkhead):
+    """A compartment whose state reports a waiting queue."""
+
+    @property
+    def name(self) -> str:
+        return "queued"
+
+    @contextmanager
+    def acquire(self, timeout: float | None = None) -> Generator[None, None, None]:
+        yield
+
+    def try_acquire(self, timeout: float | None = None) -> bool:
+        return True
+
+    def release(self) -> None:
+        return None
+
+    def get_state(self) -> BulkheadState:
+        return BulkheadState(
+            name="queued",
+            bulkhead_type=BulkheadType.THREAD_POOL,
+            max_concurrent=12,
+            active_count=0,
+            waiting_count=0,
+            rejected_count=0,
+            queue_size=7,
+        )

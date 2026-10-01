@@ -15,13 +15,16 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import MagicMock
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
+from baldur.core.abandoned_work import WorkSummary, close_work_scope, open_work_scope
 from baldur.core.exceptions import TimeoutPolicyError
-from baldur.interfaces.resilience_policy import PolicyOutcome
+from baldur.interfaces.resilience_policy import PolicyContext, PolicyOutcome
 from baldur.resilience.policies.timeout import AsyncTimeoutPolicy, TimeoutPolicy
 
 # =============================================================================
@@ -182,9 +185,6 @@ class TestTimeoutPolicyBehavior:
         The executor itself is process-shared (see TestTimeoutPolicySharedExecutor)
         so the per-call cleanup is now ``future.cancel()``, not ``executor.shutdown``.
         """
-        from concurrent.futures import TimeoutError as FuturesTimeoutError
-        from unittest.mock import patch
-
         policy = TimeoutPolicy(timeout_seconds=0.05)
         TimeoutPolicy.shutdown_executor()  # ensure clean classvar
 
@@ -192,6 +192,11 @@ class TestTimeoutPolicyBehavior:
             executor = MagicMock()
             future = MagicMock()
             future.result.side_effect = FuturesTimeoutError()
+            future.done.return_value = False
+            # The task never started: the cancel succeeds (805 D9 — a running
+            # task's failed cancel is covered by
+            # TestTimeoutPolicyAbandonedRecordBehavior).
+            future.cancel.return_value = True
             executor.submit.return_value = future
             mock_get_executor.return_value = executor
 
@@ -376,6 +381,127 @@ class TestTimeoutPolicySharedExecutor:
 
         reset_protect_caches()
         assert TimeoutPolicy._executor is None
+
+
+# =============================================================================
+# TimeoutPolicy — abandoned work record (805 D9)
+# =============================================================================
+
+# Upper bound on any wait the test expects to end.
+_WAIT_S = 5.0
+# A timeout that fires while the task is already running: an idle worker picks
+# the task up long before it, so the cancel finds it running.
+_RUNNING_TIMEOUT_S = 1.0
+
+
+def _wait_for(predicate, timeout: float = _WAIT_S) -> bool:
+    """Wait for a done-callback another thread runs."""
+    poll = threading.Event()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        poll.wait(0.002)
+    return bool(predicate())
+
+
+class _OneWorkerTimeoutPolicy(TimeoutPolicy):
+    """A TimeoutPolicy with its own executor slot."""
+
+    _executor = None
+
+
+class TestTimeoutPolicyAbandonedRecordBehavior:
+    """805 D9: a timeout records its future as abandoned work only when the
+    cancel fails (the task is running), with the PolicyContext it ran with."""
+
+    @pytest.mark.parametrize(
+        ("cancelled", "recorded"),
+        [(True, False), (False, True)],
+        ids=["cancel_succeeds_unstarted", "cancel_fails_running"],
+    )
+    def test_timeout_records_future_only_when_cancel_fails(self, cancelled, recorded):
+        # Given — a timed-out future whose cancel answers ``cancelled``.
+        policy = TimeoutPolicy(timeout_seconds=0.05)
+        context = PolicyContext(order_id="o-1")
+        future = MagicMock(spec=Future)
+        future.result.side_effect = FuturesTimeoutError()
+        future.done.return_value = False
+        future.cancel.return_value = cancelled
+        executor = MagicMock(spec=ThreadPoolExecutor)
+        executor.submit.return_value = future
+
+        # When
+        with (
+            patch.object(TimeoutPolicy, "_get_executor", return_value=executor),
+            patch(
+                "baldur.resilience.policies.timeout.record_abandoned", autospec=True
+            ) as record,
+        ):
+            result = policy.execute(lambda: None, context=context)
+
+        # Then
+        assert result.outcome == PolicyOutcome.TIMEOUT
+        assert record.call_args_list == (
+            [call(future, origin=context)] if recorded else []
+        )
+
+    def test_running_work_is_held_as_own_work_of_its_context(self):
+        """The scope opened with the same context holds the task as its own."""
+        # Given
+        context = PolicyContext(order_id="o-1")
+        scope, token = open_work_scope(origin=context)
+        started, release = threading.Event(), threading.Event()
+
+        def _slow() -> str:
+            started.set()
+            release.wait(_WAIT_S)
+            return "done"
+
+        settled: list[WorkSummary] = []
+        try:
+            # When — the timeout fires while the work runs.
+            result = TimeoutPolicy(timeout_seconds=_RUNNING_TIMEOUT_S).execute(
+                _slow, context=context
+            )
+            held = scope.running_count
+            at_close = close_work_scope(scope, token, settled.append)
+        finally:
+            release.set()
+
+        # Then — held until it ended, then settled as own work that returned.
+        assert result.outcome == PolicyOutcome.TIMEOUT
+        assert started.is_set()
+        assert held == 1
+        assert at_close is None
+        assert _wait_for(lambda: settled)
+        assert settled == [WorkSummary(own_finished=True, own_failed=False)]
+
+    def test_unstarted_work_is_cancelled_and_not_recorded(self):
+        # Given — the policy's only worker busy, so the call waits in the queue.
+        executor = ThreadPoolExecutor(max_workers=1)
+        busy = threading.Event()
+        blocker = executor.submit(busy.wait, _WAIT_S)
+        ran = {"n": 0}
+        scope, token = open_work_scope(origin=None)
+        try:
+            with patch.object(_OneWorkerTimeoutPolicy, "_executor", executor):
+                # When
+                result = _OneWorkerTimeoutPolicy(timeout_seconds=0.05).execute(
+                    lambda: ran.__setitem__("n", 1)
+                )
+            held = scope.running_count
+        finally:
+            summary = close_work_scope(scope, token)
+            busy.set()
+            blocker.result(_WAIT_S)
+            executor.shutdown(wait=True)
+
+        # Then
+        assert result.outcome == PolicyOutcome.TIMEOUT
+        assert held == 0
+        assert summary == WorkSummary()
+        assert ran["n"] == 0
 
 
 # =============================================================================

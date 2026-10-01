@@ -30,6 +30,10 @@ Verification techniques applied:
 - 799 D2: in production the registry's in-process default is refused before
   the function runs, the escape hatch accepts it, and a call that refused runs
   on the shared cache once one is wired (the refusal memoized no gate).
+- 805 D9/D10: a function that raised while work it abandoned still runs keeps
+  its key held (a repeat reads ABORT) until that work ends, then releases it
+  whatever the work did (the decorator has no own timeout stage); a return
+  marks completed at once with the claim it took.
 """
 
 # NOTE: do NOT use ``from __future__ import annotations`` here. The source's
@@ -40,6 +44,7 @@ Verification techniques applied:
 import functools
 import logging
 import os
+from concurrent.futures import Future
 from datetime import datetime, timedelta
 from enum import Enum
 from unittest.mock import patch
@@ -47,13 +52,17 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from baldur.core.abandoned_work import record_abandoned
 from baldur.core.exceptions import (
+    AdapterNotFoundError,
     IdempotencyDuplicateError,
     IdempotencyUnavailableError,
+    TimeoutPolicyError,
 )
 from baldur.core.idempotency_gate import (
     IdempotencyCheckResult,
     IdempotencyDecision,
+    IdempotencyGate,
 )
 from baldur.decorators.idempotent import (
     _build_key_from_args,
@@ -1586,3 +1595,155 @@ class TestIdempotentInProcessDefaultBehavior:
         assert result == "charged"
         assert calls["n"] == 1
         assert len(shared.keys()) == 1
+
+
+# =============================================================================
+# 805 D9/D10 — the key follows the work the function abandoned
+# =============================================================================
+
+
+def _end_piece(piece: Future, outcome: str) -> None:
+    if outcome == "returned":
+        piece.set_result("charged")
+    else:
+        piece.set_exception(ConnectionError("gateway reset"))
+
+
+class TestIdempotentAbandonedWorkBehavior:
+    """A raise while abandoned work runs holds the key; the work's end releases it."""
+
+    @pytest.fixture(autouse=True)
+    def _in_process_ledger(self):
+        """The in-process fallback ledger outside production (a runtime an
+        earlier test built under a patched environment is dropped first)."""
+        from baldur.runtime import reset_runtime
+        from baldur.settings.idempotency import reset_idempotency_settings
+
+        reset_idempotency_settings()
+        reset_runtime()
+        with patch(
+            "baldur.factory.registry.ProviderRegistry.get_cache",
+            side_effect=AdapterNotFoundError(adapter_type="cache"),
+        ):
+            yield
+        reset_idempotency_settings()
+        reset_runtime()
+
+    @pytest.mark.parametrize("outcome", ["returned", "raised"])
+    def test_sync_raise_holds_key_while_work_runs_then_releases(self, outcome):
+        """Never SKIP: the decorator has no own timeout stage, so it releases."""
+        # Given — the first call abandons running work, then raises.
+        calls = {"n": 0}
+        piece: Future = Future()
+
+        @idempotent(key_fn=lambda order_id: f"abandon:{order_id}")
+        def charge(order_id):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                record_abandoned(piece, origin=None)
+                raise TimeoutPolicyError(1.0)
+            return "charged"
+
+        oid = _unique_key("oid")
+        with pytest.raises(TimeoutPolicyError):
+            charge(oid)
+
+        # When — a repeat arrives while the work runs, then the work ends.
+        with pytest.raises(IdempotencyDuplicateError) as held:
+            charge(oid)
+        _end_piece(piece, outcome)
+        repeat = charge(oid)
+
+        # Then
+        assert held.value.decision == "ABORT"
+        assert repeat == "charged"
+        assert calls["n"] == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("outcome", ["returned", "raised"])
+    async def test_async_raise_holds_key_while_work_runs_then_releases(self, outcome):
+        calls = {"n": 0}
+        piece: Future = Future()
+
+        @idempotent(key_fn=lambda order_id: f"abandon-async:{order_id}")
+        async def charge(order_id):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                record_abandoned(piece, origin=None)
+                raise TimeoutPolicyError(1.0)
+            return "charged"
+
+        oid = _unique_key("oid")
+        with pytest.raises(TimeoutPolicyError):
+            await charge(oid)
+
+        with pytest.raises(IdempotencyDuplicateError) as held:
+            await charge(oid)
+        _end_piece(piece, outcome)
+        repeat = await charge(oid)
+
+        assert held.value.decision == "ABORT"
+        assert repeat == "charged"
+        assert calls["n"] == 2
+
+    def test_raise_with_nothing_running_releases_at_once(self):
+        calls = {"n": 0}
+
+        @idempotent(key_fn=lambda order_id: f"abandon-none:{order_id}")
+        def charge(order_id):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ConnectionError("gateway reset")
+            return "charged"
+
+        oid = _unique_key("oid")
+        with pytest.raises(ConnectionError):
+            charge(oid)
+
+        assert charge(oid) == "charged"
+        assert calls["n"] == 2
+
+    def test_return_marks_completed_with_its_claim_while_work_runs(self):
+        """A return completes at once, scoped to the claim this call took."""
+        # Given — spies on the real gate's claim and mark.
+        claims: list = []
+        marked_claims: list = []
+        real_check = IdempotencyGate.check_and_acquire
+        real_mark = IdempotencyGate.mark_completed
+
+        def _check(gate, key, ttl=None):
+            result = real_check(gate, key, ttl=ttl)
+            claims.append(result.claim_id)
+            return result
+
+        def _mark(gate, key, **kwargs):
+            marked_claims.append(kwargs.get("claim_id"))
+            return real_mark(gate, key, **kwargs)
+
+        piece: Future = Future()
+
+        @idempotent(key_fn=lambda order_id: f"abandon-ok:{order_id}")
+        def charge(order_id):
+            record_abandoned(piece, origin=None)
+            return "charged"
+
+        oid = _unique_key("oid")
+        with (
+            patch.object(
+                IdempotencyGate, "check_and_acquire", autospec=True, side_effect=_check
+            ),
+            patch.object(
+                IdempotencyGate, "mark_completed", autospec=True, side_effect=_mark
+            ),
+        ):
+            # When
+            first = charge(oid)
+            with pytest.raises(IdempotencyDuplicateError) as repeat:
+                charge(oid)
+        piece.set_result("done")
+
+        # Then
+        assert first == "charged"
+        assert repeat.value.decision == "SKIP"
+        assert claims[0] is not None
+        assert marked_claims == [claims[0]]
