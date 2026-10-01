@@ -36,18 +36,24 @@ import json
 import logging
 import sys
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, TextIO, cast
+from typing import TYPE_CHECKING, Any, TextIO, cast
 
 import structlog
 
 from baldur.utils.serialization import fast_dumps_str, fast_loads
 from baldur.utils.time import utc_now
 
+if TYPE_CHECKING:
+    from baldur.audit.integrity.verifier import TrailReport, TrailSet
+
 logger = structlog.get_logger()
+
+# How many of a failing integrity pass's issues its WARNING carries.
+_INTEGRITY_ISSUES_LOGGED = 5
 
 
 class ExportFormat(str, Enum):
@@ -114,6 +120,9 @@ class ExportStats:
     filtered_entries: int = 0
     exported_entries: int = 0
     integrity_errors: int = 0
+    # The lowest sequence each trail's integrity check began at, by partition
+    # ("" for the default chain). Above 1, the link into it was not checked.
+    integrity_first_sequences: dict[str, int] = field(default_factory=dict)
     start_time: datetime | None = None
     end_time: datetime | None = None
 
@@ -138,56 +147,55 @@ class AuditExporter:
             self._stats.end_time = utc_now()
             return self._stats
 
-        # Read and filter entries
-        entries = self._read_and_filter_entries(input_files)
+        # The integrity walk sees every entry read, before the filters below:
+        # a filtered export must not read its own selection's gaps as breaks.
+        trails = self._new_trail_set() if self._options.verify_integrity else None
 
-        # Integrity verification (optional)
-        if self._options.verify_integrity:
-            entries = self._verify_integrity(entries)
-
-        # Export
+        # Read and filter entries, then export
+        entries = self._read_and_filter_entries(input_files, trails)
         self._export_entries(entries)
+
+        if trails is not None:
+            self._finish_integrity(trails)
 
         self._stats.end_time = utc_now()
         return self._stats
 
     def _collect_input_files(self) -> list[Path]:
-        """Collect input files."""
-        files = []
+        """Collect input files, each once even when two globs reach it."""
+        files: dict[Path, Path] = {}
         for pattern in self._options.input_paths:
             matched = glob.glob(pattern, recursive=True)
             for path_str in matched:
                 path = Path(path_str)
                 if path.is_file() and path.suffix in (".jsonl", ".json", ".log"):
-                    files.append(path)
-        return sorted(files)
+                    files.setdefault(path.resolve(), path)
+        return sorted(files.values())
+
+    @staticmethod
+    def _new_trail_set() -> TrailSet:
+        from baldur.audit.integrity.verifier import TrailSet
+
+        return TrailSet()
 
     def _read_and_filter_entries(
-        self, input_files: list[Path]
+        self,
+        input_files: list[Path],
+        trails: TrailSet | None = None,
     ) -> Iterator[dict[str, Any]]:
-        """Read and filter entries."""
+        """Read and filter entries, feeding every entry read to ``trails``."""
         for file_path in input_files:
             try:
-                with open(file_path, encoding="utf-8") as f:
-                    for line in f:
-                        if not line.strip():
-                            continue
-
-                        self._stats.total_entries += 1
-
-                        try:
-                            entry = fast_loads(line)
-                        except ValueError as e:
-                            logger.warning(
-                                "invalid.json",
-                                file_path=file_path,
-                                error=e,
-                            )
-                            continue
-
-                        if self._matches_filters(entry):
-                            self._stats.filtered_entries += 1
-                            yield entry
+                rows = (
+                    trails.read_file(file_path)
+                    if trails is not None
+                    else self._read_rows(file_path)
+                )
+                for entry in rows:
+                    self._stats.total_entries += 1
+                    if self._matches_filters(entry):
+                        self._stats.filtered_entries += 1
+                        yield entry
 
             except Exception as e:
                 logger.exception(
@@ -195,6 +203,22 @@ class AuditExporter:
                     file_path=file_path,
                     error=e,
                 )
+
+    @staticmethod
+    def _read_rows(file_path: Path) -> Iterator[dict[str, Any]]:
+        """Read one file's rows without an integrity walk."""
+        with open(file_path, encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    yield fast_loads(line)
+                except ValueError as e:
+                    logger.warning(
+                        "invalid.json",
+                        file_path=file_path,
+                        error=e,
+                    )
 
     def _matches_filters(self, entry: dict[str, Any]) -> bool:  # noqa: C901
         """Check filter conditions."""
@@ -232,32 +256,29 @@ class AuditExporter:
 
         return True
 
-    def _verify_integrity(
-        self, entries: Iterator[dict[str, Any]]
-    ) -> Iterator[dict[str, Any]]:
-        """Hash-chain integrity verification."""
-        prev_hash = None
+    def _finish_integrity(self, trails: TrailSet) -> list[TrailReport]:
+        """Report the integrity walk over every entry read.
 
-        for entry in entries:
-            # Checksum verification
-            checksum = entry.get("checksum")
-            prev_hash_in_entry = entry.get("prev_hash")
-
-            if (
-                prev_hash is not None
-                and prev_hash_in_entry
-                and prev_hash != prev_hash_in_entry
-            ):
-                self._stats.integrity_errors += 1
-                logger.warning(
-                    "hash.chain_broken_expected",
-                    entry=entry.get("audit_id"),
-                    prev_hash=prev_hash,
-                    prev_hash_in_entry=prev_hash_in_entry,
-                )
-
-            prev_hash = checksum
-            yield entry
+        Each trail is checked from the lowest entry present: the input may
+        name only some of a trail's files, so that entry's own link is
+        trusted, and the trail's first sequence is recorded instead.
+        """
+        reports = trails.reports(start=None)
+        issues = [issue for report in reports for issue in report.issues]
+        self._stats.integrity_errors = len(issues)
+        self._stats.integrity_first_sequences = {
+            report.partition: report.first_sequence
+            for report in reports
+            if report.first_sequence is not None
+        }
+        if issues:
+            logger.warning(
+                "audit_export.integrity_check_failed",
+                integrity_errors=len(issues),
+                trails=len(reports),
+                first_issues=issues[:_INTEGRITY_ISSUES_LOGGED],
+            )
+        return reports
 
     def _export_entries(self, entries: Iterator[dict[str, Any]]) -> None:
         """Dispatch entries by target."""
@@ -509,6 +530,30 @@ def parse_datetime(value: str) -> datetime:
     raise ValueError(f"Invalid datetime format: {value}")
 
 
+def integrity_summary_lines(stats: ExportStats) -> list[str]:
+    """Say what the integrity pass found and where each trail's check began.
+
+    Args:
+        stats: The finished export's statistics.
+
+    Returns:
+        The lines to show the operator; empty when there is nothing to say.
+    """
+    lines = []
+    if stats.integrity_errors > 0:
+        lines.append(f"!! Integrity errors: {stats.integrity_errors}")
+    for partition, first_sequence in sorted(stats.integrity_first_sequences.items()):
+        if first_sequence <= 1:
+            continue
+        trail = f" (partition {partition})" if partition else ""
+        lines.append(
+            f"Integrity checked from sequence {first_sequence}{trail}; its link to "
+            f"{first_sequence - 1} was not checked - add the earlier files to "
+            "--input to check it"
+        )
+    return lines
+
+
 def main(args: list[str] | None = None) -> int:
     """CLI entrypoint."""
     parser = argparse.ArgumentParser(
@@ -649,9 +694,9 @@ Examples:
             print(f"Total entries: {stats.total_entries}", file=sys.stderr)
             print(f"Filtered entries: {stats.filtered_entries}", file=sys.stderr)
             print(f"Exported entries: {stats.exported_entries}", file=sys.stderr)
-            if stats.integrity_errors > 0:
-                print(f"!! Integrity errors: {stats.integrity_errors}", file=sys.stderr)
 
+        for line in integrity_summary_lines(stats):
+            print(line, file=sys.stderr)
         return 0
 
     except Exception as e:

@@ -37,6 +37,10 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - The disable response describes what steps aside instead of claiming every operation stopped.
 - `max_attempts` below 1 raises `ValueError` in code (use 1 for no retry); settings warn, fall back.
 - A DLQ capture that stores nothing logs `dlq_sink.capture_skipped` with a `reason` (DEBUG).
+- The audit verifier links a trail in sequence order, across daily files, hosts and paths.
+- `verify_audit_integrity` takes several paths and `--starts-at`; nothing verified exits 1.
+- The hash-chain adapter's `verify_integrity()` returns one flat issue list, not per-file groups.
+- `GET /audit/integrity/verify` checks the ledger's last 10,000 entries; `/state` shows its head.
 
 ### Added
 
@@ -70,6 +74,11 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - An enclosing `dlq=True` call no longer parks a breaker rejection an inner one already parked.
 - A replay handler declared as `Payment-API` now replays what a `Payment-API` call parked.
 - A `domain_configs` retry overlay that is not a mapping no longer fails every `retry=True` call.
+- An untouched audit trail older than one day no longer fails its integrity check.
+- The admin verify route no longer reports every untouched audit entry as modified.
+- The verifier CLI no longer reads the chain state file or crashes on a cp949 console.
+- The audit export's integrity check now reads the ledger's hash fields, before any filter.
+- A verifier without the signing key reports `signing_key_missing`, not every entry modified.
 
 ## [1.16.0] - 2026-09-28
 

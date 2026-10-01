@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from baldur.audit.config import AuditConfig
-from baldur.audit.integrity import HashChainManager, HashChainVerifier
+from baldur.audit.integrity import HashChainManager
 from baldur.core.process_utils import fork_safe_lock, fork_safe_rlock
 from baldur.interfaces.audit_adapter import (
     AuditAction,
@@ -41,6 +41,11 @@ if TYPE_CHECKING:
     from baldur.audit.wal import WALConfig, WriteAheadLog
 
 logger = structlog.get_logger()
+
+# How many of the ledger's most recent entries the admin verify route checks.
+# The route answers on a request thread, so it vouches for a bounded recent
+# window; the whole trail is verified with the CLI.
+ADMIN_VERIFY_WINDOW_ENTRIES = 10_000
 
 
 class ContinuousAuditRecorder:
@@ -685,51 +690,59 @@ class ContinuousAuditRecorder:
 
     def verify_integrity(self) -> dict[str, Any]:
         """
-        Verify audit log integrity.
+        Verify the recent window of the audit adapter's ledger.
+
+        The check reads the adapter's own ledger — the trail an auditor
+        means — through the adapter's trail check. This recorder's own
+        sequence numbers only name audit ids and are not verified.
 
         Returns:
-            Verification result dictionary
+            Verification result dictionary. ``verified`` is ``None`` when the
+            adapter keeps no hash chain.
+
+        Raises:
+            OSError: The ledger cannot be read.
         """
-        entries = self.query(limit=10000)
-
-        verifier = HashChainVerifier()
-
-        # Verify entries that carry an integrity field
-        entries_with_integrity = [
-            e for e in entries if "integrity" in e.get("details", {})
-        ]
-
-        if not entries_with_integrity:
+        verify_trail = getattr(self.audit_adapter, "verify_trail", None)
+        if verify_trail is None:
             return {
-                "verified": True,
-                "total_entries": len(entries),
-                "verified_entries": 0,
-                "message": "No entries with integrity information found",
+                "verified": None,
+                "reason": "no_hash_chain",
+                "message": (
+                    "The configured audit adapter keeps no hash chain; there "
+                    "is no trail to verify"
+                ),
             }
 
-        # Lift integrity information to the top level
-        for entry in entries_with_integrity:
-            entry["integrity"] = entry.get("details", {}).get("integrity", {})
-
-        is_valid, error_msg = verifier.verify_chain(entries_with_integrity)
-        issues = verifier.find_tampering(entries_with_integrity) if not is_valid else []
-
-        result = {
-            "verified": is_valid,
-            "total_entries": len(entries),
-            "verified_entries": len(entries_with_integrity),
-            "chain_state": self._hash_manager.get_state(),
+        report = verify_trail(window=ADMIN_VERIFY_WINDOW_ENTRIES)
+        result: dict[str, Any] = {
+            "verified": report.intact,
+            "total_entries": report.rows,
+            "verified_entries": report.entries,
+            "chain_state": self.get_chain_state(),
+            "scope": "recent_window",
+            "first_sequence": report.first_sequence,
+            "last_sequence": report.last_sequence,
+            "issues": report.issues,
+            "notes": report.notes,
         }
-
-        if not is_valid:
-            result["error"] = error_msg
-            result["issues"] = issues
-
+        if report.entries == 0:
+            result["message"] = "No entries with integrity information found"
+        if not report.intact:
+            result["error"] = report.issues[0]["message"]
         return result
 
     def get_chain_state(self) -> dict[str, Any]:
-        """Return the current hash chain state."""
-        return self._hash_manager.get_state()
+        """Return the state of the audit adapter's hash chain.
+
+        Returns:
+            The chain manager's state, or a ``no_hash_chain`` marker when the
+            adapter keeps no chain.
+        """
+        manager = getattr(self.audit_adapter, "hash_chain_manager", None)
+        if manager is None:
+            return {"sequence": None, "previous_hash": None, "source": "no_hash_chain"}
+        return manager.get_state()
 
     # ─────────────────────────────────────────────────────────────
     # Internal methods
@@ -834,7 +847,7 @@ class ContinuousAuditRecorder:
             "fail_open": self._fail_open,
             "fallback_to_stdout": self._fallback_to_stdout,
             "wal_enabled": self._wal_enabled,
-            "chain_state": self._hash_manager.get_state(),
+            "chain_state": self.get_chain_state(),
             "records_since_checkpoint": self._records_since_checkpoint,
             "checkpoint_save_interval": self._checkpoint_save_interval,
         }

@@ -7,13 +7,12 @@ Contains:
 
 from __future__ import annotations
 
-import json
 from datetime import timedelta
 from typing import Any
 
 import structlog
 
-from baldur.audit.integrity.models import compute_hash
+from baldur.audit.integrity.verifier import ChainStart, HashChainVerifier
 from baldur.settings.audit_integrity import get_audit_integrity_settings
 from baldur.utils.time import utc_now
 
@@ -238,78 +237,12 @@ class DailyHashAnchor:
         if not entries:
             return True, None
 
-        # First entry's previous_hash must match anchor's hash
-        first_entry = entries[0]
-        first_prev_hash = first_entry.get("integrity", {}).get("previous_hash", "")
-        anchor_hash = anchor.get("hash", "")
-
-        if first_prev_hash != anchor_hash:
-            return False, (
-                f"Chain broken at anchor boundary: "
-                f"expected previous_hash={anchor_hash[:16]}..., "
-                f"found={first_prev_hash[:16]}..."
-            )
-
-        # Verify remaining chain using custom verification from anchor point
-        return self._verify_chain_from_point(entries, anchor)
-
-    def _verify_chain_from_point(
-        self,
-        entries: list[dict[str, Any]],
-        anchor: dict[str, Any],
-    ) -> tuple[bool, str | None]:
-        """
-        Verify chain integrity from an anchor point.
-
-        Unlike HashChainVerifier.verify_chain(), this allows chains
-        starting from any sequence number (not just 1).
-
-        Args:
-            entries: Log entries to verify
-            anchor: Anchor data with sequence and hash
-
-        Returns:
-            Tuple of (is_valid, error_message)
-        """
-        if not entries:
-            return True, None
-
-        previous_hash = anchor.get("hash", "GENESIS")
-        expected_sequence = anchor.get("sequence", 0) + 1
-
-        for entry in entries:
-            integrity = entry.get("integrity", {})
-
-            # Check sequence continuity
-            seq = integrity.get("sequence", 0)
-            if seq != expected_sequence:
-                return (
-                    False,
-                    f"Missing entry: expected sequence {expected_sequence}, found {seq}",
-                )
-
-            # Check previous hash linkage
-            prev_hash = integrity.get("previous_hash", "")
-            if prev_hash != previous_hash:
-                return False, f"Chain broken at sequence {seq}: previous_hash mismatch"
-
-            # Verify current hash
-            stored_hash = integrity.get("current_hash", "")
-
-            # Create a copy without current_hash for verification
-            entry_copy = json.loads(json.dumps(entry))
-            if "integrity" in entry_copy and "current_hash" in entry_copy["integrity"]:
-                del entry_copy["integrity"]["current_hash"]
-
-            computed_hash = compute_hash(entry_copy)
-
-            if stored_hash != computed_hash:
-                return False, f"Entry modified at sequence {seq}: hash mismatch"
-
-            previous_hash = stored_hash
-            expected_sequence += 1
-
-        return True, None
+        return HashChainVerifier().verify_chain(
+            entries,
+            start=ChainStart(
+                int(anchor.get("sequence", 0)), str(anchor.get("hash", ""))
+            ),
+        )
 
     def list_anchors(self, days: int = 7) -> list[dict[str, Any]]:
         """

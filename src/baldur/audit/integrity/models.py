@@ -56,8 +56,16 @@ def _audit_signing_key() -> bytes | None:
     return key.encode() if key else None
 
 
+# Default of ``compute_hash(key=...)``: read the key from settings on the call,
+# as every writer does. A verifier resolves the key once per run instead and
+# passes it, ``None`` included, so one run cannot mix two keys.
+KEY_FROM_SETTINGS: Any = object()
+
+
 def compute_hash(
     data: dict[str, Any],
+    *,
+    key: bytes | None = KEY_FROM_SETTINGS,
 ) -> str:  # verified-by: test_forge_without_key_fails
     """
     Compute the chain hash of a dictionary.
@@ -79,12 +87,15 @@ def compute_hash(
 
     Args:
         data: Dictionary to hash
+        key: The signing key to hash with, or ``None`` for the keyless form.
+            Left out, the configured key is read on this call.
 
     Returns:
         64-character hex digest (HMAC-SHA256 when keyed, SHA-256 when keyless)
     """
     payload = fast_canonical_dumps(data, default=str)
-    key = _audit_signing_key()
+    if key is KEY_FROM_SETTINGS:
+        key = _audit_signing_key()
     if key is not None:
         return hmac.new(key, payload, hashlib.sha256).hexdigest()
     return hashlib.sha256(payload).hexdigest()
@@ -179,6 +190,7 @@ def record_source_reset(
 
 __all__ = [
     "INTEGRITY_RESERVED_KEYS",
+    "KEY_FROM_SETTINGS",
     "IntegrityInfo",
     "canonical_json_bytes",
     "compute_hash",

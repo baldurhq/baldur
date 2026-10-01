@@ -1,7 +1,7 @@
 """
 Export CLI Tool Tests.
 
-AuditExporter 테스트.
+AuditExporter tests.
 """
 
 import json
@@ -28,14 +28,14 @@ from baldur.audit.export import (
 
 @pytest.fixture
 def temp_dir():
-    """임시 디렉토리."""
+    """Temporary directory."""
     with tempfile.TemporaryDirectory() as tmpdir:
         yield Path(tmpdir)
 
 
 @pytest.fixture
 def sample_log_file(temp_dir):
-    """샘플 로그 파일 생성."""
+    """Create a sample log file."""
     log_file = temp_dir / "audit.jsonl"
 
     entries = [
@@ -77,10 +77,10 @@ def sample_log_file(temp_dir):
 
 
 class TestExportOptions:
-    """ExportOptions 테스트."""
+    """ExportOptions tests."""
 
     def test_default_values(self):
-        """기본값 확인."""
+        """Default values."""
         options = ExportOptions(input_paths=["test.jsonl"])
 
         assert options.format == ExportFormat.JSONL
@@ -88,7 +88,7 @@ class TestExportOptions:
         assert options.verify_integrity is True
 
     def test_all_filters(self):
-        """모든 필터 설정."""
+        """Every filter set."""
         start = datetime(2025, 1, 1, tzinfo=UTC)
         end = datetime(2025, 1, 31, tzinfo=UTC)
 
@@ -110,10 +110,10 @@ class TestExportOptions:
 
 
 class TestAuditExporter:
-    """AuditExporter 테스트."""
+    """AuditExporter tests."""
 
     def test_collect_input_files(self, sample_log_file):
-        """입력 파일 수집."""
+        """Collect input files."""
         options = ExportOptions(
             input_paths=[str(sample_log_file.parent / "*.jsonl")],
         )
@@ -125,7 +125,7 @@ class TestAuditExporter:
         assert files[0] == sample_log_file
 
     def test_read_all_entries(self, sample_log_file):
-        """모든 엔트리 읽기."""
+        """Read every entry."""
         options = ExportOptions(
             input_paths=[str(sample_log_file)],
         )
@@ -138,7 +138,7 @@ class TestAuditExporter:
         assert exporter._stats.filtered_entries == 3
 
     def test_filter_by_time(self, sample_log_file):
-        """시간 필터링."""
+        """Time filtering."""
         start = datetime(2025, 1, 15, 0, 0, 0, tzinfo=UTC)
         end = datetime(2025, 1, 15, 23, 59, 59, tzinfo=UTC)
 
@@ -151,11 +151,11 @@ class TestAuditExporter:
         exporter = AuditExporter(options)
         entries = list(exporter._read_and_filter_entries([sample_log_file]))
 
-        # 1월 15일 엔트리만 (2개)
+        # Only the January 15 entries (2)
         assert len(entries) == 2
 
     def test_filter_by_action(self, sample_log_file):
-        """액션 필터링."""
+        """Action filtering."""
         options = ExportOptions(
             input_paths=[str(sample_log_file)],
             actions=["config_change"],
@@ -168,7 +168,7 @@ class TestAuditExporter:
         assert entries[0]["action"] == "config_change"
 
     def test_filter_by_actor(self, sample_log_file):
-        """Actor 필터링."""
+        """Actor filtering."""
         options = ExportOptions(
             input_paths=[str(sample_log_file)],
             actor_ids=["user1"],
@@ -181,22 +181,22 @@ class TestAuditExporter:
         assert all(e["actor_id"] == "user1" for e in entries)
 
     def test_verify_integrity(self, sample_log_file):
-        """무결성 검증."""
+        """Rows carrying no integrity block are not counted as errors."""
         options = ExportOptions(
             input_paths=[str(sample_log_file)],
             verify_integrity=True,
         )
 
         exporter = AuditExporter(options)
-        entries = list(exporter._read_and_filter_entries([sample_log_file]))
-        verified = list(exporter._verify_integrity(iter(entries)))
+        trails = exporter._new_trail_set()
+        entries = list(exporter._read_and_filter_entries([sample_log_file], trails))
+        exporter._finish_integrity(trails)
 
-        # 체인이 연결되어 있으므로 에러 없음
         assert exporter._stats.integrity_errors == 0
-        assert len(verified) == 3
+        assert len(entries) == 3
 
     def test_export_to_file_jsonl(self, sample_log_file, temp_dir):
-        """JSONL 파일로 내보내기."""
+        """Export to a JSONL file."""
         output_file = temp_dir / "output.jsonl"
 
         options = ExportOptions(
@@ -212,13 +212,13 @@ class TestAuditExporter:
         assert output_file.exists()
         assert stats.exported_entries == 3
 
-        # 파일 내용 확인
+        # Check the file content
         with open(output_file) as f:
             lines = f.readlines()
             assert len(lines) == 3
 
     def test_export_to_file_json(self, sample_log_file, temp_dir):
-        """JSON Array로 내보내기."""
+        """Export as a JSON array."""
         output_file = temp_dir / "output.json"
 
         options = ExportOptions(
@@ -234,14 +234,14 @@ class TestAuditExporter:
         assert output_file.exists()
         assert stats.exported_entries == 3
 
-        # JSON 배열 확인
+        # Check the JSON array
         with open(output_file) as f:
             data = json.load(f)
             assert isinstance(data, list)
             assert len(data) == 3
 
     def test_export_to_file_csv(self, sample_log_file, temp_dir):
-        """CSV로 내보내기."""
+        """Export to CSV."""
         output_file = temp_dir / "output.csv"
 
         options = ExportOptions(
@@ -257,15 +257,15 @@ class TestAuditExporter:
         assert output_file.exists()
         assert stats.exported_entries == 3
 
-        # CSV 내용 확인
+        # Check the CSV content
         with open(output_file) as f:
             content = f.read().strip()
             lines = [line for line in content.split("\n") if line.strip()]
-            assert len(lines) == 4  # 헤더 + 3 엔트리
-            assert "timestamp" in lines[0]  # 헤더
+            assert len(lines) == 4  # header + 3 entries
+            assert "timestamp" in lines[0]  # header
 
     def test_export_to_http(self, sample_log_file):
-        """HTTP로 내보내기."""
+        """Export over HTTP."""
         with patch("urllib.request.urlopen") as mock_urlopen:
             mock_response = MagicMock()
             mock_response.status = 200
@@ -286,7 +286,7 @@ class TestAuditExporter:
             assert stats.exported_entries == 3
 
     def test_export_empty_input(self, temp_dir):
-        """빈 입력 처리."""
+        """Empty input."""
         options = ExportOptions(
             input_paths=[str(temp_dir / "nonexistent.jsonl")],
         )
@@ -304,10 +304,10 @@ class TestAuditExporter:
 
 
 class TestParseDatetime:
-    """parse_datetime 테스트."""
+    """parse_datetime tests."""
 
     def test_date_only(self):
-        """날짜만."""
+        """Date only."""
         dt = parse_datetime("2025-01-15")
 
         assert dt.year == 2025
@@ -316,28 +316,28 @@ class TestParseDatetime:
         assert dt.tzinfo == UTC
 
     def test_datetime_t_format(self):
-        """ISO T 형식."""
+        """ISO T form."""
         dt = parse_datetime("2025-01-15T10:30:00")
 
         assert dt.hour == 10
         assert dt.minute == 30
 
     def test_datetime_z_format(self):
-        """ISO Z 형식."""
+        """ISO Z form."""
         dt = parse_datetime("2025-01-15T10:30:00Z")
 
         assert dt.hour == 10
         assert dt.minute == 30
 
     def test_datetime_space_format(self):
-        """공백 형식."""
+        """Space-separated form."""
         dt = parse_datetime("2025-01-15 10:30:00")
 
         assert dt.hour == 10
         assert dt.minute == 30
 
     def test_invalid_format(self):
-        """잘못된 형식."""
+        """Invalid form."""
         with pytest.raises(ValueError, match="Invalid datetime format"):
             parse_datetime("not-a-date")
 
@@ -348,10 +348,10 @@ class TestParseDatetime:
 
 
 class TestCLI:
-    """CLI 테스트."""
+    """CLI tests."""
 
     def test_main_stdout(self, sample_log_file, capsys):
-        """stdout 출력."""
+        """stdout output."""
         result = main(
             [
                 "--input",
@@ -365,7 +365,7 @@ class TestCLI:
         assert "audit-001" in captured.out
 
     def test_main_with_filters(self, sample_log_file, capsys):
-        """필터 적용."""
+        """Filters applied."""
         result = main(
             [
                 "--input",
@@ -382,7 +382,7 @@ class TestCLI:
         assert "audit-002" not in captured.out
 
     def test_main_to_file(self, sample_log_file, temp_dir):
-        """파일 출력."""
+        """File output."""
         output_file = temp_dir / "output.jsonl"
 
         result = main(
@@ -400,7 +400,7 @@ class TestCLI:
         assert output_file.exists()
 
     def test_main_missing_output(self, sample_log_file, capsys):
-        """파일 타겟인데 출력 경로 없음."""
+        """File target without an output path."""
         result = main(
             [
                 "--input",
@@ -410,10 +410,10 @@ class TestCLI:
             ]
         )
 
-        assert result == 1  # 에러
+        assert result == 1  # error
 
     def test_main_verbose(self, sample_log_file, capsys):
-        """Verbose 모드."""
+        """Verbose mode."""
         result = main(
             [
                 "--input",
@@ -434,25 +434,19 @@ class TestCLI:
 
 
 class TestIntegrityVerification:
-    """무결성 검증 테스트."""
+    """Integrity pass tests."""
 
     def test_broken_chain_detected(self, temp_dir):
-        """끊어진 체인 감지."""
-        log_file = temp_dir / "broken.jsonl"
+        """An entry whose predecessor is not present is counted."""
+        from baldur.audit.integrity import HashChainManager
 
+        log_file = temp_dir / "audit_2025-01-15.jsonl"
+        manager = HashChainManager()
         entries = [
-            {
-                "audit_id": "audit-001",
-                "timestamp": "2025-01-15T10:00:00Z",
-                "checksum": "abc123",
-            },
-            {
-                "audit_id": "audit-002",
-                "timestamp": "2025-01-15T11:00:00Z",
-                "prev_hash": "WRONG_HASH",  # 잘못된 prev_hash
-                "checksum": "def456",
-            },
+            manager.add_integrity({"timestamp": f"2025-01-15T1{i}:00:00Z", "n": i})
+            for i in range(3)
         ]
+        entries[2]["integrity"]["previous_hash"] = "WRONG_HASH"
 
         with open(log_file, "w") as f:
             for entry in entries:
@@ -464,14 +458,16 @@ class TestIntegrityVerification:
         )
 
         exporter = AuditExporter(options)
-        entries_iter = exporter._read_and_filter_entries([log_file])
-        list(exporter._verify_integrity(entries_iter))
+        trails = exporter._new_trail_set()
+        list(exporter._read_and_filter_entries([log_file], trails))
+        exporter._finish_integrity(trails)
 
-        # 체인 끊김 감지
-        assert exporter._stats.integrity_errors == 1
+        # The edited previous hash is under the fingerprint, so the entry is
+        # both modified and unlinked.
+        assert exporter._stats.integrity_errors == 2
 
     def test_skip_integrity_check(self, temp_dir):
-        """무결성 검증 건너뛰기."""
+        """Skip the integrity check."""
         log_file = temp_dir / "broken.jsonl"
 
         entries = [
@@ -492,11 +488,11 @@ class TestIntegrityVerification:
 
         options = ExportOptions(
             input_paths=[str(log_file)],
-            verify_integrity=False,  # 검증 안 함
+            verify_integrity=False,  # no check
         )
 
         exporter = AuditExporter(options)
         stats = exporter.export()
 
-        # 에러 카운트 없음
+        # no error counted
         assert stats.integrity_errors == 0

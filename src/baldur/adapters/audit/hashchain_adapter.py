@@ -37,7 +37,20 @@ from baldur.audit.integrity import (
     RedisHashChainManager,
     chain_namespace_prefix,
 )
-from baldur.audit.integrity.ledger_tail import list_ledger_files
+from baldur.audit.integrity.ledger_tail import (
+    CHAIN_STATE_FILE_PREFIX,
+    DEFAULT_LEDGER_FILENAME_PATTERN,
+    LEDGER_TAIL_MIN_LINES,
+    PARTITIONED_LEDGER_FILENAME_PATTERN,
+    list_ledger_files,
+    read_ledger_window,
+)
+from baldur.audit.integrity.verifier import (
+    TrailReport,
+    TrailSet,
+    chain_start_at,
+    verify_ledger_window,
+)
 from baldur.audit.masking import (
     mask_ip,
     mask_sensitive_fields,
@@ -153,9 +166,11 @@ class HashChainFileAuditLogAdapter(AuditLogAdapter):
         if filename_pattern is not None:
             self._filename_pattern = filename_pattern
         elif self._partition:
-            self._filename_pattern = "audit_{date}_" + self._partition + ".jsonl"
+            self._filename_pattern = PARTITIONED_LEDGER_FILENAME_PATTERN.replace(
+                "{partition}", self._partition
+            )
         else:
-            self._filename_pattern = "audit_{date}.jsonl"
+            self._filename_pattern = DEFAULT_LEDGER_FILENAME_PATTERN
 
         logger.debug(
             "audit.partition_resolved",
@@ -164,9 +179,9 @@ class HashChainFileAuditLogAdapter(AuditLogAdapter):
 
         # Resolve hash chain state file path (D23 partition-aware).
         state_filename = (
-            f".hash_chain_state.{self._partition}.json"
+            f"{CHAIN_STATE_FILE_PREFIX}.{self._partition}.json"
             if self._partition
-            else ".hash_chain_state.json"
+            else f"{CHAIN_STATE_FILE_PREFIX}.json"
         )
         state_file = self._log_dir / state_filename
 
@@ -365,30 +380,70 @@ class HashChainFileAuditLogAdapter(AuditLogAdapter):
             )
         return results[:limit]
 
-    def verify_integrity(self) -> tuple[bool, list[dict[str, Any]]]:
-        """Verify integrity of all log files in this adapter's partition."""
-        from baldur.audit.integrity import verify_audit_log_integrity
+    def verify_trail(
+        self,
+        *,
+        expected_start: int = 1,
+        window: int | None = None,
+    ) -> TrailReport:
+        """Verify this adapter's ledger as one trail.
 
-        issues: list[dict[str, Any]] = []
+        The files are this host's own. Where the chain is distributed, a gap
+        whose successor was sequenced through Redis is another host's entries
+        and is reported as a note; the fleet's whole trail is verified with
+        every host's directory on the CLI.
+
+        Args:
+            expected_start: The first sequence the ledger must hold. Above 1,
+                the ledger was pruned on purpose and the entry at this
+                sequence is trusted as the trail's first.
+            window: Verify only the most recent ``window`` entries (plus a
+                margin below them) instead of every file.
+
+        Returns:
+            The trail's report.
+
+        Raises:
+            OSError: The ledger cannot be read.
+            ValueError: ``expected_start`` is below 1, or ``window`` is.
+        """
+        if window is not None:
+            ledger_window = read_ledger_window(
+                self._log_dir,
+                self.ledger_filename_regex,
+                window + LEDGER_TAIL_MIN_LINES,
+            )
+            return verify_ledger_window(ledger_window, partition=self._partition)
+
+        start = chain_start_at(expected_start)
+        trails = TrailSet()
+        for log_file in reversed(
+            list_ledger_files(self._log_dir, self.ledger_filename_regex)
+        ):
+            for _row in trails.read_file(log_file, partition=self._partition):
+                pass
+        return trails.walk(self._partition).report(
+            start=start,
+            host_local=True,
+            rerun_hint=lambda sequence: f"re-run with expected_start={sequence}",
+        )
+
+    def verify_integrity(self) -> tuple[bool, list[dict[str, Any]]]:
+        """Verify every file of this adapter's partition as one trail.
+
+        Returns:
+            ``(intact, issues)`` — a flat list, each issue carrying ``type``,
+            ``sequence``, ``file``, ``line`` and ``message``.
+        """
         try:
-            for log_file in list_ledger_files(
-                self._log_dir, self.ledger_filename_regex
-            ):
-                is_valid, file_issues = verify_audit_log_integrity(log_file)
-                if not is_valid:
-                    issues.append(
-                        {
-                            "file": str(log_file),
-                            "issues": file_issues,
-                        }
-                    )
+            report = self.verify_trail()
         except Exception as e:
             logger.exception(
                 "hash_chain_file_audit.verify_integrity_failed",
                 error=e,
             )
             return False, [{"type": "verify_error", "message": str(e)}]
-        return len(issues) == 0, issues
+        return report.intact, report.issues
 
     def close(self) -> None:
         """Close any open file handles and persist hash chain state.

@@ -33,15 +33,22 @@ from baldur.utils.serialization import fast_loads
 logger = structlog.get_logger()
 
 __all__ = [
+    "CHAIN_STATE_FILE_PREFIX",
+    "DEFAULT_LEDGER_FILENAME_PATTERN",
     "LEDGER_TAIL_HEAD_PROBE_BYTES",
     "LEDGER_TAIL_INITIAL_WINDOW_BYTES",
     "LEDGER_TAIL_MAX_TOTAL_BYTES",
     "LEDGER_TAIL_MAX_WINDOW_BYTES",
     "LEDGER_TAIL_MIN_LINES",
+    "PARTITIONED_LEDGER_FILENAME_PATTERN",
     "LedgerTail",
     "LedgerTailReader",
+    "LedgerWindow",
+    "LedgerWindowFile",
+    "ledger_file_partition",
     "ledger_filename_regex",
     "list_ledger_files",
+    "read_ledger_window",
 ]
 
 
@@ -86,6 +93,19 @@ _DATE_TOKEN = "{date}"
 _DATE_REGEX = r"\d{4}-\d{2}-\d{2}"
 _UNROTATED_DATE = "all"
 
+# The ledger's default file names: the un-partitioned chain, and a partition's
+# own chain. The adapter builds its names from these, and a check that has no
+# adapter to ask reads a file's partition back out of the same shape.
+DEFAULT_LEDGER_FILENAME_PATTERN = "audit_{date}.jsonl"
+PARTITIONED_LEDGER_FILENAME_PATTERN = "audit_{date}_{partition}.jsonl"
+_PARTITION_TOKEN = "{partition}"
+_PARTITION_CAPTURE = "(?P<partition>.+)"
+
+# Every file the chain manager keeps beside the ledger — its state, the lock
+# and the per-writer temp of an atomic save — starts with this name. None of
+# them is a ledger, whatever a selection glob says.
+CHAIN_STATE_FILE_PREFIX = ".hash_chain_state"
+
 
 @dataclass(frozen=True)
 class LedgerTail:
@@ -98,7 +118,7 @@ class LedgerTail:
 
 def ledger_filename_regex(
     filename_pattern: str,
-    rotate_daily: bool = True,
+    rotate_daily: bool | None = True,
 ) -> re.Pattern[str]:
     """Compile the exact filename shape an adapter's pattern produces.
 
@@ -109,16 +129,53 @@ def ledger_filename_regex(
 
     Args:
         filename_pattern: The adapter's pattern, e.g. ``audit_{date}.jsonl``
-            or ``audit_{date}_worker.jsonl``.
-        rotate_daily: Whether the adapter substitutes a date or ``all``.
+            or ``audit_{date}_worker.jsonl``. A ``{partition}`` token matches
+            any partition name and captures it as the ``partition`` group.
+        rotate_daily: Whether the adapter substitutes a date or ``all``;
+            ``None`` accepts either.
 
     Returns:
         A pattern to ``fullmatch`` against a file **name**.
     """
-    date_part = _DATE_REGEX if rotate_daily else re.escape(_UNROTATED_DATE)
+    if rotate_daily is None:
+        date_part = f"(?:{_DATE_REGEX}|{re.escape(_UNROTATED_DATE)})"
+    elif rotate_daily:
+        date_part = _DATE_REGEX
+    else:
+        date_part = re.escape(_UNROTATED_DATE)
     return re.compile(
-        date_part.join(re.escape(part) for part in filename_pattern.split(_DATE_TOKEN))
+        date_part.join(
+            _PARTITION_CAPTURE.join(
+                re.escape(piece) for piece in part.split(_PARTITION_TOKEN)
+            )
+            for part in filename_pattern.split(_DATE_TOKEN)
+        )
     )
+
+
+# Partitioned shape first: the default shape cannot match a partitioned name,
+# so the order only decides which of two matches is tried first.
+_LEDGER_FILE_SHAPES = (
+    ledger_filename_regex(PARTITIONED_LEDGER_FILENAME_PATTERN, rotate_daily=None),
+    ledger_filename_regex(DEFAULT_LEDGER_FILENAME_PATTERN, rotate_daily=None),
+)
+
+
+def ledger_file_partition(name: str) -> str | None:
+    """Read the partition a ledger file belongs to out of its name.
+
+    Args:
+        name: A file **name**, e.g. ``audit_2026-09-07_worker.jsonl``.
+
+    Returns:
+        The partition (``""`` for the default chain), or ``None`` when the
+        name does not have the ledger's default shape.
+    """
+    for shape in _LEDGER_FILE_SHAPES:
+        match = shape.fullmatch(name)
+        if match is not None:
+            return match.groupdict().get("partition") or ""
+    return None
 
 
 def list_ledger_files(log_dir: Path, regex: re.Pattern[str]) -> list[Path]:
@@ -372,3 +429,151 @@ class LedgerTailReader:
         if best is not None:
             return LedgerTail(best[0], best[1], path), bytes_read
         return None, bytes_read
+
+
+@dataclass(frozen=True)
+class LedgerWindowFile:
+    """One file's share of a ledger window.
+
+    Attributes:
+        path: The ledger file.
+        lines: Its complete, non-blank lines in the window, oldest first, each
+            with its line number when the read covered the whole file
+            (``None`` otherwise — counting would mean reading the rest).
+        unterminated: The file's final line when it has no line terminator —
+            a write in flight or interrupted — with its line number when
+            known; ``None`` when the file ends with a newline.
+        reached_file_start: Whether ``lines`` begins at the file's first line.
+    """
+
+    path: Path
+    lines: tuple[tuple[int | None, bytes], ...]
+    unterminated: tuple[int | None, bytes] | None
+    reached_file_start: bool
+
+
+@dataclass(frozen=True)
+class LedgerWindow:
+    """The most recent complete lines of a ledger, across its files.
+
+    Attributes:
+        files: Each file read, oldest first.
+        reached_ledger_start: Whether the read covered the ledger's oldest
+            file from its first line — the whole ledger was read.
+    """
+
+    files: tuple[LedgerWindowFile, ...]
+    reached_ledger_start: bool
+
+    @property
+    def line_count(self) -> int:
+        """How many complete lines the window holds."""
+        return sum(len(part.lines) for part in self.files)
+
+
+def read_ledger_window(
+    log_dir: Path,
+    regex: re.Pattern[str],
+    line_count: int,
+) -> LedgerWindow:
+    """Read the ledger's last ``line_count`` complete lines, newest files first.
+
+    Each file is read from its end through a window that doubles up to
+    :data:`LEDGER_TAIL_MAX_WINDOW_BYTES`. A file whose read reaches that cap
+    before its first line is the last file read: reading on into an older file
+    would leave the capped file's unread middle as a stretch of absent
+    entries between present ones, which a chain check reads as removed.
+
+    Args:
+        log_dir: The directory the adapter writes its ledger into.
+        regex: The compiled shape from :func:`ledger_filename_regex`.
+        line_count: How many complete lines the window should hold.
+
+    Returns:
+        The window, which holds fewer lines when the ledger is shorter or a
+        file's read reached the cap.
+
+    Raises:
+        OSError: The directory or a file cannot be read, or a file's last
+            complete line lies beyond the cap (a single row larger than it).
+        ValueError: ``line_count`` is below 1.
+    """
+    if line_count < 1:
+        raise ValueError(f"line_count must be at least 1, got {line_count}")
+
+    newest_first = list_ledger_files(log_dir, regex)
+    collected: list[LedgerWindowFile] = []
+    remaining = line_count
+    for path in newest_first:
+        part = _read_file_lines_from_end(path, remaining)
+        collected.append(part)
+        remaining -= len(part.lines)
+        if not part.reached_file_start or remaining <= 0:
+            break
+
+    reached_ledger_start = not collected or (
+        collected[-1].reached_file_start and collected[-1].path == newest_first[-1]
+    )
+    return LedgerWindow(tuple(reversed(collected)), reached_ledger_start)
+
+
+def _read_file_lines_from_end(path: Path, wanted: int) -> LedgerWindowFile:
+    """Read up to ``wanted`` complete lines from the end of one ledger file.
+
+    Split on ``b"\n"`` before any decoding, as :func:`_scan_window` does, so a
+    window boundary inside a multi-byte character can never raise.
+    """
+    with open(path, "rb") as handle:
+        handle.seek(0, 2)
+        file_size = handle.tell()
+        if file_size == 0:
+            return LedgerWindowFile(path, (), None, True)
+
+        window_size = LEDGER_TAIL_INITIAL_WINDOW_BYTES
+        while True:
+            read_size = min(file_size, window_size)
+            handle.seek(file_size - read_size)
+            window = handle.read(read_size)
+            reached_file_start = read_size >= file_size
+
+            segments = window.split(b"\n")
+            last_segment = segments.pop()
+            if not reached_file_start:
+                # The first segment may begin mid-line.
+                segments = segments[1:]
+
+            lines = [
+                (index + 1 if reached_file_start else None, segment)
+                for index, segment in enumerate(segments)
+                if segment.strip()
+            ]
+            unterminated = None
+            if last_segment.strip():
+                unterminated = (
+                    len(segments) + 1 if reached_file_start else None,
+                    last_segment,
+                )
+
+            if len(lines) >= wanted:
+                return LedgerWindowFile(
+                    path,
+                    tuple(lines[-wanted:]),
+                    unterminated,
+                    reached_file_start and len(lines) == wanted,
+                )
+            if reached_file_start:
+                return LedgerWindowFile(path, tuple(lines), unterminated, True)
+            if window_size >= LEDGER_TAIL_MAX_WINDOW_BYTES:
+                if not lines:
+                    raise OSError(
+                        f"audit ledger window unreadable: no complete line within "
+                        f"{LEDGER_TAIL_MAX_WINDOW_BYTES} bytes of the end of {path}"
+                    )
+                logger.debug(
+                    "ledger_tail.window_read_capped",
+                    path=str(path),
+                    bytes_scanned=read_size,
+                    lines=len(lines),
+                )
+                return LedgerWindowFile(path, tuple(lines), unterminated, False)
+            window_size *= 2

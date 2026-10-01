@@ -28,25 +28,25 @@ from baldur.interfaces.audit_adapter import AuditAction
 
 
 class TestAuditConfigContract:
-    """AuditConfig 설계 계약값 검증."""
+    """AuditConfig design contract values."""
 
     def test_default_config_development(self):
-        """개발 환경에서 기본 설정 로드."""
+        """Load the default config in development."""
         with patch.dict(os.environ, {"BALDUR_ENVIRONMENT": "development"}, clear=False):
-            # 기존 AUDIT_HASH_SEED 제거
+            # Remove any existing AUDIT_HASH_SEED
             env = os.environ.copy()
             env.pop("AUDIT_HASH_SEED", None)
             with patch.dict(os.environ, env, clear=True):
                 os.environ["BALDUR_ENVIRONMENT"] = "development"
                 config = AuditConfig()
 
-                # 개발 환경에서는 기본 시드 사용
+                # Development uses the default seed
                 assert config.hash_seed == "dev-seed-not-for-production"
                 assert config.retention_days == 365
                 assert config.storage_backend == "file"
 
     def test_config_from_env(self):
-        """환경변수에서 설정 로드."""
+        """Load the config from environment variables."""
         env = {
             "AUDIT_HASH_SEED": "test-seed-12345",
             "AUDIT_RETENTION_DAYS": "730",
@@ -82,7 +82,7 @@ class TestAuditConfigContract:
             assert "AUDIT_HASH_SEED" in str(exc_info.value)
 
     def test_from_dna(self):
-        """DNA 설정에서 로드 (환경변수 우선)."""
+        """Load from the DNA config (environment variables win)."""
         dna_config = {
             "hash_seed": "dna-seed",
             "retention_days": 180,
@@ -90,17 +90,17 @@ class TestAuditConfigContract:
             "alert_channels": ["email"],
         }
 
-        # 환경변수가 없으면 DNA 값 사용
+        # Without environment variables the DNA values apply
         with patch.dict(os.environ, {"BALDUR_ENVIRONMENT": "development"}, clear=True):
             config = AuditConfig.from_dna(dna_config)
 
-            # hash_seed는 없으므로 DNA 값 (그러나 __post_init__에서 기본값으로 대체)
+            # No hash_seed, so the DNA value applies (replaced by the default in __post_init__)
             assert config.retention_days == 180
             assert config.storage_backend == "loki"
             assert config.alert_channels == ["email"]
 
     def test_env_overrides_dna(self):
-        """환경변수가 DNA보다 우선."""
+        """Environment variables win over DNA."""
         dna_config = {
             "retention_days": 180,
             "storage": "loki",
@@ -116,11 +116,11 @@ class TestAuditConfigContract:
             config = AuditConfig.from_dna(dna_config)
 
             assert config.hash_seed == "env-seed"
-            assert config.retention_days == 365  # 환경변수 우선
-            assert config.storage_backend == "loki"  # DNA 값
+            assert config.retention_days == 365  # environment variable wins
+            assert config.storage_backend == "loki"  # DNA value
 
     def test_to_dict_masks_seed(self):
-        """to_dict()에서 해시 시드 마스킹."""
+        """to_dict() masks the hash seed."""
         with patch.dict(
             os.environ,
             {
@@ -137,45 +137,47 @@ class TestAuditConfigContract:
 
 
 class TestComplianceRetentionContract:
-    """규정별 보존 기간 설계 계약값 검증."""
+    """Per-regulation retention design contract values."""
 
     def test_retention_days_constants(self):
-        """규정별 보존 기간 상수 확인."""
-        assert COMPLIANCE_RETENTION_DAYS["DORA"] == 365 * 5  # 5년
-        assert COMPLIANCE_RETENTION_DAYS["PCI-DSS"] == 365  # 1년
-        assert COMPLIANCE_RETENTION_DAYS["SOC2"] == 365  # 1년
-        assert COMPLIANCE_RETENTION_DAYS["HIPAA"] == 365 * 6  # 6년
-        assert COMPLIANCE_RETENTION_DAYS["GDPR"] is None  # 목적 달성 시
+        """Per-regulation retention constants."""
+        assert COMPLIANCE_RETENTION_DAYS["DORA"] == 365 * 5  # 5 years
+        assert COMPLIANCE_RETENTION_DAYS["PCI-DSS"] == 365  # 1 year
+        assert COMPLIANCE_RETENTION_DAYS["SOC2"] == 365  # 1 year
+        assert COMPLIANCE_RETENTION_DAYS["HIPAA"] == 365 * 6  # 6 years
+        assert (
+            COMPLIANCE_RETENTION_DAYS["GDPR"] is None
+        )  # until the purpose is fulfilled
 
     def test_get_recommended_retention_single(self):
-        """단일 규정 보존 기간."""
+        """Retention for a single regulation."""
         assert get_recommended_retention(["DORA"]) == 365 * 5
         assert get_recommended_retention(["PCI-DSS"]) == 365
 
     def test_get_recommended_retention_multiple(self):
-        """다중 규정 보존 기간 (최대값 반환)."""
+        """Retention for several regulations (the maximum)."""
         assert get_recommended_retention(["DORA", "PCI-DSS"]) == 365 * 5
         assert get_recommended_retention(["HIPAA", "DORA"]) == 365 * 6
 
     def test_get_recommended_retention_unknown(self):
-        """알 수 없는 규정은 기본값."""
+        """An unknown regulation gets the default."""
         assert get_recommended_retention(["UNKNOWN"]) == 365
 
 
 class TestContinuousAuditRecorderBehavior:
-    """ContinuousAuditRecorder 동작 검증."""
+    """ContinuousAuditRecorder behaviour."""
 
     @pytest.fixture
     def temp_log_file(self):
-        """임시 로그 파일 생성."""
+        """Create a temporary log file."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
             yield Path(f.name)
-        # 정리
+        # Clean up
         Path(f.name).unlink(missing_ok=True)
 
     @pytest.fixture
     def recorder(self, temp_log_file):
-        """ContinuousAuditRecorder 인스턴스."""
+        """A ContinuousAuditRecorder instance."""
         adapter = FileAuditLogAdapter(temp_log_file)
 
         with patch.dict(
@@ -195,12 +197,12 @@ class TestContinuousAuditRecorderBehavior:
             )
 
     def test_record_auto_tuning(self, recorder):
-        """자율 조정 기록."""
+        """Record an auto-tuning adjustment."""
         audit_id = recorder.record_auto_tuning(
             parameter="timeout_ms",
             old_value=5000,
             new_value=6000,
-            reason="P99 레이턴시 증가",
+            reason="P99 latency increase",
             confidence=0.85,
             metrics_snapshot={"p99_latency_ms": 4200},
             safety_check={"within_bounds": True, "bounds": {"min": 100, "max": 30000}},
@@ -208,7 +210,7 @@ class TestContinuousAuditRecorderBehavior:
 
         assert audit_id.startswith("audit-")
 
-        # 조회 확인
+        # Query it back
         entries = recorder.query_auto_tuning_history(parameter="timeout_ms")
         assert len(entries) == 1
 
@@ -220,7 +222,7 @@ class TestContinuousAuditRecorderBehavior:
         assert entry["details"]["after"]["confidence"] == 0.85
 
     def test_record_auto_tuning_rejected(self, recorder):
-        """자율 조정 거부 기록."""
+        """Record a rejected auto-tuning adjustment."""
         recorder.record_auto_tuning_rejected(
             parameter="timeout_ms",
             requested_value=50000,
@@ -234,7 +236,7 @@ class TestContinuousAuditRecorderBehavior:
         assert entries[0]["success"] is False
 
     def test_record_drift_detected(self, recorder):
-        """DNA Drift 감지 기록."""
+        """Record a DNA drift detection."""
         recorder.record_drift_detected(
             resource_id="stage14_dlq_api_test",
             declared={"timeout_ms": 5000, "retry_count": 3},
@@ -252,7 +254,7 @@ class TestContinuousAuditRecorderBehavior:
         assert entry["details"]["severity"] == "medium"
 
     def test_record_compliance_check(self, recorder):
-        """Compliance 검사 기록."""
+        """Record a compliance check."""
         results = {
             "DORA": {"status": "compliant"},
             "PCI-DSS": {"status": "compliant"},
@@ -270,8 +272,8 @@ class TestContinuousAuditRecorderBehavior:
         assert entries[0]["details"]["overall_status"] == "compliant_with_warnings"
 
     def test_hash_chain_integrity(self, recorder):
-        """해시 체인 무결성 검증."""
-        # 여러 이벤트 기록
+        """A plain file adapter keeps no chain, so no chain state is reported."""
+        # Record several events
         recorder.record_auto_tuning(
             parameter="param1",
             old_value=1,
@@ -291,14 +293,14 @@ class TestContinuousAuditRecorderBehavior:
             safety_check={},
         )
 
-        # 체인 상태 확인
+        # The recorder's own sequence numbers only name audit ids
         state = recorder.get_chain_state()
-        assert state["sequence"] == 2
-        assert "previous_hash" in state
+        assert state["source"] == "no_hash_chain"
+        assert state["sequence"] is None
 
     def test_export_jsonl(self, recorder):
-        """JSON Lines 익스포트."""
-        # 이벤트 기록
+        """JSON Lines export."""
+        # Record an event
         recorder.record_auto_tuning(
             parameter="timeout_ms",
             old_value=5000,
@@ -309,7 +311,7 @@ class TestContinuousAuditRecorderBehavior:
             safety_check={},
         )
 
-        # 익스포트
+        # Export
         lines = list(recorder.export_jsonl())
         assert len(lines) == 1
 
@@ -317,7 +319,7 @@ class TestContinuousAuditRecorderBehavior:
         assert data["action"] == AuditAction.AUTO_TUNING_ADJUSTMENT.value
 
     def test_export_csv_compatible(self, recorder):
-        """CSV 호환 형식 익스포트."""
+        """CSV-compatible export."""
         recorder.record_auto_tuning(
             parameter="timeout_ms",
             old_value=5000,
@@ -335,12 +337,12 @@ class TestContinuousAuditRecorderBehavior:
         assert "timestamp" in row
         assert "action" in row
         assert row["target_id"] == "timeout_ms"
-        # 중첩 구조 평탄화 확인
+        # Nested structure is flattened
         assert "details_parameter" in row
 
     def test_query_with_filters(self, recorder):
-        """필터를 사용한 쿼리."""
-        # 다양한 이벤트 기록
+        """Query with filters."""
+        # Record several kinds of event
         recorder.record_auto_tuning(
             parameter="timeout_ms",
             old_value=5000,
@@ -358,7 +360,7 @@ class TestContinuousAuditRecorderBehavior:
             severity="low",
         )
 
-        # 액션 필터
+        # Action filter
         auto_entries = recorder.query(action=AuditAction.AUTO_TUNING_ADJUSTMENT)
         assert len(auto_entries) == 1
 
@@ -366,7 +368,7 @@ class TestContinuousAuditRecorderBehavior:
         assert len(drift_entries) == 1
 
     def test_alert_callback(self, temp_log_file):
-        """알림 콜백 호출."""
+        """The alert callback is called."""
         adapter = FileAuditLogAdapter(temp_log_file)
 
         alerts = []
@@ -405,10 +407,10 @@ class TestContinuousAuditRecorderBehavior:
 
 
 class TestHashChainIntegrityBehavior:
-    """해시 체인 무결성 동작 검증."""
+    """Hash chain integrity behaviour."""
 
     def test_hash_chain_manager_adds_integrity(self):
-        """HashChainManager가 무결성 정보를 추가."""
+        """HashChainManager adds integrity information."""
         manager = HashChainManager()
 
         entry = {"action": "test", "data": "value"}
@@ -420,7 +422,7 @@ class TestHashChainIntegrityBehavior:
         assert "current_hash" in result["integrity"]
 
     def test_hash_chain_sequence(self):
-        """해시 체인 시퀀스 증가."""
+        """The hash chain sequence increments."""
         manager = HashChainManager()
 
         entry1 = manager.add_integrity({"action": "test1"})
@@ -431,7 +433,7 @@ class TestHashChainIntegrityBehavior:
         assert entry2["integrity"]["sequence"] == 2
         assert entry3["integrity"]["sequence"] == 3
 
-        # 이전 해시 연결 확인
+        # Each entry links to the previous hash
         assert (
             entry2["integrity"]["previous_hash"] == entry1["integrity"]["current_hash"]
         )
@@ -440,7 +442,7 @@ class TestHashChainIntegrityBehavior:
         )
 
     def test_hash_chain_verifier_valid(self):
-        """유효한 해시 체인 검증."""
+        """A valid hash chain verifies."""
         manager = HashChainManager()
 
         entries = [
@@ -456,7 +458,7 @@ class TestHashChainIntegrityBehavior:
         assert error is None
 
     def test_hash_chain_verifier_detects_modification(self):
-        """수정된 엔트리 감지."""
+        """A modified entry is detected."""
         manager = HashChainManager()
 
         entries = [
@@ -465,7 +467,7 @@ class TestHashChainIntegrityBehavior:
             manager.add_integrity({"action": "test3"}),
         ]
 
-        # 두 번째 엔트리 수정
+        # Modify the second entry
         entries[1]["action"] = "modified!"
 
         verifier = HashChainVerifier()
@@ -475,14 +477,14 @@ class TestHashChainIntegrityBehavior:
         assert "hash mismatch" in error or "modified" in error.lower()
 
     def test_hash_chain_verifier_detects_missing(self):
-        """누락된 엔트리 감지."""
+        """A missing entry is detected."""
         manager = HashChainManager()
 
         entry1 = manager.add_integrity({"action": "test1"})
         manager.add_integrity({"action": "test2"})
         entry3 = manager.add_integrity({"action": "test3"})
 
-        # 두 번째 엔트리 제거
+        # Remove the second entry
         entries = [entry1, entry3]
 
         verifier = HashChainVerifier()
@@ -493,10 +495,10 @@ class TestHashChainIntegrityBehavior:
 
 
 class TestAuditActionExtensionsContract:
-    """AuditAction 확장 설계 계약값 검증."""
+    """AuditAction extension design contract values."""
 
     def test_auto_tuning_actions_exist(self):
-        """자율 조정 관련 액션 존재."""
+        """Auto-tuning actions exist."""
         assert hasattr(AuditAction, "AUTO_TUNING_ADJUSTMENT")
         assert hasattr(AuditAction, "AUTO_TUNING_ENABLED")
         assert hasattr(AuditAction, "AUTO_TUNING_DISABLED")
@@ -505,17 +507,17 @@ class TestAuditActionExtensionsContract:
         assert hasattr(AuditAction, "AUTO_TUNING_ROLLBACK")
 
     def test_drift_actions_exist(self):
-        """DNA Drift 관련 액션 존재."""
+        """DNA drift actions exist."""
         assert hasattr(AuditAction, "DNA_DRIFT_DETECTED")
         assert hasattr(AuditAction, "DNA_DRIFT_RESOLVED")
 
     def test_compliance_actions_exist(self):
-        """Compliance 관련 액션 존재."""
+        """Compliance actions exist."""
         assert hasattr(AuditAction, "COMPLIANCE_CHECK")
         assert hasattr(AuditAction, "COMPLIANCE_VIOLATION")
 
     def test_action_values(self):
-        """액션 값 확인."""
+        """Action values."""
         assert AuditAction.AUTO_TUNING_ADJUSTMENT.value == "auto_tuning_adjustment"
         assert AuditAction.DNA_DRIFT_DETECTED.value == "dna_drift_detected"
         assert AuditAction.COMPLIANCE_CHECK.value == "compliance_check"

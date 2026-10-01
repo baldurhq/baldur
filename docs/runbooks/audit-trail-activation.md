@@ -179,14 +179,29 @@ Make one config change or trigger one healing action, then confirm a new line la
 tail -n 1 "${BALDUR_AUDIT_LOG_DIR:-logs/audit}/audit_$(date +%Y-%m-%d).jsonl"   # filenames use YYYY-MM-DD (UTC)
 ```
 
-### Step 4.4 — Integrity check (admin API)
+### Step 4.4 — Integrity check
+
+The admin API checks the recent part of this host's ledger:
 
 ```bash
 curl -s http://127.0.0.1:9090/audit/integrity/verify | python -m json.tool
-# Reports whether the hash chain is intact; pinpoints the first broken link if not.
+# "verified": true when the most recent 10,000 entries in this host's files are intact.
+# "issues" names each altered, removed or inserted entry with its sequence and file;
+# "notes" lists, on a distributed chain, the entries another host holds ("not_held_here").
 
-curl -s http://127.0.0.1:9090/audit/integrity/state    # current chain head
+curl -s http://127.0.0.1:9090/audit/integrity/state    # the ledger chain's head
 ```
+
+The full check reads every file of the chain. Run it where `BALDUR_SECRETS_AUDIT_SIGNING_KEY` is set
+to the writers' key, passing every host's audit directory for a distributed chain:
+
+```bash
+python -m baldur.audit.verify_audit_integrity /mnt/host-a/audit /mnt/host-b/audit
+# Exit 0: every trail intact. Exit 1: an issue was found, or no ledger file is under the paths.
+```
+
+If you pruned the oldest files on purpose, add `--starts-at <K>` with the first sequence you kept;
+the failure message prints it.
 
 **Final go/no-go**: `audit_system: healthy` + `audit_<date>.jsonl` growing + `/audit/integrity/verify` reports intact → audit is live and tamper-evident.
 

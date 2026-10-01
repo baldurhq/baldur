@@ -2,11 +2,11 @@
 Tests for Hash Chain Verifier CLI Tool.
 
 Tests:
-- HashChainVerifier 기능 테스트
-- AuditIntegrityVerifier 테스트
-- CLI 출력 형식 테스트
-- WAL 검증 테스트
-- 엣지 케이스 테스트
+- HashChainVerifier behaviour
+- AuditIntegrityVerifier: whole-trail verification of ledger directories
+- CLI output formats
+- WAL verification
+- Edge cases
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from baldur.audit.verify_audit_integrity import (
     AuditIntegrityVerifier,
     VerificationResult,
     VerificationSummary,
+    _verify_path,
     format_json_output,
     format_summary_output,
     format_text_output,
@@ -36,29 +37,29 @@ from baldur.audit.verify_audit_integrity import (
 
 
 class TestComputeHash:
-    """compute_hash 함수 테스트."""
+    """compute_hash."""
 
     def test_compute_hash_deterministic(self):
-        """동일 데이터는 동일 해시."""
+        """The same data gives the same hash."""
         data = {"key": "value", "number": 42}
         hash1 = compute_hash(data)
         hash2 = compute_hash(data)
         assert hash1 == hash2
 
     def test_compute_hash_different_data(self):
-        """다른 데이터는 다른 해시."""
+        """Different data gives different hashes."""
         data1 = {"key": "value1"}
         data2 = {"key": "value2"}
         assert compute_hash(data1) != compute_hash(data2)
 
     def test_compute_hash_key_order_independent(self):
-        """키 순서에 관계없이 동일 해시."""
+        """Key order does not change the hash."""
         data1 = {"a": 1, "b": 2, "c": 3}
         data2 = {"c": 3, "a": 1, "b": 2}
         assert compute_hash(data1) == compute_hash(data2)
 
     def test_compute_hash_returns_hex_string(self):
-        """SHA-256 해시 형식."""
+        """A SHA-256 hex digest."""
         data = {"test": "data"}
         hash_value = compute_hash(data)
         assert len(hash_value) == 64  # SHA-256 hex
@@ -66,10 +67,10 @@ class TestComputeHash:
 
 
 class TestHashChainManager:
-    """HashChainManager 테스트."""
+    """HashChainManager."""
 
     def test_add_integrity_basic(self):
-        """기본 무결성 정보 추가."""
+        """Integrity information is added."""
         manager = HashChainManager()
         entry = {"event": "test", "data": "value"}
 
@@ -82,7 +83,7 @@ class TestHashChainManager:
         assert "timestamp" in result["integrity"]
 
     def test_add_integrity_chain(self):
-        """해시 체인 연결."""
+        """Entries are chained."""
         manager = HashChainManager()
 
         entry1 = manager.add_integrity({"event": "first"})
@@ -95,7 +96,7 @@ class TestHashChainManager:
         )
 
     def test_add_integrity_multiple_entries(self):
-        """다중 엔트리 체인."""
+        """A chain of several entries."""
         manager = HashChainManager()
         entries = []
 
@@ -103,11 +104,11 @@ class TestHashChainManager:
             entry = manager.add_integrity({"event": f"event_{i}"})
             entries.append(entry)
 
-        # 모든 시퀀스 확인
+        # Every sequence
         for i, entry in enumerate(entries):
             assert entry["integrity"]["sequence"] == i + 1
 
-        # 체인 연결 확인
+        # Every link
         for i in range(1, len(entries)):
             assert (
                 entries[i]["integrity"]["previous_hash"]
@@ -115,7 +116,7 @@ class TestHashChainManager:
             )
 
     def test_get_state(self):
-        """상태 조회."""
+        """State query."""
         manager = HashChainManager()
         manager.add_integrity({"event": "test"})
 
@@ -125,7 +126,7 @@ class TestHashChainManager:
         assert "previous_hash" in state
 
     def test_reset(self):
-        """상태 리셋."""
+        """State reset."""
         manager = HashChainManager()
         manager.add_integrity({"event": "test"})
         manager.reset()
@@ -154,10 +155,10 @@ class TestHashChainManager:
 
 
 class TestHashChainVerifier:
-    """HashChainVerifier 테스트."""
+    """HashChainVerifier."""
 
     def _create_valid_chain(self, count: int = 5) -> list[dict[str, Any]]:
-        """유효한 해시 체인 생성."""
+        """Build a valid hash chain."""
         manager = HashChainManager()
         return [
             manager.add_integrity({"event": f"event_{i}", "data": f"data_{i}"})
@@ -165,7 +166,7 @@ class TestHashChainVerifier:
         ]
 
     def test_verify_chain_valid(self):
-        """유효한 체인 검증."""
+        """A valid chain verifies."""
         entries = self._create_valid_chain(5)
         verifier = HashChainVerifier()
 
@@ -175,7 +176,7 @@ class TestHashChainVerifier:
         assert error is None
 
     def test_verify_chain_empty(self):
-        """빈 체인 검증."""
+        """An empty chain verifies."""
         verifier = HashChainVerifier()
         is_valid, error = verifier.verify_chain([])
 
@@ -183,9 +184,9 @@ class TestHashChainVerifier:
         assert error is None
 
     def test_verify_chain_modified_entry(self):
-        """변조된 엔트리 감지."""
+        """A modified entry is detected."""
         entries = self._create_valid_chain(5)
-        # 중간 엔트리 변조
+        # Tamper with a middle entry
         entries[2]["data"] = "TAMPERED"
 
         verifier = HashChainVerifier()
@@ -195,21 +196,21 @@ class TestHashChainVerifier:
         assert "hash mismatch" in error.lower()
 
     def test_verify_chain_missing_entry(self):
-        """누락된 엔트리 감지."""
+        """A removed entry is detected."""
         entries = self._create_valid_chain(5)
-        # 중간 엔트리 삭제
+        # Remove a middle entry
         del entries[2]
 
         verifier = HashChainVerifier()
         is_valid, error = verifier.verify_chain(entries)
 
         assert is_valid is False
-        assert "missing" in error.lower() or "expected sequence" in error.lower()
+        assert "missing" in error.lower()
 
     def test_verify_chain_broken_link(self):
-        """끊어진 체인 감지."""
+        """A broken link is detected."""
         entries = self._create_valid_chain(5)
-        # previous_hash 변조
+        # Rewrite a previous_hash
         entries[3]["integrity"]["previous_hash"] = "FAKE_HASH"
 
         verifier = HashChainVerifier()
@@ -219,138 +220,155 @@ class TestHashChainVerifier:
         assert "broken" in error.lower() or "mismatch" in error.lower()
 
     def test_find_tampering_all_issues(self):
-        """모든 문제 찾기."""
+        """Every issue is found."""
         entries = self._create_valid_chain(10)
 
-        # 여러 문제 생성
-        entries[2]["data"] = "TAMPERED"  # 변조
-        entries[5]["integrity"]["previous_hash"] = "FAKE"  # 체인 끊김
-        del entries[7]  # 삭제 (시퀀스 8)
+        # Several kinds of damage
+        entries[2]["data"] = "TAMPERED"  # modified
+        entries[5]["integrity"]["previous_hash"] = "FAKE"  # link rewritten
+        del entries[7]  # removed (sequence 8)
 
         verifier = HashChainVerifier()
         issues = verifier.find_tampering(entries)
 
-        assert len(issues) >= 2  # 최소 2개 이상의 문제
-        issue_types = [i["type"] for i in issues]
-        assert "entry_modified" in issue_types or "chain_broken" in issue_types
+        issue_types = {(i["type"], i["sequence"]) for i in issues}
+        assert ("entry_modified", 3) in issue_types
+        assert ("chain_broken", 6) in issue_types
+        assert ("missing_entry", 8) in issue_types
+
+
+def _write_ledger(path: Path, entries: list[dict[str, Any]]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        for entry in entries:
+            f.write(json.dumps(entry) + "\n")
+    return path
 
 
 class TestAuditIntegrityVerifier:
-    """AuditIntegrityVerifier 테스트."""
+    """AuditIntegrityVerifier: every ledger file of one chain is one trail."""
 
-    def _create_valid_audit_file(
-        self, tmpdir: str, filename: str = "audit.jsonl", count: int = 5
-    ) -> Path:
-        """유효한 감사 로그 파일 생성."""
+    def _chain(self, count: int) -> list[dict[str, Any]]:
         manager = HashChainManager()
-        file_path = Path(tmpdir) / filename
+        return [manager.add_integrity({"event": f"event_{i}"}) for i in range(count)]
 
-        with open(file_path, "w") as f:
-            for i in range(count):
-                entry = manager.add_integrity({"event": f"event_{i}"})
-                f.write(json.dumps(entry) + "\n")
-
-        return file_path
-
-    def test_verify_file_valid(self):
-        """유효한 파일 검증."""
+    def test_verify_paths_valid(self):
+        """One untouched ledger file verifies."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            file_path = self._create_valid_audit_file(tmpdir)
+            _write_ledger(Path(tmpdir) / "audit_2026-09-28.jsonl", self._chain(5))
+
+            summary = AuditIntegrityVerifier().verify_paths([Path(tmpdir)])
+
+            assert summary.is_valid is True
+            assert summary.total_trails == 1
+            assert summary.total_entries == 5
+            assert summary.total_issues == 0
+
+    def test_verify_paths_reports_a_modified_entry_with_its_file(self):
+        """A tampered entry is reported with its sequence, file and line."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            entries = self._chain(5)
+            entries[2]["event"] = "TAMPERED"
+            ledger = _write_ledger(Path(tmpdir) / "audit_2026-09-28.jsonl", entries)
+
+            summary = AuditIntegrityVerifier().verify_paths([Path(tmpdir)])
+
+            assert summary.is_valid is False
+            issue = summary.results[0].issues[0]
+            assert (issue["type"], issue["sequence"]) == ("entry_modified", 3)
+            assert (issue["file"], issue["line"]) == (str(ledger), 3)
+
+    def test_days_of_one_chain_verify_as_one_trail(self):
+        """A chain continued across daily files verifies intact."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            entries = self._chain(6)
+            _write_ledger(Path(tmpdir) / "audit_2026-09-28.jsonl", entries[:2])
+            _write_ledger(Path(tmpdir) / "audit_2026-09-29.jsonl", entries[2:4])
+            _write_ledger(Path(tmpdir) / "audit_2026-09-30.jsonl", entries[4:])
+
+            summary = AuditIntegrityVerifier().verify_paths([Path(tmpdir)])
+
+            assert summary.is_valid is True
+            assert summary.total_trails == 1
+            assert summary.results[0].first_sequence == 1
+            assert summary.results[0].last_sequence == 6
+            assert len(summary.results[0].files) == 3
+
+    def test_recursive_merges_sub_directories(self):
+        """With --recursive, a sub-directory's files join the same trail."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            entries = self._chain(5)
+            _write_ledger(Path(tmpdir) / "audit_2026-09-28.jsonl", entries[:2])
+            _write_ledger(
+                Path(tmpdir) / "subdir" / "audit_2026-09-29.jsonl", entries[2:]
+            )
             verifier = AuditIntegrityVerifier()
 
-            result = verifier.verify_file(file_path)
+            flat = verifier.verify_paths([Path(tmpdir)], recursive=False)
+            recursive = verifier.verify_paths([Path(tmpdir)], recursive=True)
 
-            assert result.is_valid is True
-            assert result.total_entries == 5
-            assert len(result.issues) == 0
+            assert flat.total_entries == 2
+            assert recursive.total_entries == 5
+            assert recursive.is_valid is True
 
-    def test_verify_file_not_found(self):
-        """존재하지 않는 파일."""
-        verifier = AuditIntegrityVerifier()
-        result = verifier.verify_file(Path("/nonexistent/file.jsonl"))
-
-        assert result.is_valid is False
-        assert "not found" in result.error.lower()
-
-    def test_verify_file_tampered(self):
-        """변조된 파일 검증."""
+    def test_pattern_selects_custom_named_files(self):
+        """--pattern replaces the ledger file-name shape."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            file_path = self._create_valid_audit_file(tmpdir, count=5)
-
-            # 파일 읽고 변조
-            with open(file_path) as f:
-                lines = f.readlines()
-
-            entry = json.loads(lines[2])
-            entry["data"] = "TAMPERED"
-            lines[2] = json.dumps(entry) + "\n"
-
-            with open(file_path, "w") as f:
-                f.writelines(lines)
-
-            verifier = AuditIntegrityVerifier()
-            result = verifier.verify_file(file_path)
-
-            assert result.is_valid is False
-            assert len(result.issues) > 0
-
-    def test_verify_directory(self):
-        """디렉토리 검증."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # 여러 파일 생성
-            self._create_valid_audit_file(tmpdir, "audit1.jsonl", 3)
-            self._create_valid_audit_file(tmpdir, "audit2.jsonl", 5)
-            self._create_valid_audit_file(tmpdir, "audit3.jsonl", 2)
-
-            verifier = AuditIntegrityVerifier()
-            summary = verifier.verify_directory(Path(tmpdir))
-
-            assert summary.total_files == 3
-            assert summary.valid_files == 3
-            assert summary.invalid_files == 0
-            assert summary.total_entries == 10
-
-    def test_verify_directory_recursive(self):
-        """재귀 디렉토리 검증."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # 하위 디렉토리 생성
-            subdir = Path(tmpdir) / "subdir"
-            subdir.mkdir()
-
-            self._create_valid_audit_file(tmpdir, "audit1.jsonl", 2)
-            self._create_valid_audit_file(str(subdir), "audit2.jsonl", 3)
-
-            verifier = AuditIntegrityVerifier()
-
-            # 비재귀
-            summary_flat = verifier.verify_directory(Path(tmpdir), recursive=False)
-            assert summary_flat.total_files == 1
-
-            # 재귀
-            summary_recursive = verifier.verify_directory(Path(tmpdir), recursive=True)
-            assert summary_recursive.total_files == 2
-
-    def test_verify_directory_with_pattern(self):
-        """패턴 매칭 검증."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            self._create_valid_audit_file(tmpdir, "audit1.jsonl", 2)
-            self._create_valid_audit_file(tmpdir, "audit2.jsonl", 2)
-            # 다른 확장자 파일
+            entries = self._chain(4)
+            _write_ledger(Path(tmpdir) / "ledger_1.ndjson", entries[:2])
+            _write_ledger(Path(tmpdir) / "ledger_2.ndjson", entries[2:])
             (Path(tmpdir) / "other.txt").write_text("not audit")
-
             verifier = AuditIntegrityVerifier()
-            summary = verifier.verify_directory(Path(tmpdir), pattern="*.jsonl")
 
-            assert summary.total_files == 2
+            by_shape = verifier.verify_paths([Path(tmpdir)])
+            by_pattern = verifier.verify_paths([Path(tmpdir)], pattern="*.ndjson")
+
+            assert by_shape.error is not None
+            assert by_pattern.is_valid is True
+            assert by_pattern.total_entries == 4
+
+    def test_chain_state_files_are_never_read(self):
+        """The state, lock and temp files beside a ledger are not selected."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _write_ledger(Path(tmpdir) / "audit_2026-09-28.jsonl", self._chain(3))
+            (Path(tmpdir) / ".hash_chain_state.json").write_text(
+                json.dumps({"sequence": 3, "previous_hash": "x"}, indent=2)
+            )
+            (Path(tmpdir) / ".hash_chain_state.lock").write_text("")
+
+            summary = AuditIntegrityVerifier().verify_paths([Path(tmpdir)], pattern="*")
+
+            assert summary.is_valid is True
+
+    def test_no_ledger_file_is_not_intact(self):
+        """A directory holding no ledger file verifies nothing."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            summary = AuditIntegrityVerifier().verify_paths([Path(tmpdir)])
+
+            assert summary.is_valid is False
+            assert "no audit ledger files found" in summary.error
+
+    def test_a_missing_path_is_not_verified(self):
+        """A path that does not exist stops the run."""
+        assert (
+            _verify_path(
+                AuditIntegrityVerifier(),
+                [Path("/nonexistent/audit")],
+                wal_mode=False,
+                recursive=False,
+                pattern=None,
+            )
+            is None
+        )
 
 
 class TestWALVerification:
-    """WAL 검증 테스트."""
+    """WAL verification."""
 
     def _create_valid_wal_file(
         self, tmpdir: str, filename: str = "test.wal", count: int = 5
     ) -> Path:
-        """유효한 WAL 파일 생성."""
+        """Create a valid WAL file."""
         file_path = Path(tmpdir) / filename
 
         with open(file_path, "wb") as f:
@@ -375,7 +393,7 @@ class TestWALVerification:
         return file_path
 
     def test_verify_wal_valid(self):
-        """유효한 WAL 검증."""
+        """A valid WAL verifies."""
         with tempfile.TemporaryDirectory() as tmpdir:
             wal_file = self._create_valid_wal_file(tmpdir, count=5)
             verifier = AuditIntegrityVerifier()
@@ -386,14 +404,14 @@ class TestWALVerification:
             assert result.total_entries == 5
 
     def test_verify_wal_corrupted_checksum(self):
-        """체크섬 손상된 WAL 검증."""
+        """A WAL with a damaged checksum fails."""
         with tempfile.TemporaryDirectory() as tmpdir:
             wal_file = self._create_valid_wal_file(tmpdir, count=3)
 
-            # 체크섬 손상
+            # Damage the checksum
             with open(wal_file, "r+b") as f:
-                f.seek(4)  # checksum 위치
-                f.write(b"BADCHECK")  # 잘못된 체크섬
+                f.seek(4)  # checksum position
+                f.write(b"BADCHECK")  # wrong checksum
 
             verifier = AuditIntegrityVerifier()
             result = verifier._verify_wal_file(wal_file)
@@ -402,7 +420,7 @@ class TestWALVerification:
             assert any(i["type"] == "checksum_mismatch" for i in result.issues)
 
     def test_verify_wal_directory(self):
-        """WAL 디렉토리 검증."""
+        """A WAL directory verifies."""
         with tempfile.TemporaryDirectory() as tmpdir:
             self._create_valid_wal_file(tmpdir, "wal_001.wal", 3)
             self._create_valid_wal_file(tmpdir, "wal_002.wal", 5)
@@ -415,42 +433,42 @@ class TestWALVerification:
 
 
 class TestOutputFormats:
-    """출력 형식 테스트."""
+    """Output formats."""
 
     def _create_test_summary(self) -> VerificationSummary:
-        """테스트용 요약 생성."""
+        """A summary of one intact trail and one with issues."""
         return VerificationSummary(
-            total_files=3,
-            valid_files=2,
-            invalid_files=1,
-            error_files=0,
-            total_entries=100,
-            total_issues=2,
+            paths=["/var/log/audit"],
             results=[
                 VerificationResult(
-                    file_path="/var/log/audit1.jsonl",
+                    name="default",
                     is_valid=True,
-                    total_entries=50,
+                    total_entries=80,
+                    first_sequence=1,
+                    last_sequence=80,
+                    files=["/var/log/audit/audit_2026-09-28.jsonl"],
                 ),
                 VerificationResult(
-                    file_path="/var/log/audit2.jsonl",
-                    is_valid=True,
-                    total_entries=30,
-                ),
-                VerificationResult(
-                    file_path="/var/log/audit3.jsonl",
+                    name="worker",
                     is_valid=False,
                     total_entries=20,
+                    first_sequence=1,
+                    last_sequence=20,
+                    files=["/var/log/audit/audit_2026-09-28_worker.jsonl"],
                     issues=[
                         {
                             "type": "entry_modified",
                             "sequence": 5,
-                            "message": "Hash mismatch",
+                            "file": "/var/log/audit/audit_2026-09-28_worker.jsonl",
+                            "line": 5,
+                            "message": "Entry 5 has been modified: hash mismatch",
                         },
                         {
                             "type": "chain_broken",
                             "sequence": 10,
-                            "message": "Previous hash mismatch",
+                            "file": "/var/log/audit/audit_2026-09-28_worker.jsonl",
+                            "line": 10,
+                            "message": "Chain broken at entry 10",
                         },
                     ],
                 ),
@@ -458,67 +476,66 @@ class TestOutputFormats:
         )
 
     def test_format_text_output(self):
-        """텍스트 형식 출력."""
+        """Text output: one block per trail, ASCII status markers."""
         summary = self._create_test_summary()
         output = format_text_output(summary)
 
         assert "Audit Log Integrity Verification Report" in output
-        assert "Total Files:   3" in output
-        assert "Valid:         2" in output
-        assert "Invalid:       1" in output
-        assert "Total Entries: 100" in output
+        assert "Trail: default  [OK]" in output
+        assert "Trail: worker  [FAIL]" in output
+        assert "Entries: 80 (sequences 1-80)" in output
+        assert output.isascii()
 
     def test_format_text_output_verbose(self):
-        """상세 텍스트 출력."""
+        """Verbose text output lists every file and issue."""
         summary = self._create_test_summary()
         output = format_text_output(summary, verbose=True)
 
-        assert "audit1.jsonl" in output
-        assert "audit2.jsonl" in output
-        assert "audit3.jsonl" in output
-        assert "Hash mismatch" in output
+        assert "audit_2026-09-28.jsonl" in output
+        assert "audit_2026-09-28_worker.jsonl:5" in output
+        assert "hash mismatch" in output
 
     def test_format_json_output(self):
-        """JSON 형식 출력."""
+        """JSON output carries each trail's span, issues and notes."""
         summary = self._create_test_summary()
         output = format_json_output(summary)
 
         data = json.loads(output)
-        assert data["summary"]["total_files"] == 3
-        assert data["summary"]["valid_files"] == 2
+        assert data["summary"]["trails"] == 2
+        assert data["summary"]["valid_trails"] == 1
         assert data["summary"]["is_valid"] is False
-        assert len(data["results"]) == 3
+        worker = data["trails"][1]
+        assert worker["partition"] == "worker"
+        assert (worker["first_sequence"], worker["last_sequence"]) == (1, 20)
+        assert worker["notes"] == []
 
     def test_format_summary_output(self):
-        """요약 형식 출력."""
+        """Summary output: one line per trail, then the total."""
         summary = self._create_test_summary()
         output = format_summary_output(summary)
 
-        assert "FAIL" in output
-        assert "2/3 valid" in output
-        assert "100 entries" in output
-        assert "2 issues" in output
+        lines = output.splitlines()
+        assert lines[0] == "PASS default: 80 entries, 0 issues"
+        assert lines[1] == "FAIL worker: 20 entries, 2 issues"
+        assert lines[2].startswith("FAIL: 1/2 trails valid, 100 entries, 2 issues")
 
     def test_format_summary_output_pass(self):
-        """통과 요약 출력."""
+        """An intact summary passes."""
         summary = VerificationSummary(
-            total_files=2,
-            valid_files=2,
-            invalid_files=0,
-            error_files=0,
-            total_entries=50,
-            total_issues=0,
+            results=[
+                VerificationResult(name="default", is_valid=True, total_entries=50)
+            ]
         )
         output = format_summary_output(summary)
 
-        assert "PASS" in output
+        assert output.splitlines()[-1].startswith("PASS")
 
 
 class TestVerifyAuditLogIntegrity:
-    """verify_audit_log_integrity 함수 테스트."""
+    """verify_audit_log_integrity."""
 
     def test_verify_valid_file(self):
-        """유효한 파일 검증."""
+        """A valid file verifies."""
         with tempfile.TemporaryDirectory() as tmpdir:
             file_path = Path(tmpdir) / "audit.jsonl"
             manager = HashChainManager()
@@ -534,14 +551,14 @@ class TestVerifyAuditLogIntegrity:
             assert issues == []
 
     def test_verify_nonexistent_file(self):
-        """존재하지 않는 파일."""
+        """A file that does not exist has nothing to verify."""
         is_valid, issues = verify_audit_log_integrity(Path("/nonexistent/file.jsonl"))
 
-        assert is_valid is True  # 파일 없으면 valid로 처리
+        assert is_valid is True
         assert issues == []
 
     def test_verify_invalid_json(self):
-        """잘못된 JSON 파일."""
+        """A line that does not parse is an unreadable row."""
         with tempfile.TemporaryDirectory() as tmpdir:
             file_path = Path(tmpdir) / "audit.jsonl"
             file_path.write_text("not valid json\n")
@@ -550,14 +567,15 @@ class TestVerifyAuditLogIntegrity:
 
             assert is_valid is False
             assert len(issues) > 0
-            assert issues[0]["type"] == "read_error"
+            assert issues[0]["type"] == "unreadable_row"
+            assert issues[0]["line"] == 1
 
 
 class TestEdgeCases:
-    """엣지 케이스 테스트."""
+    """Edge cases."""
 
     def test_single_entry_chain(self):
-        """단일 엔트리 체인."""
+        """A single-entry chain."""
         manager = HashChainManager()
         entries = [manager.add_integrity({"event": "single"})]
 
@@ -567,7 +585,7 @@ class TestEdgeCases:
         assert is_valid is True
 
     def test_large_chain(self):
-        """대용량 체인."""
+        """A large chain."""
         manager = HashChainManager()
         entries = [
             manager.add_integrity({"event": f"event_{i}", "data": "x" * 100})
@@ -580,11 +598,11 @@ class TestEdgeCases:
         assert is_valid is True
 
     def test_unicode_data(self):
-        """유니코드 데이터."""
+        """Non-ASCII data."""
         manager = HashChainManager()
         entries = [
-            manager.add_integrity({"event": "한글 테스트", "emoji": "🔒🔐"}),
-            manager.add_integrity({"event": "日本語テスト", "data": "中文测试"}),
+            manager.add_integrity({"event": "한글 test", "emoji": "\U0001f512"}),
+            manager.add_integrity({"event": "日本語", "data": "中文"}),
         ]
 
         verifier = HashChainVerifier()
@@ -593,7 +611,7 @@ class TestEdgeCases:
         assert is_valid is True
 
     def test_nested_data(self):
-        """중첩 데이터 구조."""
+        """Nested data structures."""
         manager = HashChainManager()
         entries = [
             manager.add_integrity(

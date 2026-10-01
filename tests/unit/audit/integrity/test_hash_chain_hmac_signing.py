@@ -349,8 +349,9 @@ class TestVerifierConstantTimeCompare:
             is_valid, _ = verifier.verify_chain(entries)
 
         assert is_valid is True
-        # One MAC compare per entry — the equality test never used a plain !=.
-        assert spy.call_count == len(entries)
+        # One fingerprint compare and one link compare per entry — neither
+        # equality test ever uses a plain !=.
+        assert spy.call_count == 2 * len(entries)
 
     def test_find_tampering_compares_via_compare_digest(self, monkeypatch):
         from unittest.mock import patch
@@ -367,7 +368,7 @@ class TestVerifierConstantTimeCompare:
             issues = verifier.find_tampering(entries)
 
         assert issues == []
-        assert spy.call_count == len(entries)
+        assert spy.call_count == 2 * len(entries)
 
 
 # =============================================================================

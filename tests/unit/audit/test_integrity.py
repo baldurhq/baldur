@@ -143,8 +143,13 @@ class TestHashChainVerifier:
             # Should detect sequence gap or chain break
             assert error is not None
 
-    def test_verify_chain_detects_reordering(self):
-        """Test that reordered entries are detected."""
+    def test_verify_chain_links_by_sequence_not_list_order(self):
+        """Entries out of list order still verify; an edited sequence does not.
+
+        Writers append out of mint order and a fleet's files interleave, so
+        storage order is not chain order. The sequence itself is under the
+        hash, so moving an entry by editing its number is still detected.
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             state_file = Path(tmpdir) / "state.json"
             manager = HashChainManager(state_file)
@@ -158,9 +163,13 @@ class TestHashChainVerifier:
             entries[1], entries[2] = entries[2], entries[1]
 
             verifier = HashChainVerifier()
+            assert verifier.verify_chain(entries) == (True, None)
+
+            entries[1]["integrity"]["sequence"] = 9
             is_valid, error = verifier.verify_chain(entries)
 
             assert not is_valid
+            assert error is not None
 
     def test_find_tampering(self):
         """Test find_tampering method."""

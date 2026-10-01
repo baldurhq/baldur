@@ -81,7 +81,9 @@ from baldur.audit.integrity.sync import (
 
 # Verifier
 from baldur.audit.integrity.verifier import (
+    ChainStart,
     HashChainVerifier,
+    TrailReport,
     verify_audit_log_integrity,
 )
 
@@ -93,7 +95,9 @@ __all__ = [
     # Protocol
     "HashChainManagerProtocol",
     # Verifier
+    "ChainStart",
     "HashChainVerifier",
+    "TrailReport",
     "verify_audit_log_integrity",
     # Ledger tail
     "LedgerTail",

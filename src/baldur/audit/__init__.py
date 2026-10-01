@@ -61,7 +61,7 @@ from baldur.audit.trace import (
 )
 
 # =============================================================================
-# LAZY IMPORTS - 106 symbols
+# LAZY IMPORTS - 108 symbols
 # =============================================================================
 _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     # logger (additional)
@@ -78,7 +78,9 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "TraceContext": ("baldur.audit.trace", "TraceContext"),
     "trace_id_middleware": ("baldur.audit.trace", "trace_id_middleware"),
     # integrity (additional)
+    "ChainStart": ("baldur.audit.integrity", "ChainStart"),
     "HashChainVerifier": ("baldur.audit.integrity", "HashChainVerifier"),
+    "TrailReport": ("baldur.audit.integrity", "TrailReport"),
     "verify_audit_log_integrity": (
         "baldur.audit.integrity",
         "verify_audit_log_integrity",
@@ -327,7 +329,9 @@ if TYPE_CHECKING:
         ExportTarget,
     )
     from baldur.audit.integrity import (
+        ChainStart,
         HashChainVerifier,
+        TrailReport,
         verify_audit_log_integrity,
     )
     from baldur.audit.logger import (
@@ -410,7 +414,9 @@ __all__ = [
     "extract_ip_from_request",
     # Integrity
     "HashChainManager",
+    "ChainStart",
     "HashChainVerifier",
+    "TrailReport",
     "verify_audit_log_integrity",
     # Trace ID
     "generate_trace_id",
