@@ -347,12 +347,13 @@ class TestPassDeadlineContract:
 # =============================================================================
 
 
-def _result(*, capped=False, exhausted=(), total=0, cursors=None):
+def _result(*, capped=False, exhausted=(), total=0, cursors=None, cut=None):
     return BatchReplayResult(
         total=total,
         capped=capped,
         scan_exhausted_lanes=list(exhausted),
         lane_cursors=dict(cursors or {}),
+        deadline_cut_dlq_id=cut,
     )
 
 
@@ -391,6 +392,14 @@ class TestContinuationPredicateBehavior:
         """Every selected entry leaves PENDING before any skip branch runs, so
         none of them is selectable again."""
         result = _result(capped=True, total=3, cursors={"TYPE_A|": "1.0|a"})
+
+        assert _should_continue_chain(result, {"TYPE_A|": "1.0|a"}) is True
+
+    def test_a_deadline_cut_counts_as_progress_with_nothing_completed(self):
+        """A pass whose first replay the deadline cut completed nothing and left
+        every cursor where it was — but the cut used one of that entry's replay
+        attempts, so the chain moves on toward the entry's cap."""
+        result = _result(capped=True, total=0, cursors={"TYPE_A|": "1.0|a"}, cut="7")
 
         assert _should_continue_chain(result, {"TYPE_A|": "1.0|a"}) is True
 
@@ -507,6 +516,27 @@ class TestCircuitCloseChainBehavior:
             scan_exhausted_lanes=["TYPE_A|"],
             lane_cursors={},
         )
+
+    def test_a_pass_whose_first_replay_was_cut_queues_the_replay_of_it(self):
+        """The cut entry stays PENDING behind unchanged cursors; the successor
+        is queued with those cursors, so it selects the cut entry first."""
+        chain = _Chain(
+            _result(capped=True, total=0, cursors={"TYPE_A|": "1.0|a"}, cut="7")
+        )
+
+        result = chain.run(
+            continuation=0, max_continuations=10, cursors={"TYPE_A|": "1.0|a"}
+        )
+
+        assert result["continued"] is True
+        chain.dispatched.delay.assert_called_once_with(
+            service_name=SERVICE,
+            max_items=50,
+            max_continuations=10,
+            continuation=1,
+            cursors={"TYPE_A|": "1.0|a"},
+        )
+        chain.service.emit_circuit_close_chain_stopped.assert_not_called()
 
     def test_a_finished_drain_stops_without_the_blocked_signal(self):
         """Nothing was reachable, so there is nothing to act on — the signal

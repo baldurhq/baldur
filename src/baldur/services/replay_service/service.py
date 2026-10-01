@@ -1667,12 +1667,19 @@ class ReplayService(EventEmitterMixin):
         entry so the next pass re-selects the tail instead of stepping over it.
         ``total`` follows the same correction: the completion event and the
         daily report must not count entries the pass never touched.
+
+        A replay the deadline cut (``cut_dlq_id``) is part of that tail, and it
+        is recorded on the result: it used a replay attempt, so the pass moved
+        the backlog even when it completed nothing — the chain that carries the
+        sweep would otherwise read a cut first replay as a pass that got nowhere
+        and stop before the continuation that replays it.
         """
         batch_result.capped = True
         batch_result.total = processed
         batch_result.lane_cursors = self._roll_back_lane_cursors(
             selection, processed, carried_cursors or {}
         )
+        batch_result.deadline_cut_dlq_id = cut_dlq_id
         logger.info(
             "replay_service.circuit_close_deadline_reached",
             service_name=service_name,
@@ -1692,6 +1699,13 @@ class ReplayService(EventEmitterMixin):
         SDK as the call's timeout. Without it, one slow replay ran the whole
         pass into the task's soft time limit, where it was killed before
         queueing the rest of the backlog.
+
+        The scope ends at the pass deadline itself. A request-scoped deadline
+        keeps a network-latency buffer short of the time it is given, which is
+        handed back here: a replay that ran out of its time would otherwise
+        return just before the pass deadline, read as an ordinary failure, and
+        be escalated to review instead of staying in the backlog as a cut. The
+        pass deadline already keeps its own margin to the task's time limit.
         """
         if deadline is None:
             return self._execute_replay(
@@ -1699,9 +1713,13 @@ class ReplayService(EventEmitterMixin):
                 replay_type="conditional",
                 trigger=ResolutionTrigger.AUTO_REPLAY_CIRCUIT_CLOSE,
             )
-        from baldur.scaling.deadline_context import deadline_scope
+        from baldur.scaling.deadline_context import (
+            DEFAULT_NETWORK_LATENCY_BUFFER_MS,
+            deadline_scope,
+        )
 
-        with deadline_scope(max(0.0, deadline - time.monotonic()) * 1000.0):
+        remaining_ms = max(0.0, deadline - time.monotonic()) * 1000.0
+        with deadline_scope(remaining_ms + DEFAULT_NETWORK_LATENCY_BUFFER_MS):
             return self._execute_replay(
                 dlq_id,
                 replay_type="conditional",

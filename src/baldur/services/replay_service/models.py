@@ -102,6 +102,13 @@ class BatchReplayResult:
     # behind a prefix of another failure type", which an empty result alone
     # cannot say.
     scan_exhausted_lanes: list[str] = field(default_factory=list)
+    # The entry an on-recovery pass's deadline cut mid-replay, if one was. It is
+    # neither counted nor processed (it stays PENDING ahead of the returned
+    # cursors, to be replayed first by the next pass), but the pass did move
+    # the backlog: the cut used one of that entry's replay attempts. A pass
+    # whose first replay is cut completes nothing and leaves every cursor
+    # where it was, so this is the only sign that it got anywhere.
+    deadline_cut_dlq_id: str | None = None
     # Domain-priority-based replay info
     priority_used: bool = False
     domains_processed: list[str] | None = None

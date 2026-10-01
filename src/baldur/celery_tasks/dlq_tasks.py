@@ -147,7 +147,11 @@ def _chain_progress(result: Any, carried_cursors: dict) -> tuple[bool, bool]:
     so — continuing would re-dispatch forever over the same page.
     """
     reachable = bool(result.capped) or bool(getattr(result, "scan_exhausted", False))
-    advanced = result.total > 0 or dict(result.lane_cursors) != dict(carried_cursors)
+    advanced = (
+        result.total > 0
+        or getattr(result, "deadline_cut_dlq_id", None) is not None
+        or dict(result.lane_cursors) != dict(carried_cursors)
+    )
     return reachable, advanced
 
 
@@ -161,7 +165,11 @@ def _should_continue_chain(result: Any, carried_cursors: dict) -> bool:
     Progress is the guard against a chain that re-dispatches forever without
     moving: either the pass acquired entries (every selected entry leaves
     PENDING before any skip branch runs, so none of them is selectable again),
-    or a lane's cursor advanced past members it examined and rejected.
+    or a lane's cursor advanced past members it examined and rejected, or the
+    deadline cut a replay. A cut replay is not counted and its lane rolls back
+    to just before it, but it used one of that entry's replay attempts — so a
+    chain whose replays all outlast a pass still walks each entry to its cap
+    instead of stopping at the first one.
     """
     reachable, advanced = _chain_progress(result, carried_cursors)
     return reachable and advanced
