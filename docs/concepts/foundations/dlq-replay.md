@@ -53,7 +53,10 @@ domain form: lowercased, with a character such as `-` turned into `_`, so a `Pay
 filed as `payment_api`. A replay handler is filed the same way, so one declared as `Payment-API`
 replays those entries. The one exception is a
 `RetryPolicyConfig` that names its own `domain=`, whose retry stage files the failures it ends
-under that domain. A call that never ran because
+under that domain. A name with no domain form of its own, such as one that starts with a digit
+(`3ds-auth`), is filed under the shared catch-all `OTHER_DOMAIN` (logged as a WARNING
+`domain.input_rejected`), where a handler declared under that name does not find it. A call that
+never ran because
 its circuit breaker was already open is captured as well: the breaker rejects it in microseconds,
 but the work that call carried is parked under the breaker's own name with the failure type
 `CIRCUIT_BREAKER_OPEN`, so an outage's fast-rejected calls are recoverable alongside the ones that
@@ -89,10 +92,12 @@ nothing is logged. An async call cancelled from outside, by a task cancel or by 
 through Baldur untouched. Bound the call with Baldur's `timeout=` when its expiry should be parked.
 Capturing a failure is designed to
 stay off the request's critical path: by default the write to the store happens in the background,
-so the call that already failed does not wait for storage; it pays only for masking the entry and
-handing it over. If the queue's storage
+so the call that already failed does not wait for storage; it pays only for masking and
+size-capping the entry and handing it over. If the queue's storage
 backend is itself unreachable at capture time, the entry falls back to a local on-disk record (and,
-as a last resort, to the process's error stream) instead of being silently lost. Each entry then
+as a last resort, to the process's error stream) instead of being silently lost. Nothing moves such
+a record back into the queue once the store returns; recovering it from that host's disk is a
+manual step. Each entry then
 moves through a lifecycle you can watch in the Web Console DLQ panel or query over the REST API:
 
 ```mermaid
@@ -123,7 +128,7 @@ You have three ways to replay the queued work:
   after several clean batches, staying between a floor and a ceiling you set. With PRO active, batch
   replay is also a one-click Web Console action and a REST endpoint; both select pending entries
   rather than a failure type, 50 per call by default, and the REST endpoint can narrow them to one
-  domain. Either way the batch
+  domain, named in its stored form (`payment_api`; `Payment-API` selects nothing). Either way the batch
   runs its entries directly, one after another; PRO additionally ships a standalone replay queue
   with rate limiting and backpressure that your own code can pace replay work through.
 - **Automatic on recovery.** When a dependency's circuit breaker closes again after an outage, Baldur
@@ -162,8 +167,8 @@ force-redrive can never turn a poison-pill into an endless loop.
 
 When the queue reaches its size limit, the **overflow strategy** decides what gives:
 
-- `drop_oldest` evicts the oldest entries to make room for new failures (the default; the eviction
-  happens synchronously, inside the store call).
+- `drop_oldest` evicts the oldest entries to make room for new failures (the default; unless PRO is
+  active, the eviction happens synchronously, inside the store call).
 - `reject` refuses new entries so nothing already queued is displaced. On the defaults the
   per-domain limit is checked only on every tenth store while the queue as a whole is under 80% of
   its size limit, so until then a domain at its own limit still takes about nine of every ten new
@@ -203,8 +208,9 @@ shows the two ways to wire the hooks and how the budget fits gunicorn's own time
 
 With PRO active, two things change. The outbox gains an opt-in disk-durable mode, in which the
 background writer saves each entry it takes from the buffer to a local disk buffer before writing
-it to the store, so an entry already taken is kept on disk across a process crash; one still
-waiting in the in-memory buffer is not. And the Meta-Watchdog daemon actively probes the liveness
+it to the store, so an entry already taken is kept on disk across a process crash, though, as with
+the local fallback, nothing moves it back into the queue on restart; one still waiting in the
+in-memory buffer is not kept. And the Meta-Watchdog daemon actively probes the liveness
 of that background writer, so a stalled drain is detected rather than silently backing up.
 
 ### Trace continuity: from the original failure to its replay
@@ -272,7 +278,7 @@ To be replayable, an entry has to carry the work itself: capture records a snaps
 call's arguments — the request data a replay re-runs. Only arguments of simple types are
 snapshotted (numbers, strings, ids, dates and the like). A `dict`, list or object argument is left
 out, so a call that takes one carries that work only if you pass `context_from=` a function that
-builds the context, payload included. That snapshot is your domain data: order ids,
+returns the `PolicyContext` with that payload in its `extra["request_data"]`. That snapshot is your domain data: order ids,
 amounts, user ids. Sensitive-looking fields are masked by rule-based patterns, but no generic rule
 set can know which of *your* values are sensitive, so domain values survive masking by design.
 Persisting that data is therefore a decision Baldur leaves to you, made explicitly per call site,
@@ -487,9 +493,10 @@ operate-at-scale surface on top.
   off the capture path to a background water-level worker, the outbox gains its disk-durable mode
   and Meta-Watchdog probing of its drain worker's liveness, scheduled archive/purge retention ages
   old entries out, and synthetic test entries can be created for debugging and load tests. The
-  background eviction, the compressed summaries' aging and the archive/purge retention all run as
-  Celery Beat tasks: without Beat, a PRO queue past its size limit under `drop_oldest` or
-  `compress_oldest` is never trimmed.
+  background eviction, the compressed summaries' aging and the scheduled purge run only as Celery
+  Beat tasks from Baldur's schedule (`configure_baldur_celery(app)` installs it): without Beat and
+  a worker consuming the `maintenance` queue, a PRO queue past its size limit under `drop_oldest`
+  or `compress_oldest` is never trimmed.
 
 ## See also
 
