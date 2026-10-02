@@ -71,6 +71,23 @@ class TestDlqMaintenanceBeatScheduleContract:
         entry = schedule["cleanup-resolved-dlq-entries"]
         assert entry["task"] == "baldur.celery_tasks.cleanup_resolved_dlq_entries"
 
+    @pytest.mark.parametrize("tier", ["mock_oss_tier", "mock_pro_tier"])
+    def test_recover_parked_jobs_row_queues_one_tick_a_minute_on_dlq_processing(
+        self, request, tier
+    ):
+        """807 D6: the recovery tick runs where the replays run, every 60 s,
+        and a tick no worker took within two cadences is dropped."""
+        from baldur.celery_tasks.dlq_tasks import get_dlq_maintenance_beat_schedule
+
+        request.getfixturevalue(tier)
+        schedule = get_dlq_maintenance_beat_schedule()
+
+        assert schedule["recover-parked-jobs"] == {
+            "task": "baldur.celery_tasks.recover_parked_jobs",
+            "schedule": 60.0,
+            "options": {"queue": "dlq_processing", "expires": 120},
+        }
+
     def test_cleanup_resolved_has_days_old_kwarg(self, mock_pro_tier):
         """cleanup-resolved passes days_old=30 as kwargs."""
         from baldur.celery_tasks.dlq_tasks import get_dlq_maintenance_beat_schedule

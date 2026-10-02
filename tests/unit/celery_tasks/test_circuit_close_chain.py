@@ -26,6 +26,8 @@ from inside would meet its own predecessor's lock and end the drain silently.
 from __future__ import annotations
 
 import time
+import uuid
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, create_autospec, patch
 
@@ -33,19 +35,25 @@ import pytest
 from structlog.testing import capture_logs
 
 from baldur.adapters.cache.memory_adapter import InMemoryCacheAdapter
+from baldur.adapters.memory import InMemoryFailedOperationRepository
 from baldur.celery_tasks.dlq_tasks import (
+    _CHAIN_REQUEUE_SECONDS,
     _CIRCUIT_CLOSE_DEADLINE_MARGIN_SECONDS,
     _affirm_circuit_closed,
+    _operator_requeue_bound,
     _pass_deadline,
     _should_continue_chain,
     conditional_replay_on_circuit_close,
+    recover_parked_jobs,
 )
 from baldur.core.exceptions import DLQError
+from baldur.interfaces.governance import GovernanceChecker
 from baldur.interfaces.repositories import (
     CircuitBreakerStateData,
     FailedOperationData,
     FailedOperationRepository,
 )
+from baldur.models.governance import GovernanceCheckResult
 from baldur.services.circuit_breaker import CircuitBreakerService
 from baldur.services.circuit_breaker.exceptions import (
     UNREACHED_DEFAULT_STORE_REASON,
@@ -60,14 +68,19 @@ from baldur.services.replay_service.handlers import (
     register_replay_handler,
 )
 from baldur.services.replay_service.models import BatchReplayResult, ReplayResult
+from baldur.services.replay_service.recovery import RecoveryTickResult, TrialRecord
 from baldur.services.replay_service.service import (
     REASON_CIRCUIT_REOPENED,
     REASON_CONTINUATION_BOUND_REACHED,
+    REASON_INTEGRITY_BLOCKED,
     REASON_NO_REPLAY_HANDLER,
+    REASON_OPERATOR_HOLD,
     REASON_PASS_ERRORED,
     REASON_PASS_MADE_NO_PROGRESS,
 )
 from baldur.utils.domain_validation import FALLBACK_DOMAIN, resolve_stored_domain
+from baldur.utils.time import utc_now
+from tests.factories.replay_doubles import ScriptedReplayHandler
 
 SERVICE = "payment_api"
 # A name with no domain identity of its own: it projects onto the shared
@@ -89,8 +102,13 @@ def _row(service_name, state, **fields):
 
 
 def _rows(states):
-    """Breaker rows from ``{"service_name", "state"}`` shapes."""
-    return [_row(state["service_name"], state["state"]) for state in states]
+    """Breaker rows from ``{"service_name", "state"}`` shapes (or full rows)."""
+    return [
+        state
+        if isinstance(state, CircuitBreakerStateData)
+        else _row(state["service_name"], state["state"])
+        for state in states
+    ]
 
 
 def _cb_service(states, *, calls=None, repository=None):
@@ -395,7 +413,10 @@ class TestContinuationPredicateBehavior:
 class _Chain:
     """One eager task run with the service and the re-dispatch both captured."""
 
-    def __init__(self, result=None, error=None, states=None, service=None):
+    def __init__(
+        self, result=None, error=None, states=None, service=None, integrity=True
+    ):
+        self.integrity = integrity
         if service is not None:
             # A real service: the pass-start decision is the production one.
             self.service = service
@@ -424,8 +445,8 @@ class _Chain:
             ),
             patch(
                 "baldur.services.event_bus.integrity_gate.replay_integrity_verdict",
-                return_value=True,
-            ),
+                return_value=self.integrity,
+            ) as verdict,
             patch(
                 "baldur.adapters.celery.tasks.conditional_replay_on_circuit_close",
                 self.dispatched,
@@ -436,6 +457,7 @@ class _Chain:
                 kwargs=params, task_id="chain-test"
             )
         self.logs = logs
+        self.verdict = verdict
         return eager.get()
 
 
@@ -861,3 +883,451 @@ class _UnhashableDeclaringHandler(ReplayHandler):
 
     def replay(self, failed_op: FailedOperationData) -> ReplayResult:
         return ReplayResult.succeeded(failed_op.id, "done")
+
+
+# =============================================================================
+# 807 — a recovery chain's pauses, holds and stops
+# =============================================================================
+
+_LANE = "MAX_RETRIES_TIMEOUTERROR|payment_api"
+
+
+def _pinned(name, state, *, expires_in=timedelta(minutes=30)):
+    """A row under an operator's manual pin (a Block when OPEN)."""
+    return _row(
+        name,
+        state,
+        opened_at=utc_now() - timedelta(minutes=10) if state == "open" else None,
+        manually_controlled=True,
+        manual_override_expires_at=utc_now() + expires_in,
+    )
+
+
+def _refusal_ended(cursors=None):
+    """A pass its job's own breaker ended on the first replay it tried."""
+    result = _result(capped=True, total=0, cursors=cursors or {_LANE: "1.0|a"}, cut="7")
+    result.ended_by_breaker_refusal = True
+    return result
+
+
+class TestCircuitCloseChainRecoveryContract:
+    """The pause and the operator's re-queue bound, asserted literally."""
+
+    def test_chain_requeue_pause_is_thirty_seconds(self):
+        assert _CHAIN_REQUEUE_SECONDS == 30
+
+    def test_operator_requeue_bound_outlasts_the_default_lock_ttl(self):
+        """ceil(300 / 30) + 1: a holder that died lets its lock expire first."""
+        assert _operator_requeue_bound() == 11
+
+
+class TestCircuitCloseChainRecoveryBehavior:
+    """A refusal pauses the chain; an operator's chain waits; holds stop quietly."""
+
+    def test_refused_pass_countdown_queues_the_next_pass_after_the_pause(self):
+        chain = _Chain(_refusal_ended())
+
+        result = chain.run(continuation=2, cursors={_LANE: "1.0|a"})
+
+        assert result["continued"] is True
+        chain.dispatched.delay.assert_not_called()
+        chain.dispatched.apply_async.assert_called_once_with(
+            kwargs={
+                "service_name": SERVICE,
+                "max_items": 50,
+                "max_continuations": 10,
+                "continuation": 3,
+                "cursors": {_LANE: "1.0|a"},
+                **_CHAIN_DEFAULTS,
+            },
+            countdown=_CHAIN_REQUEUE_SECONDS,
+        )
+
+    @pytest.mark.parametrize(
+        "result",
+        [
+            _result(capped=True, total=0, cursors={_LANE: "1.0|a"}, cut="7"),
+            _result(capped=True, total=50, cursors={_LANE: "2.0|b"}),
+        ],
+        ids=["deadline_cut", "ordinary"],
+    )
+    def test_refused_pass_countdown_applies_only_to_a_refusal_ended_pass(self, result):
+        chain = _Chain(result)
+
+        chain.run(continuation=0, cursors={_LANE: "1.0|a"})
+
+        chain.dispatched.delay.assert_called_once()
+        chain.dispatched.apply_async.assert_not_called()
+
+    def test_refused_pass_countdown_keeps_a_refusal_window_below_the_bound(self):
+        """Refusals the shared row does not show (half-open slots held
+        elsewhere, a stale local copy) pause the chain instead of spending
+        its continuation budget back to back."""
+        # Given: every pass is ended by its job's own breaker; four passes in all.
+        chain = _Chain(_refusal_ended())
+        kwargs = {
+            "continuation": 0,
+            "max_continuations": 4,
+            "cursors": {_LANE: "1.0|a"},
+        }
+
+        # When: the passes run as the broker would hand them out, for 60 s.
+        elapsed, passes = 0.0, 0
+        while elapsed <= 60:
+            chain.dispatched.reset_mock()
+            chain.run(**kwargs)
+            passes += 1
+            queued = chain.dispatched.apply_async.call_args
+            assert queued is not None
+            kwargs = queued.kwargs["kwargs"]
+            elapsed += queued.kwargs["countdown"]
+
+        # Then: one pass per pause, and the bound never announced.
+        assert passes == 3
+        bound_stops = [
+            call
+            for call in chain.service.emit_circuit_close_chain_stopped.call_args_list
+            if call.kwargs["block_reason"] == REASON_CONTINUATION_BOUND_REACHED
+        ]
+        assert bound_stops == []
+
+    def test_operator_requested_requeue_waits_for_a_held_lock_after_the_pause(self):
+        chain = _Chain(BatchReplayResult(inflight_skipped=True))
+
+        result = chain.run(operator_requested=True)
+
+        assert result == {
+            "success": True,
+            "service_name": SERVICE,
+            "total": 0,
+            "inflight_skipped": True,
+            "requeued": True,
+        }
+        chain.dispatched.apply_async.assert_called_once_with(
+            kwargs={
+                "service_name": SERVICE,
+                "max_items": 50,
+                "max_continuations": 10,
+                **{**_CHAIN_DEFAULTS, "operator_requested": True},
+                "continuation": 0,
+                "cursors": None,
+                "requeue_attempt": 1,
+            },
+            countdown=_CHAIN_REQUEUE_SECONDS,
+        )
+
+    @pytest.mark.parametrize(
+        ("requeue_attempt", "requeued"),
+        [(_operator_requeue_bound() - 2, True), (_operator_requeue_bound() - 1, False)],
+        ids=["last_allowed_try", "bound_reached"],
+    )
+    def test_operator_requested_requeue_stops_at_its_bound(
+        self, requeue_attempt, requeued
+    ):
+        chain = _Chain(BatchReplayResult(inflight_skipped=True))
+
+        result = chain.run(operator_requested=True, requeue_attempt=requeue_attempt)
+
+        assert result["requeued"] is requeued
+        assert chain.dispatched.apply_async.called is requeued
+        exhausted = [
+            e
+            for e in chain.logs
+            if e["event"] == "dlq.circuit_recovery_operator_requeue_exhausted"
+        ]
+        assert len(exhausted) == (0 if requeued else 1)
+
+    def test_operator_requested_requeue_drains_after_the_running_chain_stops(self):
+        """The operator's close-with-replay that met a running automatic chain
+        still drains the backlog once that chain has released the lock."""
+        # Given: the first try meets the running chain's lock.
+        chain = _Chain()
+        chain.service.replay_on_circuit_close.side_effect = [
+            BatchReplayResult(inflight_skipped=True),
+            _result(capped=True, total=50, cursors={_LANE: "2.0|b"}),
+        ]
+        chain.run(operator_requested=True)
+        requeued = chain.dispatched.apply_async.call_args.kwargs["kwargs"]
+
+        # When: the re-queued try runs after the pause.
+        chain.dispatched.reset_mock()
+        result = chain.run(**requeued)
+
+        # Then: it swept and queued its continuation.
+        assert result["total"] == 50
+        assert result["continued"] is True
+        assert chain.service.replay_on_circuit_close.call_count == 2
+        assert chain.dispatched.delay.call_args.kwargs["operator_requested"] is True
+
+    def test_operator_requested_requeue_is_not_made_for_an_automatic_chain(self):
+        chain = _Chain(BatchReplayResult(inflight_skipped=True))
+
+        result = chain.run()
+
+        assert "requeued" not in result
+        chain.dispatched.apply_async.assert_not_called()
+        chain.dispatched.delay.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "make_rows",
+        [
+            lambda: [_pinned(SERVICE, "closed")],
+            lambda: [_pinned("Payment-API", "open")],
+        ],
+        ids=["force_close_pin", "operator_block"],
+    )
+    def test_operator_hold_stops_the_chain_quietly_at_info(self, make_rows):
+        """The operator's own decision, audited where the pin was set: no
+        blocked event, metric or audit from the chain."""
+        rows = make_rows()
+        chain = _Chain(_result(total=1), states=rows)
+
+        result = chain.run(cursors={_LANE: "1.0|a"})
+
+        assert result["block_reason"] == REASON_OPERATOR_HOLD
+        chain.service.replay_on_circuit_close.assert_not_called()
+        chain.service.emit_circuit_close_chain_stopped.assert_not_called()
+        held = [e for e in chain.logs if e["event"] == "dlq.circuit_recovery_held"]
+        assert len(held) == 1
+        assert held[0]["log_level"] == "info"
+        assert held[0]["holder"] == rows[0].service_name
+        assert held[0]["hold_expires_at"] == (
+            rows[0].manual_override_expires_at.isoformat()
+        )
+        assert [e for e in chain.logs if e["log_level"] == "warning"] == []
+
+    def test_operator_hold_does_not_stop_the_chain_the_operator_requested(self):
+        chain = _Chain(_result(total=1), states=[_pinned(SERVICE, "closed")])
+
+        result = chain.run(operator_requested=True)
+
+        assert result["success"] is True
+        chain.service.replay_on_circuit_close.assert_called_once()
+
+    def test_operator_hold_on_an_operator_requested_chain_still_honours_a_block(self):
+        """Only a pinned row that fails the chain's rule stops the operator's chain."""
+        chain = _Chain(_result(total=1), states=[_pinned("Payment-API", "open")])
+
+        result = chain.run(operator_requested=True)
+
+        assert result["block_reason"] == REASON_OPERATOR_HOLD
+        chain.service.replay_on_circuit_close.assert_not_called()
+
+    def test_operator_hold_lapsed_pin_holds_nothing(self):
+        chain = _Chain(
+            _result(total=1),
+            states=[_pinned(SERVICE, "closed", expires_in=timedelta(minutes=-1))],
+        )
+
+        result = chain.run()
+
+        assert result["success"] is True
+        chain.service.replay_on_circuit_close.assert_called_once()
+
+    @pytest.mark.parametrize(
+        "make_pinned",
+        [
+            lambda: _pinned(SERVICE, "closed"),
+            lambda: _pinned("Payment-API", "open"),
+        ],
+        ids=["force_close_pinned_peer", "blocked_peer"],
+    )
+    def test_pinned_peer_beside_an_unpinned_open_row_is_circuit_reopened(
+        self, make_pinned
+    ):
+        """The unpinned row is judged first: a breaker that re-opened on its
+        own is announced even beside an operator's pin."""
+        chain = _Chain(
+            _result(total=1), states=[make_pinned(), _row("payment-api", "open")]
+        )
+
+        result = chain.run(cursors={_LANE: "1.0|a"})
+
+        assert result["block_reason"] == REASON_CIRCUIT_REOPENED
+        chain.service.emit_circuit_close_chain_stopped.assert_called_once_with(
+            service_name=SERVICE,
+            block_reason=REASON_CIRCUIT_REOPENED,
+            lane_cursors={_LANE: "1.0|a"},
+            offending_circuit="payment-api",
+        )
+
+    def test_integrity_blocked_stops_the_chain_with_its_signal(self):
+        chain = _Chain(_result(total=1), integrity=False)
+
+        result = chain.run(cursors={_LANE: "1.0|a"})
+
+        assert result["block_reason"] == REASON_INTEGRITY_BLOCKED
+        chain.verdict.assert_called_once_with(SERVICE)
+        chain.service.replay_on_circuit_close.assert_not_called()
+        chain.service.emit_circuit_close_chain_stopped.assert_called_once_with(
+            service_name=SERVICE,
+            block_reason=REASON_INTEGRITY_BLOCKED,
+            lane_cursors={_LANE: "1.0|a"},
+        )
+        stopped = [
+            e
+            for e in chain.logs
+            if e["event"] == "dlq.circuit_recovery_stopped_integrity"
+        ]
+        assert stopped[0]["log_level"] == "warning"
+
+    def test_integrity_verdict_is_asked_at_the_start_of_every_pass(self):
+        chain = _Chain(_result(total=1))
+
+        chain.run(continuation=4, cursors={_LANE: "1.0|a"})
+
+        chain.verdict.assert_called_once_with(SERVICE)
+        chain.service.replay_on_circuit_close.assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("state", "proceeds"),
+        [("half_open", True), ("open", False)],
+        ids=["half_open_probe_admitted", "refusing_row"],
+    )
+    def test_recovery_trigger_chain_stops_only_on_a_row_that_refuses_calls(
+        self, state, proceeds
+    ):
+        """A chain a recovery trial dispatched probes through the job's own
+        breaker: a HALF_OPEN row does not stop it, a refusing row does."""
+        chain = _Chain(_result(total=1), states=[_row("payment-api", state)])
+
+        result = chain.run(trigger="auto_replay_recovery", escalate_failures=False)
+
+        assert chain.service.replay_on_circuit_close.called is proceeds
+        assert result["success"] is proceeds
+        if proceeds:
+            sweep = chain.service.replay_on_circuit_close.call_args.kwargs
+            assert sweep["trigger"] == "auto_replay_recovery"
+            assert sweep["escalate_failures"] is False
+
+
+class TestCircuitCloseChainRescanBoundBehavior:
+    """A chain rescans from the start at most once (807 D10)."""
+
+    def test_rescan_runs_once_so_a_domain_of_refused_entries_ends_below_the_bound(
+        self,
+    ):
+        # Given: 25 parked entries every replay is refused, 10 per pass.
+        before = dict(_replay_handlers)
+        _replay_handlers.clear()
+        repo = InMemoryFailedOperationRepository()
+        refused = [
+            repo.create(domain=SERVICE, failure_type="MAX_RETRIES_TIMEOUTERROR").id
+            for _ in range(25)
+        ]
+        register_replay_handler(
+            ScriptedReplayHandler(
+                SERVICE, declared=("MAX_RETRIES_TIMEOUTERROR",), refused=refused
+            )
+        )
+        service = ReplayService(
+            repository=repo,
+            cache=InMemoryCacheAdapter(key_prefix=f"t807r:{uuid.uuid4().hex}:"),
+        )
+        service._event_bus = MagicMock(spec=BaldurEventBus)
+        service._governance = MagicMock(spec=GovernanceChecker)
+        service._governance.check_all_governance.return_value = GovernanceCheckResult(
+            allowed=True
+        )
+        service._governance_resolved = True
+        chain = _Chain(service=service)
+        kwargs = {"max_items": 10, "max_continuations": 20}
+
+        # When: each queued pass runs in turn until none is queued.
+        passes, rescans = 0, 0
+        try:
+            with (
+                _runtime_map({}),
+                patch.object(
+                    ReplayService,
+                    "_get_replay_automation_config",
+                    autospec=True,
+                    return_value=None,
+                ),
+            ):
+                while True:
+                    chain.dispatched.reset_mock()
+                    chain.run(**kwargs)
+                    passes += 1
+                    if not chain.dispatched.delay.called:
+                        break
+                    kwargs = chain.dispatched.delay.call_args.kwargs
+                    rescans += kwargs["cursors"] is None
+                    assert passes < kwargs["max_continuations"]
+        finally:
+            _replay_handlers.clear()
+            _replay_handlers.update(before)
+
+        # Then: three passes, one rescan of three more, the empty pass after
+        # each walk — and no bound announced.
+        assert rescans == 1
+        assert passes == 8
+        bound_stops = [
+            c
+            for c in service._event_bus.emit.call_args_list
+            if c.args[0] == EventType.DLQ_REPLAY_BLOCKED
+            and c.kwargs["data"]["block_reason"] == REASON_CONTINUATION_BOUND_REACHED
+        ]
+        assert bound_stops == []
+        assert {repo.get_by_id(dlq_id).status for dlq_id in refused} == {"pending"}
+
+    def test_rescan_is_not_repeated_by_a_chain_that_already_rescanned(self):
+        chain = _Chain(_result(total=2, cursors={_LANE: "2.0|b"}))
+
+        result = chain.run(continuation=1, cursors={_LANE: "1.0|a"}, rescanned=True)
+
+        assert result["continued"] is False
+        chain.dispatched.delay.assert_not_called()
+
+
+class TestRecoverParkedJobsTaskBehavior:
+    """The recovery tick's task: one tick, a deadline, a summary."""
+
+    def test_recover_parked_jobs_task_options(self):
+        assert recover_parked_jobs.name == "baldur.celery_tasks.recover_parked_jobs"
+        assert recover_parked_jobs.queue == "dlq_processing"
+        assert recover_parked_jobs.soft_time_limit == 290
+        assert recover_parked_jobs.time_limit == 300
+        assert recover_parked_jobs.acks_late is False
+
+    def test_recover_parked_jobs_runs_one_tick_and_reports_it(self):
+        tick = RecoveryTickResult(
+            status="completed",
+            released=2,
+            trials=[TrialRecord(domain=SERVICE, dlq_id="7", outcome="failed")],
+            skipped={"orders_api": "not_due"},
+        )
+
+        with patch(
+            "baldur.services.replay_service.recovery.run_recovery_trials",
+            autospec=True,
+            return_value=tick,
+        ) as run:
+            result = recover_parked_jobs.apply(task_id="tick-test").get()
+
+        assert result == {
+            "success": True,
+            "status": "completed",
+            "released": 2,
+            "trials": [{"domain": SERVICE, "dlq_id": "7", "outcome": "failed"}],
+            "skipped": {"orders_api": "not_due"},
+        }
+        deadline = run.call_args.kwargs["deadline"]
+        assert deadline == pytest.approx(
+            time.monotonic() + 290 - _CIRCUIT_CLOSE_DEADLINE_MARGIN_SECONDS, abs=2.0
+        )
+
+    def test_recover_parked_jobs_tick_that_raises_is_reported_not_raised(self):
+        with (
+            patch(
+                "baldur.services.replay_service.recovery.run_recovery_trials",
+                autospec=True,
+                side_effect=RuntimeError("store down"),
+            ),
+            capture_logs() as logs,
+        ):
+            result = recover_parked_jobs.apply(task_id="tick-test").get()
+
+        assert result == {"success": False, "error": "store down"}
+        failed = [e for e in logs if e["event"] == "dlq.recovery_tick_failed"]
+        assert failed[0]["log_level"] == "error"

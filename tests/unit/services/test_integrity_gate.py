@@ -416,3 +416,118 @@ class TestUpdateHealthScoreBehavior:
 
         # The exception must not propagate
         _update_health_score({"valid": True, "checked": 0}, duration_ms=0.0)
+
+
+# =============================================================================
+# 807 D7 — the verdict asked by lanes with no CLOSED event to read it from
+# =============================================================================
+
+_PATCH_EVALUATE = "baldur.services.event_bus.integrity_gate._evaluate_integrity"
+
+
+def _policy(fail_open: bool):
+    """The integrity settings singleton, answering one fail policy."""
+    return patch(
+        _PATCH_SETTINGS,
+        return_value=types.SimpleNamespace(integrity_gate_fail_open=fail_open),
+    )
+
+
+class TestReplayIntegrityVerdictBehavior:
+    """``replay_integrity_verdict``: the gate's verification and its fail policy,
+    with no event to write, no alert and no health-score move."""
+
+    @pytest.mark.parametrize(
+        ("verification", "fail_open", "allowed"),
+        [
+            ({"valid": True, "checked": 3}, True, True),
+            ({"valid": True, "checked": 3}, False, True),
+            ({"valid": False, "checked": 3, "errors": ["break"]}, True, False),
+            ({"valid": False, "checked": 3, "errors": ["break"]}, False, False),
+            ({"valid": None, "checked": 0}, True, True),
+            ({"valid": None, "checked": 0}, False, False),
+            (RuntimeError("wal unreadable"), True, True),
+            (RuntimeError("wal unreadable"), False, False),
+        ],
+        ids=[
+            "valid_fail_open",
+            "valid_fail_secure",
+            "violation_fail_open",
+            "violation_fail_secure",
+            "no_verdict_fail_open",
+            "no_verdict_fail_secure",
+            "verification_raised_fail_open",
+            "verification_raised_fail_secure",
+        ],
+    )
+    def test_replay_integrity_verdict_follows_the_gate_and_its_policy(
+        self, verification, fail_open, allowed
+    ):
+        from baldur.services.event_bus.integrity_gate import replay_integrity_verdict
+
+        verify_kwargs = (
+            {"side_effect": verification}
+            if isinstance(verification, Exception)
+            else {"return_value": verification}
+        )
+        with (
+            _policy(fail_open),
+            patch(_PATCH_VERIFY, autospec=True, **verify_kwargs) as verify,
+            patch(_PATCH_ALERT, autospec=True) as alert,
+            patch(_PATCH_HEALTH_UPDATE, autospec=True) as health,
+        ):
+            verdict = replay_integrity_verdict("payment-api")
+
+        assert verdict is allowed
+        verify.assert_called_once_with("payment-api")
+        alert.assert_not_called()
+        health.assert_not_called()
+
+    def test_replay_integrity_verdict_with_unreadable_settings_fails_open(self):
+        from baldur.services.event_bus.integrity_gate import replay_integrity_verdict
+
+        with (
+            patch(_PATCH_SETTINGS, side_effect=RuntimeError("settings broken")),
+            patch(_PATCH_VERIFY, autospec=True, side_effect=RuntimeError("down")),
+        ):
+            assert replay_integrity_verdict("payment-api") is True
+
+    @pytest.mark.parametrize(
+        "fail_open", [True, False], ids=["fail_open", "fail_secure"]
+    )
+    def test_replay_integrity_verdict_never_raises(self, fail_open):
+        """A fault outside the evaluation's own handling still answers by policy."""
+        from baldur.services.event_bus.integrity_gate import replay_integrity_verdict
+
+        with (
+            _policy(fail_open),
+            patch(_PATCH_EVALUATE, autospec=True, side_effect=RuntimeError("bug")),
+            capture_logs() as logs,
+        ):
+            verdict = replay_integrity_verdict("payment-api")
+
+        assert verdict is fail_open
+        failed = [
+            e for e in logs if e["event"] == "integrity_gate.verdict_evaluation_failed"
+        ]
+        assert len(failed) == 1
+        assert failed[0]["log_level"] == "warning"
+
+    def test_closed_event_handler_keeps_its_alert_and_health_move(self):
+        """The alert belongs to the recovery the gate saw first — the handler."""
+        violation = {"valid": False, "checked": 3, "errors": ["break"]}
+        event = _make_event("payment-api")
+
+        with (
+            _policy(True),
+            patch(_PATCH_VERIFY, autospec=True, return_value=violation),
+            patch(_PATCH_ALERT, autospec=True) as alert,
+            patch(_PATCH_HEALTH_UPDATE, autospec=True) as health,
+        ):
+            on_circuit_breaker_closed_integrity_gate(event)
+
+        assert event.data[INTEGRITY_FAILED_KEY] is True
+        alert.assert_called_once()
+        assert alert.call_args.args[:2] == ("payment-api", violation)
+        health.assert_called_once()
+        assert health.call_args.args[0] == violation

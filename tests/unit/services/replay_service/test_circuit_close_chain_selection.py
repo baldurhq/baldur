@@ -21,6 +21,7 @@ correct while re-selecting one page forever.
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -28,6 +29,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from baldur.adapters.cache.memory_adapter import InMemoryCacheAdapter
+from baldur.adapters.memory import InMemoryFailedOperationRepository
 from baldur.interfaces.governance import GovernanceChecker
 from baldur.interfaces.repositories import (
     FailedOperationData,
@@ -51,6 +53,16 @@ from baldur.services.replay_service.service import (
     REASON_CONTINUATION_BOUND_REACHED,
     _lane_key,
     _LaneSelection,
+)
+from tests.factories.replay_doubles import (
+    STEP_BREAKER_REFUSED,
+    STEP_FAIL,
+    STEP_FAIL_AFTER_BREAKER,
+    STEP_FAIL_WITHOUT_FLAGS,
+    STEP_NOT_STARTED,
+    STEP_RAISE,
+    STEP_STILL_RUNNING,
+    ScriptedReplayHandler,
 )
 
 BASE = datetime(2026, 9, 5, 10, 0, 0, tzinfo=UTC)
@@ -703,3 +715,162 @@ class TestChainStopSignalBehavior:
         data = svc._emit_event.call_args.kwargs["data"]
         assert data["scan_exhausted_lanes"] == []
         assert data["lane_cursors"] == {}
+
+
+# =============================================================================
+# 807 — an escalating sweep sends to review only a replay whose job ran
+# =============================================================================
+
+_DECLARED = "MAX_RETRIES_TIMEOUTERROR"
+
+
+class TestSweepEscalationBehavior:
+    """``escalate_failures`` (the CLOSED-transition lane) escalates a replay
+    whose job ran and failed — never one that never began, one its own breaker
+    refused, one a gate skipped, or one another lane held."""
+
+    @pytest.fixture
+    def sweep(self):
+        repo = InMemoryFailedOperationRepository()
+        service = ReplayService(
+            repository=repo,
+            cache=InMemoryCacheAdapter(key_prefix=f"t807e:{uuid.uuid4().hex}:"),
+        )
+        service._event_bus = MagicMock(spec=BaldurEventBus)
+        governance = MagicMock(spec=GovernanceChecker)
+        governance.check_all_governance.return_value = GovernanceCheckResult(
+            allowed=True
+        )
+        service._governance = governance
+        service._governance_resolved = True
+        with patch.object(
+            ReplayService,
+            "_get_replay_automation_config",
+            autospec=True,
+            return_value=None,
+        ):
+            yield service
+
+    @staticmethod
+    def _run(service, handler) -> tuple[str, object]:
+        register_replay_handler(handler)
+        dlq_id = service.repository.create(domain=SERVICE, failure_type=_DECLARED).id
+        result = service.replay_on_circuit_close(
+            SERVICE, max_items=10, escalate_failures=True, service_failure_type_map={}
+        )
+        handler.settle()
+        return dlq_id, result
+
+    @pytest.mark.parametrize(
+        ("step", "expected"),
+        [
+            (STEP_FAIL, ("requires_review", 1)),
+            (STEP_FAIL_WITHOUT_FLAGS, ("requires_review", 1)),
+            (STEP_RAISE, ("requires_review", 1)),
+            (STEP_FAIL_AFTER_BREAKER, ("requires_review", 1)),
+            (STEP_NOT_STARTED, ("pending", 0)),
+            (STEP_STILL_RUNNING, ("replaying", 1)),
+        ],
+        ids=[
+            "ran_and_failed",
+            "flagless_handler_failed",
+            "handler_raised",
+            "nested_breaker_after_the_body_began",
+            "job_key_kept_it_from_starting",
+            "work_may_continue",
+        ],
+    )
+    def test_sweep_escalates_only_ran(self, sweep, step, expected):
+        dlq_id, _ = self._run(
+            sweep, ScriptedReplayHandler(SERVICE, steps=[step], declared=(_DECLARED,))
+        )
+
+        entry = sweep.repository.get_by_id(dlq_id)
+        assert (entry.status, entry.retry_count) == expected
+        if entry.status == "requires_review":
+            assert entry.recommended_action == "escalate"
+
+    def test_sweep_rejected_by_breaker_is_given_back_and_never_escalated(self, sweep):
+        """The job's own breaker refused before the body began: the pass ends
+        on it, its attempt back, its entry PENDING."""
+        handler = ScriptedReplayHandler(
+            SERVICE, steps=[STEP_BREAKER_REFUSED], declared=(_DECLARED,)
+        )
+
+        dlq_id, result = self._run(sweep, handler)
+
+        entry = sweep.repository.get_by_id(dlq_id)
+        assert (entry.status, entry.retry_count) == ("pending", 0)
+        assert result.ended_by_breaker_refusal is True
+        assert result.failed_count == 0
+
+    def test_sweep_escalates_only_ran_not_a_gate_skip(self, sweep):
+        handler = ScriptedReplayHandler(SERVICE, declared=(_DECLARED,))
+        register_replay_handler(handler)
+        dlq_id = sweep.repository.create(domain=SERVICE, failure_type=_DECLARED).id
+        handler.refused.add(dlq_id)
+
+        result = sweep.replay_on_circuit_close(
+            SERVICE, max_items=10, escalate_failures=True, service_failure_type_map={}
+        )
+
+        entry = sweep.repository.get_by_id(dlq_id)
+        assert (entry.status, entry.retry_count) == ("pending", 0)
+        assert result.skipped_count == 1
+        assert handler.replayed == []
+
+    def test_sweep_escalates_only_ran_not_an_acquisition_another_lane_won(self, sweep):
+        """Another lane takes the entry between selection and acquisition and
+        returns it to PENDING: this sweep's failed acquisition ran no job."""
+        # Given
+        handler = ScriptedReplayHandler(SERVICE, declared=(_DECLARED,))
+        register_replay_handler(handler)
+        repo = sweep.repository
+        dlq_id = repo.create(domain=SERVICE, failure_type=_DECLARED).id
+        real_acquire = InMemoryFailedOperationRepository.try_acquire_for_replay
+        raced = {"done": False}
+
+        def _another_lane_wins(self, id, max_retries, force=False):
+            if not raced["done"]:
+                raced["done"] = True
+                real_acquire(self, id, max_retries)
+                self.complete_replay(id, success=False, note="other lane failed")
+                return None
+            return real_acquire(self, id, max_retries, force)
+
+        # When
+        with patch.object(
+            InMemoryFailedOperationRepository,
+            "try_acquire_for_replay",
+            autospec=True,
+            side_effect=_another_lane_wins,
+        ):
+            result = sweep.replay_on_circuit_close(
+                SERVICE,
+                max_items=10,
+                escalate_failures=True,
+                service_failure_type_map={},
+            )
+
+        # Then: the other lane's attempt stands; nothing escalated it.
+        entry = repo.get_by_id(dlq_id)
+        assert (entry.status, entry.retry_count) == ("pending", 1)
+        assert handler.replayed == []
+        assert result.failed_count == 1
+
+    def test_sweep_without_escalation_leaves_a_ran_and_failed_replay_pending(
+        self, sweep
+    ):
+        """A trial-dispatched sweep (weaker evidence) charges but never escalates."""
+        handler = ScriptedReplayHandler(
+            SERVICE, steps=[STEP_FAIL], declared=(_DECLARED,)
+        )
+        register_replay_handler(handler)
+        dlq_id = sweep.repository.create(domain=SERVICE, failure_type=_DECLARED).id
+
+        sweep.replay_on_circuit_close(
+            SERVICE, max_items=10, escalate_failures=False, service_failure_type_map={}
+        )
+
+        entry = sweep.repository.get_by_id(dlq_id)
+        assert (entry.status, entry.retry_count) == ("pending", 1)

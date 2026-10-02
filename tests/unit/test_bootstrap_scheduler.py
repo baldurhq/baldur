@@ -17,9 +17,13 @@ Does NOT test LeaderScheduler internals — those have their own unit tests.
 from __future__ import annotations
 
 import contextvars
+import threading
+import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from baldur.bootstrap import (
     _CELERY_TASK_NAMES,
@@ -893,3 +897,300 @@ class TestStartDefaultSchedulerElectorBehavior:
 
         elector_kwarg = mock_get.call_args.kwargs.get("elector")
         assert isinstance(elector_kwarg, LocalFileLeaderElector)
+
+
+# =============================================================================
+# 807 D6 — the recovery tick's leader path, queued off the scheduler thread
+# =============================================================================
+
+_RECOVERY = "baldur.services.replay_service.recovery"
+_CELERY_TASKS = "baldur.adapters.celery.tasks"
+# Long enough to stand for a broker that never answers; the test releases it.
+_BLOCKED_PUBLISH_SECONDS = 5.0
+
+
+class _Publisher:
+    """The recover-parked-jobs task as the dispatch publishes it."""
+
+    def __init__(self, *, block: bool = False, error: Exception | None = None):
+        self.calls: list[dict] = []
+        self.block = block
+        self.error = error
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def apply_async(self, **kwargs):
+        self.calls.append(kwargs)
+        self.entered.set()
+        if self.block:
+            self.release.wait(timeout=_BLOCKED_PUBLISH_SECONDS)
+        if self.error is not None:
+            raise self.error
+
+
+@pytest.fixture
+def dispatch_world():
+    """The tick's reads, each answering as the test sets it."""
+    from baldur.adapters.memory import InMemoryFailedOperationRepository
+    from baldur.services.replay_service.recovery import reset_recovery_trial_state
+
+    reset_recovery_trial_state()
+    repo = InMemoryFailedOperationRepository()
+    world = SimpleNamespace(
+        repo=repo, publisher=_Publisher(), enabled=True, worker="ok", count_error=None
+    )
+
+    def _backing():
+        if world.count_error is not None:
+            raise world.count_error
+        return SimpleNamespace(repository=world.repo)
+
+    with (
+        patch(
+            f"{_CELERY_TASKS}.recover_parked_jobs",
+            new=world.publisher,
+        ),
+        patch(
+            f"{_RECOVERY}.recovery_trials_enabled", side_effect=lambda: world.enabled
+        ),
+        patch(
+            "baldur.services.dlq_capture.service.resolve_dlq_backing",
+            side_effect=_backing,
+        ),
+        patch(
+            "baldur.services.replay_service.arming._cached_worker_state",
+            side_effect=lambda: world.worker,
+        ),
+    ):
+        yield world
+    world.publisher.release.set()
+    reset_recovery_trial_state()
+
+
+def _dispatch_threads() -> list[threading.Thread]:
+    from baldur.bootstrap import _REPLAY_RECOVERY_DISPATCH_THREAD_NAME
+
+    return [
+        t
+        for t in threading.enumerate()
+        if t.name == _REPLAY_RECOVERY_DISPATCH_THREAD_NAME
+    ]
+
+
+class TestReplayRecoveryDispatchContract:
+    """The leader job, asserted literally."""
+
+    def test_replay_recovery_dispatch_job_resolves_to_the_off_thread_tick(self):
+        fn = _resolve_job_callable(
+            "baldur.services", "_synthetic_replay_recovery_dispatch"
+        )
+
+        assert callable(fn)
+        assert fn.__name__ == "replay_recovery_dispatch_tick"
+
+    def test_replay_recovery_dispatch_publish_options(self, dispatch_world):
+        from baldur.services.replay_service.recovery import dispatch_recovery_tick
+
+        dispatch_world.repo.create(domain="payment_api", failure_type="TIMEOUT")
+
+        assert dispatch_recovery_tick() == "dispatched"
+        assert dispatch_world.publisher.calls == [{"expires": 120, "retry": False}]
+
+
+class TestReplayRecoveryDispatchBehavior:
+    """The scheduler thread is never blocked, and only a tick with work is queued."""
+
+    def test_replay_recovery_dispatch_tick_returns_at_once_while_the_publish_blocks(
+        self, dispatch_world
+    ):
+        # Given: work parked, and a broker that does not answer.
+        from baldur.bootstrap import _build_replay_recovery_dispatch_callable
+
+        dispatch_world.repo.create(domain="payment_api", failure_type="TIMEOUT")
+        dispatch_world.publisher.block = True
+        tick = _build_replay_recovery_dispatch_callable()
+
+        # When
+        started = time.perf_counter()
+        outcome = tick()
+        elapsed = time.perf_counter() - started
+
+        # Then: the tick returned while the publish is still held.
+        try:
+            assert outcome == "dispatch_started"
+            assert elapsed < 0.1
+            assert dispatch_world.publisher.entered.wait(timeout=2.0)
+            assert not dispatch_world.publisher.release.is_set()
+        finally:
+            dispatch_world.publisher.release.set()
+            for thread in _dispatch_threads():
+                thread.join(timeout=2.0)
+
+    def test_replay_recovery_dispatch_keeps_one_dispatch_thread_alive(
+        self, dispatch_world
+    ):
+        from baldur.bootstrap import _build_replay_recovery_dispatch_callable
+
+        dispatch_world.repo.create(domain="payment_api", failure_type="TIMEOUT")
+        dispatch_world.publisher.block = True
+        tick = _build_replay_recovery_dispatch_callable()
+
+        try:
+            first = tick()
+            assert dispatch_world.publisher.entered.wait(timeout=2.0)
+            second = tick()
+            alive = _dispatch_threads()
+        finally:
+            dispatch_world.publisher.release.set()
+            for thread in _dispatch_threads():
+                thread.join(timeout=2.0)
+        third = tick()
+        for thread in _dispatch_threads():
+            thread.join(timeout=2.0)
+
+        assert (first, second, third) == (
+            "dispatch_started",
+            "dispatch_running",
+            "dispatch_started",
+        )
+        assert len(alive) == 1
+        assert alive[0].daemon is True
+        assert len(dispatch_world.publisher.calls) == 2
+
+    def test_replay_recovery_dispatch_failure_inside_the_thread_is_swallowed(
+        self, dispatch_world
+    ):
+        from baldur.bootstrap import _build_replay_recovery_dispatch_callable
+
+        tick = _build_replay_recovery_dispatch_callable()
+
+        with (
+            patch(
+                f"{_RECOVERY}.dispatch_recovery_tick",
+                autospec=True,
+                side_effect=RuntimeError("probe exploded"),
+            ) as dispatch,
+            capture_logs() as logs,
+        ):
+            assert tick() == "dispatch_started"
+            for thread in _dispatch_threads():
+                thread.join(timeout=2.0)
+
+        dispatch.assert_called_once_with()
+        failed = [
+            e for e in logs if e["event"] == "scheduler.replay_recovery_dispatch_failed"
+        ]
+        assert failed[0]["log_level"] == "debug"
+
+    @pytest.mark.parametrize(
+        ("pending", "replaying"),
+        [(1, 0), (0, 1), (2, 3)],
+        ids=["pending_only", "replaying_only", "both"],
+    )
+    def test_replay_recovery_dispatch_enqueues_the_tick_for_parked_or_held_work(
+        self, dispatch_world, pending, replaying
+    ):
+        """A killed worker can leave every entry REPLAYING: the tick's stale
+        release is what returns them, so REPLAYING alone queues it."""
+        from baldur.services.replay_service.recovery import dispatch_recovery_tick
+
+        repo = dispatch_world.repo
+        for _ in range(pending):
+            repo.create(domain="payment_api", failure_type="TIMEOUT")
+        for _ in range(replaying):
+            held = repo.create(domain="payment_api", failure_type="TIMEOUT")
+            repo.try_acquire_for_replay(held.id, 2)
+
+        assert dispatch_recovery_tick() == "dispatched"
+        assert len(dispatch_world.publisher.calls) == 1
+
+    def test_replay_recovery_dispatch_replaying_only_enqueues_the_tick(
+        self, dispatch_world
+    ):
+        from baldur.services.replay_service.recovery import dispatch_recovery_tick
+
+        held = dispatch_world.repo.create(domain="payment_api", failure_type="TIMEOUT")
+        dispatch_world.repo.try_acquire_for_replay(held.id, 2)
+
+        assert dispatch_world.repo.count(status="pending") == 0
+        assert dispatch_recovery_tick() == "dispatched"
+
+    @pytest.mark.parametrize(
+        ("setup", "outcome"),
+        [
+            (lambda w: None, "nothing_parked"),
+            (lambda w: setattr(w, "enabled", False), "disabled"),
+            (lambda w: setattr(w, "worker", "missing"), "worker_missing"),
+            (
+                lambda w: setattr(w, "count_error", RuntimeError("down")),
+                "count_unavailable",
+            ),
+        ],
+        ids=["nothing_parked", "disabled", "probe_missing", "count_unavailable"],
+    )
+    def test_replay_recovery_dispatch_enqueues_nothing(
+        self, dispatch_world, setup, outcome
+    ):
+        from baldur.services.replay_service.recovery import dispatch_recovery_tick
+
+        if outcome != "nothing_parked":
+            dispatch_world.repo.create(domain="payment_api", failure_type="TIMEOUT")
+        setup(dispatch_world)
+
+        assert dispatch_recovery_tick() == outcome
+        assert dispatch_world.publisher.calls == []
+
+    def test_replay_recovery_dispatch_unknown_worker_state_still_enqueues(
+        self, dispatch_world
+    ):
+        """Only a probe that answered ``missing`` holds the tick back."""
+        from baldur.services.replay_service.recovery import dispatch_recovery_tick
+
+        dispatch_world.repo.create(domain="payment_api", failure_type="TIMEOUT")
+        dispatch_world.worker = "unknown"
+
+        assert dispatch_recovery_tick() == "dispatched"
+
+    def test_replay_recovery_dispatch_celery_missing_logs_debug_once(
+        self, dispatch_world
+    ):
+        from baldur.services.replay_service.recovery import dispatch_recovery_tick
+
+        with (
+            patch.dict("sys.modules", {_CELERY_TASKS: None}),
+            capture_logs() as logs,
+        ):
+            outcomes = [dispatch_recovery_tick(), dispatch_recovery_tick()]
+
+        assert outcomes == ["celery_missing", "celery_missing"]
+        missing = [
+            e
+            for e in logs
+            if e["event"] == "replay_service.recovery_tick_dispatch_celery_missing"
+        ]
+        assert len(missing) == 1
+        assert missing[0]["log_level"] == "debug"
+
+    def test_replay_recovery_dispatch_publish_failure_warns_once(self, dispatch_world):
+        from baldur.services.replay_service.recovery import dispatch_recovery_tick
+
+        dispatch_world.repo.create(domain="payment_api", failure_type="TIMEOUT")
+        dispatch_world.publisher.error = RuntimeError("broker down")
+
+        with capture_logs() as logs:
+            outcomes = [dispatch_recovery_tick(), dispatch_recovery_tick()]
+
+        assert outcomes == ["publish_failed", "publish_failed"]
+        warned = [
+            e
+            for e in logs
+            if e["event"] == "replay_service.recovery_tick_dispatch_failed"
+        ]
+        assert len(warned) == 1
+        assert warned[0]["log_level"] == "warning"
+        continuing = [
+            e
+            for e in logs
+            if e["event"] == "replay_service.recovery_tick_dispatch_failed_continuing"
+        ]
+        assert len(continuing) == 1

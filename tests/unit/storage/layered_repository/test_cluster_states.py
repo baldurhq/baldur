@@ -198,3 +198,100 @@ class TestLayeredClusterStatesBehavior:
 
         assert repo._l2_healthy is True
         assert repo._l2_consecutive_failures == 0
+
+
+STORE_OPERATION = "get_store_cluster_states"
+
+
+class TestStoreClusterStatesBehavior:
+    """``get_store_cluster_states``: the same L2 read, past this process's
+    quarantine (807 S6).
+
+    A quarantine has no automatic exit, so a consumer whose decision must
+    follow the shared store — an operator's pin, a breaker another process
+    opened — reads the store itself. Like the cluster read it substitutes no
+    L1 row and touches no health bookkeeping.
+    """
+
+    def test_store_cluster_states_reads_l2_past_the_quarantine(
+        self, repo, mock_l2_repo
+    ):
+        repo._l2_healthy = False
+        inline = _InlineExecutor()
+
+        with patch.object(repo, "_get_executor", return_value=inline):
+            states = repo.get_store_cluster_states()
+
+        assert {s.service_name for s in states} == {"payment-api", "catalog-api"}
+        mock_l2_repo.get_cluster_states.assert_called_once_with()
+        assert inline.submit_count == 1
+
+    @pytest.mark.parametrize("healthy", [True, False], ids=["healthy", "quarantined"])
+    def test_store_cluster_states_leaves_the_l2_health_bookkeeping_alone(
+        self, repo, mock_l2_repo, healthy
+    ):
+        """Neither clears nor extends a quarantine, answering or failing."""
+        repo._l2_healthy = healthy
+        inline = _InlineExecutor()
+
+        with patch.object(repo, "_get_executor", return_value=inline):
+            repo.get_store_cluster_states()
+            mock_l2_repo.get_cluster_states.side_effect = RuntimeError("reset")
+            for _ in range(5):
+                with pytest.raises(CircuitBreakerStateUnavailableError):
+                    repo.get_store_cluster_states()
+
+        assert repo._l2_healthy is healthy
+        assert repo._l2_consecutive_failures == 0
+
+    def test_store_cluster_states_raises_when_no_l2_is_configured(self):
+        from baldur.adapters.memory.circuit_breaker import (
+            LayeredCircuitBreakerStateRepository,
+        )
+
+        repo = LayeredCircuitBreakerStateRepository(l2_repo=None)
+
+        with pytest.raises(CircuitBreakerStateUnavailableError) as excinfo:
+            repo.get_store_cluster_states()
+
+        assert excinfo.value.reason == "l2_absent"
+        assert excinfo.value.operation == STORE_OPERATION
+
+    def test_store_cluster_states_raises_on_the_l2_timeout(self, repo):
+        from concurrent.futures import TimeoutError as FuturesTimeoutError
+
+        repo._l2_healthy = False
+        future = MagicMock(spec=Future)
+        future.result.side_effect = FuturesTimeoutError()
+        executor = MagicMock(spec=ThreadPoolExecutor)
+        executor.submit.return_value = future
+
+        with patch.object(repo, "_get_executor", return_value=executor):
+            with pytest.raises(CircuitBreakerStateUnavailableError) as excinfo:
+                repo.get_store_cluster_states()
+
+        assert excinfo.value.reason == "l2_timeout"
+        assert excinfo.value.operation == STORE_OPERATION
+
+    def test_store_cluster_states_never_substitutes_an_l1_row(self, repo, mock_l2_repo):
+        repo._l2_healthy = False
+        repo._l1.get_or_create("payment-api")
+        mock_l2_repo.get_cluster_states.side_effect = RuntimeError("connection reset")
+        inline = _InlineExecutor()
+
+        with patch.object(repo, "_get_executor", return_value=inline):
+            with pytest.raises(CircuitBreakerStateUnavailableError) as excinfo:
+                repo.get_store_cluster_states()
+
+        assert excinfo.value.reason.startswith("l2_error:")
+
+    def test_cluster_states_quarantine_reason_is_the_shared_constant(self, repo):
+        """The fleet read past a quarantine keys on this exact reason."""
+        from baldur.services.circuit_breaker.exceptions import L2_QUARANTINED_REASON
+
+        repo._l2_healthy = False
+
+        with pytest.raises(CircuitBreakerStateUnavailableError) as excinfo:
+            repo.get_cluster_states()
+
+        assert excinfo.value.reason == L2_QUARANTINED_REASON

@@ -3,7 +3,7 @@ DLQ Replay automation settings tests.
 
 ReplayAutomationSettings:
 - On-recovery: event-driven auto-replay on CB recovery
-- Traffic-aware: replay gated on traffic normalization
+- Recovery trial: one parked job per job name, replayed as a trial
 - Adaptive initial batch size + per-domain differentiated policy
 """
 
@@ -133,3 +133,38 @@ class TestOnRecoveryContinuationBoundContract:
 
         assert settings.on_recovery_max_items == 25
         assert settings.on_recovery_max_continuations == 4
+
+
+class TestReplayAutomationSettingsContract:
+    """The recovery trial's one switch (807 D3), and the lane it replaced."""
+
+    @pytest.fixture(autouse=True)
+    def reset_singleton(self):
+        from baldur.settings.replay_automation import (
+            reset_replay_automation_settings,
+        )
+
+        reset_replay_automation_settings()
+        yield
+        reset_replay_automation_settings()
+
+    def test_recovery_trial_enabled_default_is_true(self):
+        from baldur.settings.replay_automation import ReplayAutomationSettings
+
+        assert ReplayAutomationSettings().recovery_trial_enabled is True
+
+    def test_recovery_trial_enabled_env_var_binds_to_the_field(self, monkeypatch):
+        from baldur.settings.replay_automation import ReplayAutomationSettings
+
+        monkeypatch.setenv("BALDUR_REPLAY_AUTOMATION_RECOVERY_TRIAL_ENABLED", "false")
+
+        assert ReplayAutomationSettings().recovery_trial_enabled is False
+
+    @pytest.mark.parametrize(
+        "removed", ["traffic_aware_enabled", "traffic_aware_max_items"]
+    )
+    def test_traffic_aware_settings_are_gone(self, removed):
+        """The recovery trial replaces the traffic-aware lane (807 D11)."""
+        from baldur.settings.replay_automation import ReplayAutomationSettings
+
+        assert removed not in ReplayAutomationSettings.model_fields

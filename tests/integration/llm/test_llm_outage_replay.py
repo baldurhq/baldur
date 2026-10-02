@@ -29,6 +29,12 @@ Test Categories:
         - the continuation is queued even though the cut replay was the pass's
           first (on a store whose empty lanes report no cursor movement too)
         - the continuation replays the cut job first, then the rest
+    C. A short outage, and a breaker left half-open with no traffic:
+        - a breaker that never opened gives no CLOSED event; the recovery
+          trial replays a parked job and its sweep the rest
+        - a half-open breaker nothing probes is closed by the trial, whose
+          CLOSED event's sweep drains the rest; the failed trial before it
+          cost the parked jobs nothing
 
 Note: in-memory and SQLite stores, a local HTTP server — no Docker.
 """
@@ -39,6 +45,7 @@ import sqlite3
 import time
 import uuid
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from datetime import timedelta
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -229,11 +236,13 @@ def _run_recovery(
     *,
     between_passes: Callable[[], None] | None = None,
     soft_time_limit: float | None = None,
+    first_pass: dict | None = None,
 ) -> list[tuple[dict, float]]:
     """Run the shipped recovery task as the CLOSED event's dispatch would, pass by pass.
 
     Each queued continuation is captured instead of sent to a broker, then run
-    as the next pass with the kwargs it was queued with.
+    as the next pass with the kwargs it was queued with. ``first_pass`` is the
+    kwargs another dispatch (a recovery trial's) queued the chain with.
     """
     queued: list[dict] = []
     dispatch = MagicMock(spec=conditional_replay_on_circuit_close)
@@ -246,7 +255,11 @@ def _run_recovery(
         else patch.object(conditional_replay_on_circuit_close, "soft_time_limit", 290)
     )
     passes: list[tuple[dict, float]] = []
-    kwargs: dict = {"service_name": name, "max_items": 50, "max_continuations": 5}
+    kwargs: dict = first_pass or {
+        "service_name": name,
+        "max_items": 50,
+        "max_continuations": 5,
+    }
     with (
         patch("baldur.services.get_replay_service", return_value=service),
         patch(
@@ -414,3 +427,149 @@ class TestLlmRecoveryPassDeadline:
         assert job.done == ["doc-1", "doc-2"]
         assert repo.get_by_id(first).status == "resolved"
         assert repo.get_by_id(second).status == "resolved"
+
+
+# =============================================================================
+# C. A short outage, and a breaker left half-open with no traffic (807)
+# =============================================================================
+
+_TRIAL_TASK = "baldur.adapters.celery.tasks.conditional_replay_on_circuit_close"
+
+
+def _recovery_tick(
+    service: ReplayService, breakers: CircuitBreakerService, *, now: float
+):
+    """One recovery tick as the leader's or beat's tick runs it; its dispatch captured."""
+    from types import SimpleNamespace
+
+    from baldur.services.replay_service.recovery import RecoveryTrialRunner
+
+    queued: list[dict] = []
+    dispatch = MagicMock(spec=conditional_replay_on_circuit_close)
+    dispatch.delay.side_effect = lambda **kwargs: queued.append(kwargs)
+    runner = RecoveryTrialRunner(
+        replay_service=service,
+        circuit_breaker_service=breakers,
+        system_control=SimpleNamespace(
+            is_state_known=lambda: True, is_enabled=lambda: True
+        ),
+        clock=lambda: now,
+    )
+    with patch(_TRIAL_TASK, dispatch):
+        result = runner.run(deadline=None)
+    return result, queued
+
+
+class TestLlmShortOutageRecoveryTrial:
+    """No traffic and no CLOSED transition: the recovery trial brings jobs back."""
+
+    def test_short_outage_never_opened_breaker_jobs_come_back_through_a_trial(
+        self, provider
+    ):
+        """
+        Purpose:
+            An outage too short to open the job's breaker parks a job, and
+            nothing calls the job again. The breaker reads CLOSED throughout,
+            so no CLOSED event will ever come.
+        Expected:
+            - one job is parked after every endpoint failed; the breaker stays
+              CLOSED (one failure, below its threshold)
+            - once the provider answers, a recovery tick replays a parked job as
+              a trial through the real SDK, and the sweep it dispatches
+              (no escalation) replays the rest — every entry resolved
+            - no CLOSED event: the breaker never left CLOSED
+        """
+        # Given — one job fails during a short outage; another was parked earlier
+        repo = InMemoryFailedOperationRepository()
+        job = _Job(provider)
+        breakers = _job_breaker(job.name)
+        provider.answer = _down
+        with patch(_RESOLVE_BACKING, return_value=DLQCaptureService(repository=repo)):
+            with pytest.raises(LLMUnavailableError):
+                job.summarize("doc-1")
+        repo.create(
+            domain=job.name, failure_type=NO_ENDPOINT, request_data={"doc_id": "doc-2"}
+        )
+        assert breakers.get_state(job.name) == "closed"
+
+        # When — the provider answers; the tick, then the sweep it dispatched
+        provider.answer = _ok
+        service = _replay_service(repo)
+        tick, queued = _recovery_tick(service, breakers, now=time.time())
+        passes = _run_recovery(service, breakers, job.name, first_pass=queued[0])
+
+        # Then
+        assert [trial.outcome for trial in tick.trials] == ["succeeded"]
+        assert tick.trials[0].dispatch == "dispatched"
+        assert queued[0]["trigger"] == "auto_replay_recovery"
+        assert queued[0]["escalate_failures"] is False
+        assert sorted(job.done) == ["doc-1", "doc-2"]
+        assert {entry.status for entry in repo.find()} == {"resolved"}
+        assert sum(outcome.get("success_count", 0) for outcome, _ in passes) == 1
+        assert not [
+            call
+            for call in breakers._event_bus.emit.call_args_list
+            if call.args and call.args[0] == EventType.CIRCUIT_BREAKER_CLOSED
+        ]
+
+    def test_short_outage_half_open_breaker_with_no_traffic_is_closed_by_trials(
+        self, provider
+    ):
+        """
+        Purpose:
+            The outage opened the job's breaker; it went HALF_OPEN with no
+            traffic to probe it, so it would never close on its own.
+        Expected:
+            - while the provider is still down the trial is refused or fails
+              and costs the parked job none of its replay attempts
+            - once the provider answers, the trial is the breaker's probe and
+              closes it: the CLOSED event fires and the tick leaves the sweep to
+              it (no second chain from the tick)
+            - the CLOSED event's sweep replays the rest — every entry resolved
+        """
+        # Given — the outage opens the breaker and parks four jobs
+        repo = InMemoryFailedOperationRepository()
+        job = _Job(provider)
+        breakers = _job_breaker(job.name)
+        provider.answer = _down
+        with patch(_RESOLVE_BACKING, return_value=DLQCaptureService(repository=repo)):
+            for doc_id in ("doc-1", "doc-2", "doc-3", "doc-4"):
+                with pytest.raises((LLMUnavailableError, CircuitBreakerError)):
+                    job.summarize(doc_id)
+        assert breakers.get_state(job.name) == "open"
+        # ...the periodic recovery moves it to HALF_OPEN; nothing calls the job.
+        store = breakers.repository
+        store._storage[job.name] = replace(
+            store.get_or_create(job.name), state="half_open"
+        )
+        service = _replay_service(repo)
+
+        # When — a tick while the provider is still down
+        started = time.time()
+        down_tick, down_queued = _recovery_tick(service, breakers, now=started)
+        attempts_after_down_tick = sorted(e.retry_count for e in repo.find())
+
+        # When — the provider answers; the next tick past the trial spacing
+        provider.answer = _ok
+        later = utc_now() + timedelta(seconds=_JOB_BREAKER.recovery_timeout + 1)
+        with patch(_BREAKER_CLOCK, return_value=later):
+            up_tick, up_queued = _recovery_tick(service, breakers, now=started + 60)
+        passes = _run_recovery(service, breakers, job.name)
+
+        # Then — the failed trial cost nothing; the probe closed the breaker
+        assert down_queued == []
+        assert [trial.outcome for trial in down_tick.trials] == ["failed"]
+        assert attempts_after_down_tick == [0, 0, 0, 0]
+        assert [trial.outcome for trial in up_tick.trials] == ["succeeded"]
+        assert up_tick.trials[0].dispatch == "closed_by_trial"
+        assert up_queued == []
+        assert breakers.get_state(job.name) == "closed"
+        closed = [
+            call
+            for call in breakers._event_bus.emit.call_args_list
+            if call.args and call.args[0] == EventType.CIRCUIT_BREAKER_CLOSED
+        ]
+        assert [call.kwargs["data"]["service_name"] for call in closed] == [job.name]
+        assert sorted(job.done) == ["doc-1", "doc-2", "doc-3", "doc-4"]
+        assert {entry.status for entry in repo.find()} == {"resolved"}
+        assert sum(outcome.get("success_count", 0) for outcome, _ in passes) == 3

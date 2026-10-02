@@ -42,7 +42,7 @@ from structlog.testing import capture_logs
 from baldur.adapters.cache.memory_adapter import InMemoryCacheAdapter
 from baldur.adapters.memory import InMemoryFailedOperationRepository
 from baldur.adapters.rate_limit.memory_adapter import InMemoryRateLimitStorage
-from baldur.core.exceptions import LLMUnavailableError
+from baldur.core.exceptions import IdempotencyDuplicateError, LLMUnavailableError
 from baldur.interfaces.governance import GovernanceChecker
 from baldur.interfaces.repositories import FailedOperationData
 from baldur.interfaces.resilience_policy import PolicyContext
@@ -51,6 +51,7 @@ from baldur.models.dlq import OPEN_CIRCUIT_FAILURE_TYPE, POLICY_CHAIN_CAPTURE_SO
 from baldur.models.governance import GovernanceCheckResult
 from baldur.protect_facade import aprotected, protected
 from baldur.scaling.deadline_context import deadline_scope, get_remaining_ms
+from baldur.services.circuit_breaker.exceptions import CircuitBreakerOpenError
 from baldur.services.dlq_capture.service import DLQCaptureService
 from baldur.services.dlq_outbox import outbox as outbox_module
 from baldur.services.dlq_outbox.outbox import Outbox
@@ -1067,3 +1068,241 @@ class TestReplayRequestDataCapBehavior:
         assert [
             log for log in logs if log["event"] == "dlq.replay_payload_truncated"
         ] == []
+
+
+# =============================================================================
+# Behavior — how far the job got (807 D2)
+# =============================================================================
+
+_APROTECT = "baldur.protect_facade.aprotect"
+
+
+def _arm(name: str, *, is_async: bool, body):
+    """Arm a ``replay=True`` job (sync or async) whose body is ``body(doc_id)``."""
+    if is_async:
+
+        @aprotected(name, replay=True, circuit_breaker=False, timeout=None)
+        async def job(doc_id: str) -> str:
+            return body(doc_id)
+
+    else:
+
+        @protected(name, replay=True, circuit_breaker=False, timeout=None)
+        def job(doc_id: str) -> str:
+            return body(doc_id)
+
+    return job
+
+
+def _protect_seam(is_async: bool, behaviour):
+    """Replace the protection a replay runs its job under.
+
+    ``behaviour(call)`` decides whether the job's body runs (``call()``) and
+    what is raised — standing in for a breaker or an idempotency guard that
+    turns the call away before, or after, the body began.
+    """
+    if is_async:
+
+        async def _aprotect(name, call, **options):
+            return await behaviour(call)
+
+        return patch(_APROTECT, autospec=True, side_effect=_aprotect)
+
+    def _protect(name, call, **options):
+        return behaviour(call)
+
+    return patch(_PROTECT, autospec=True, side_effect=_protect)
+
+
+class TestFunctionReplayStartFlagsBehavior:
+    """``job_started`` / ``rejected_by_breaker``, read off the job itself."""
+
+    @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+    def test_job_started_on_a_job_that_ran_to_success(self, is_async):
+        name = _job_name()
+        done: list[str] = []
+        _arm(name, is_async=is_async, body=done.append)
+
+        result = _handler(name).replay(_entry({"doc_id": "doc-1"}))
+
+        assert result.success is True
+        assert result.data == {"job_started": True, "rejected_by_breaker": False}
+        assert done == ["doc-1"]
+
+    @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+    def test_job_started_on_a_job_whose_body_raised(self, is_async):
+        name = _job_name()
+
+        def _body(doc_id):
+            raise RuntimeError("provider still down")
+
+        _arm(name, is_async=is_async, body=_body)
+
+        result = _handler(name).replay(_entry({"doc_id": "doc-1"}))
+
+        assert result.success is False
+        assert result.data == {"job_started": True, "rejected_by_breaker": False}
+
+    @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+    def test_job_started_false_when_its_own_breaker_refuses_before_the_body(
+        self, is_async
+    ):
+        """The dependency was never called: the replay service gives the
+        attempt back."""
+        name = _job_name()
+        done: list[str] = []
+        _arm(name, is_async=is_async, body=done.append)
+
+        if is_async:
+
+            async def _refuse(call):
+                raise CircuitBreakerOpenError(name)
+
+        else:
+
+            def _refuse(call):
+                raise CircuitBreakerOpenError(name)
+
+        with _protect_seam(is_async, _refuse):
+            result = _handler(name).replay(_entry({"doc_id": "doc-1"}))
+
+        assert result.success is False
+        assert result.data == {"job_started": False, "rejected_by_breaker": True}
+        assert result.error.startswith("CircuitBreakerOpenError")
+        assert done == []
+
+    @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+    def test_job_started_true_when_a_breaker_refuses_after_the_body_began(
+        self, is_async
+    ):
+        """A same-name inner call, or a retry after a first run: the body ran,
+        so the refusal is charged like any failure."""
+        name = _job_name()
+        done: list[str] = []
+        _arm(name, is_async=is_async, body=done.append)
+
+        if is_async:
+
+            async def _run_then_refuse(call):
+                await call()
+                raise CircuitBreakerOpenError(name)
+
+        else:
+
+            def _run_then_refuse(call):
+                call()
+                raise CircuitBreakerOpenError(name)
+
+        with _protect_seam(is_async, _run_then_refuse):
+            result = _handler(name).replay(_entry({"doc_id": "doc-1"}))
+
+        assert result.data == {"job_started": True, "rejected_by_breaker": False}
+        assert done == ["doc-1"]
+
+    @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+    def test_job_started_false_when_its_own_key_is_held_elsewhere(self, is_async):
+        """An ABORT on the job's own key: the job never began, and it is not a
+        breaker refusal."""
+        name = _job_name()
+        _arm(name, is_async=is_async, body=lambda doc_id: doc_id)
+
+        if is_async:
+
+            async def _abort(call):
+                raise IdempotencyDuplicateError(key="k", decision="ABORT")
+
+        else:
+
+            def _abort(call):
+                raise IdempotencyDuplicateError(key="k", decision="ABORT")
+
+        with _protect_seam(is_async, _abort):
+            result = _handler(name).replay(_entry({"doc_id": "doc-1"}))
+
+        assert result.success is False
+        assert result.data == {"job_started": False, "rejected_by_breaker": False}
+
+    def test_idempotency_duplicate_completed_key_resolves_without_running_again(
+        self,
+    ):
+        """An earlier run completed under the job's own key (its worker died
+        before the entry was completed): the replay reports success and the
+        job does not run a second time."""
+        # Given: a keyed job that already ran for doc-1.
+        name = _job_name()
+        done: list[str] = []
+
+        @protected(
+            name,
+            replay=True,
+            circuit_breaker=False,
+            timeout=None,
+            idempotency_key="doc_id",
+        )
+        def summarize(doc_id: str) -> str:
+            done.append(doc_id)
+            return doc_id
+
+        summarize("doc-1")
+
+        # When
+        result = _handler(name).replay(_entry({"doc_id": "doc-1"}))
+
+        # Then
+        assert done == ["doc-1"]
+        assert result.success is True
+        assert result.message == f"{name} already done under its idempotency key"
+        assert result.data == {"job_started": False, "rejected_by_breaker": False}
+
+    def test_idempotency_duplicate_completed_key_is_resolved_by_the_next_sweep(
+        self, repo, service
+    ):
+        """Resolved by its next automatic replay, not re-run every interval."""
+        name = _job_name()
+        done: list[str] = []
+
+        @protected(
+            name,
+            replay=True,
+            circuit_breaker=False,
+            timeout=None,
+            idempotency_key="doc_id",
+        )
+        def summarize(doc_id: str) -> str:
+            done.append(doc_id)
+            return doc_id
+
+        summarize("doc-7")
+        dlq_id = _park(repo, resolve_stored_domain(name), "doc-7")
+
+        result = service.replay_on_circuit_close(name, service_failure_type_map={})
+
+        assert result.success_count == 1
+        assert repo.get_by_id(dlq_id).status == "resolved"
+        assert done == ["doc-7"]
+
+    def test_idempotency_duplicate_from_a_nested_keyed_call_after_the_body_began(
+        self,
+    ):
+        """A keyed call the job makes, completed earlier, is the job's own
+        failure once its body began — charged, not resolved."""
+        inner_name = _job_name()
+        outer_name = _job_name()
+
+        @protected(
+            inner_name, circuit_breaker=False, timeout=None, idempotency_key="doc_id"
+        )
+        def charge(doc_id: str) -> str:
+            return doc_id
+
+        @protected(outer_name, replay=True, circuit_breaker=False, timeout=None)
+        def checkout(doc_id: str) -> str:
+            return charge(doc_id)
+
+        charge("doc-1")
+
+        result = _handler(outer_name).replay(_entry({"doc_id": "doc-1"}))
+
+        assert result.success is False
+        assert result.data == {"job_started": True, "rejected_by_breaker": False}
+        assert result.error.startswith("IdempotencyDuplicateError")
