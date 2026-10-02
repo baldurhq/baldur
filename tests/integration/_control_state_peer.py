@@ -10,7 +10,9 @@ own request thread; which threads did read the store is reported at the end.
 Protocol: every line the peer prints for the test starts with ``PEER `` and
 carries one JSON object — ``ready``, then one ``observed`` per change and one
 ``heard`` per kill-switch event its own subscriber received, then ``done``.
-Configuration arrives through environment variables:
+The protocol has the stdout pipe to itself; anything else the process writes
+to stdout goes where its stderr goes. Configuration arrives through
+environment variables:
 
 - ``PEER_INTERVAL``: the switch refresh interval, set before the manager exists.
 - ``PEER_DURATION``: the longest the peer serves after ``ready``.
@@ -30,18 +32,26 @@ import time
 REFRESHER_THREAD = "control_state_refresher"
 REQUEST_THREAD = threading.main_thread().name
 
+# Taken before anything is imported that can print. Until structlog is
+# configured (the per-worker load never configures it), it prints every level
+# to stdout, the refresher thread's state-change line included, at the moment
+# the request loop observes that change; print() writes the text and the
+# newline separately, so an "observed" line sent in between lands after a log
+# line's text and the test's reader drops it. The protocol keeps the pipe;
+# the process's own fd 1 is pointed at its stderr.
+_PROTOCOL = os.fdopen(os.dup(sys.stdout.fileno()), "w", encoding="utf-8")
+os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
 
 # The event-bus subscriber reports from its own thread while the request loop
-# reports from this one; print() writes the text and the newline separately, so
-# two unlocked emits can land on one line and the test's reader drops it.
+# reports from this one: one write per line, under a lock, keeps lines whole.
 _EMIT_LOCK = threading.Lock()
 
 
 def _emit(event: str, **fields: object) -> None:
     line = "PEER " + json.dumps({"event": event, **fields}) + "\n"
     with _EMIT_LOCK:
-        sys.stdout.write(line)
-        sys.stdout.flush()
+        _PROTOCOL.write(line)
+        _PROTOCOL.flush()
 
 
 def _record_store_reads(phase: dict[str, str]) -> dict[str, list[str]]:
