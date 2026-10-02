@@ -61,8 +61,7 @@ Redis도, Docker도, 설정도 없이 시작합니다. 저 두 줄은 멀티 프
 
 ![터미널 데모: 워커 8개가 LLM 제공자의 429(retry-after 5)를 만납니다 — SDK 자체 재시도로는 대기 시간 안에 요청 8건이 제공자에 도착하고, baldur.llm.wrap을 거치면 1건입니다. 이어서 제공자가 503을 돌려주자 작업 12건이 인자와 함께 보관되고, 제공자가 복구되어 브레이커가 닫히면 12건 모두 자동으로 다시 실행됩니다. 유실 0건.](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/demo-llm-outage.gif)
 
-*실제 실행 화면입니다. 재생할 때 멈춘 구간은 3초로 줄였고, 화면에 찍힌 시간은
-실제 실행값입니다. 직접 재현해 보세요:*
+*실제 실행을 실제 시간 그대로 녹화했습니다. 직접 재현해 보세요:*
 
 ```bash
 pip install "baldur-framework[celery]" openai

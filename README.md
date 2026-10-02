@@ -63,8 +63,7 @@ then an outage, then every parked job replayed:
 
 ![Terminal demo: eight workers hit an LLM provider's 429 with retry-after 5 — with the SDK's own retries the provider receives 8 requests inside the wait, through baldur.llm.wrap it receives 1. Then the provider answers 503: 12 jobs are parked with their arguments, and once it recovers and the breaker closes, all 12 re-run automatically. Lost 0.](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/demo-llm-outage.gif)
 
-*A real run. Playback shortens each pause to 3 seconds; the times on screen
-are the run's own. Run it yourself:*
+*A real run, recorded in real time. Run it yourself:*
 
 ```bash
 pip install "baldur-framework[celery]" openai
