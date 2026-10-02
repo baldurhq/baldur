@@ -59,6 +59,11 @@ Redis도, Docker도, 설정도 없이 시작합니다. 저 두 줄은 멀티 프
 실제 `openai` SDK와 로컬 가짜 제공자로 직접 보세요 — 호출 한도, 이어서 장애,
 그리고 보관된 작업 전부의 재실행:
 
+![터미널 데모: 워커 8개가 LLM 제공자의 429(retry-after 5)를 만납니다 — SDK 자체 재시도로는 대기 시간 안에 요청 8건이 제공자에 도착하고, baldur.llm.wrap을 거치면 1건입니다. 이어서 제공자가 503을 돌려주자 작업 12건이 인자와 함께 보관되고, 제공자가 복구되어 브레이커가 닫히면 12건 모두 자동으로 다시 실행됩니다. 유실 0건.](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/demo-llm-outage.gif)
+
+*실제 실행 화면입니다. 재생할 때 멈춘 구간은 3초로 줄였고, 화면에 찍힌 시간은
+실제 실행값입니다. 직접 재현해 보세요:*
+
 ```bash
 pip install "baldur-framework[celery]" openai
 python -m baldur.scripts.demo_llm_outage
@@ -80,21 +85,6 @@ python -m baldur.scripts.demo_llm_outage
 단계는 건너뛰게 하세요.
 
 Django, FastAPI, Flask, Celery 어댑터가 들어 있습니다.
-
-![터미널 데모: 트래픽이 흐르는 중에 결제 게이트웨이가 응답 불능이 됩니다 — 결제 5건이 재시도 끝에 실패하고 브레이커가 열리며, 2건은 그 자리에서 거절되고, 7건이 전부 포착되어 복구 시점에 Baldur가 7건을 전부 재실행합니다. 유실 0건.](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/demo-self-healing.gif)
-
-*함께 배포되는 데모의 의존성은 결제 게이트웨이입니다. 트래픽이 흐르는 중에
-게이트웨이가 응답 불능이 되고, 결제 7건이 인자와 함께 포착되며, 복구 시점에 7건이
-전부 재실행됩니다. 유실 0건. 어떤 호출이든 같은 루프입니다 — 실제 실행 화면이고,
-브레이커 상태와 DLQ 집계는 프레임워크에서 실시간으로 읽어온 값입니다. 데코레이터
-자체는 `pip install baldur-framework`가 전부입니다. 데모는 프로세스 안의 대역
-워커를 위해 `celery` extra를 추가할 뿐, 여전히 프로세스 하나에 Redis도 브로커도
-없습니다. 직접 재현해 보세요:*
-
-```bash
-pip install "baldur-framework[celery]"
-python -m baldur.scripts.demo_self_healing
-```
 
 **SDK의 재시도를 이미 쓰고 있나요?** 데코레이터를 씌운 호출이라면 그대로 두세요.
 Baldur는 재시도를 대체하지 않습니다 — 재시도가 못 하는 것을 더합니다. 장애 하나에
@@ -136,6 +126,20 @@ def charge(order_id: str, amount_cents: int) -> dict:
 닫히면 돌아옵니다. (재실행은 나가는 길에 실패한 작업을 위한 것이지, 비즈니스
 상의 거절이나 고객이 이미 떠나버린 결제를 위한 것이 아닙니다 —
 [그 경계가 어디인지](https://baldur.sh/concepts/foundations/dlq-replay/).)
+
+![터미널 데모: 트래픽이 흐르는 중에 결제 게이트웨이가 응답 불능이 됩니다 — 결제 5건이 재시도 끝에 실패하고 브레이커가 열리며, 2건은 그 자리에서 거절되고, 7건이 전부 포착되어 복구 시점에 Baldur가 7건을 전부 재실행합니다. 유실 0건.](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/demo-self-healing.gif)
+
+*결제 데모입니다. 트래픽이 흐르는 중에 게이트웨이가 응답 불능이 되고, 결제 7건이
+인자와 함께 포착되며, 복구 시점에 7건이 전부 재실행됩니다. 유실 0건. 실제 실행
+화면이고, 브레이커 상태와 DLQ 집계는 프레임워크에서 실시간으로 읽어온 값입니다.
+데코레이터 자체는 `pip install baldur-framework`가 전부입니다. 데모는 프로세스
+안의 대역 워커를 위해 `celery` extra를 추가할 뿐, 여전히 프로세스 하나에 Redis도
+브로커도 없습니다. 직접 재현해 보세요:*
+
+```bash
+pip install "baldur-framework[celery]"
+python -m baldur.scripts.demo_self_healing
+```
 
 기본값 이상이 필요하다면 파이프라인을 선언적으로 조합하면 됩니다.
 

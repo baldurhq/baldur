@@ -61,6 +61,11 @@ When the provider rate-limits you, dies, or just gets slow — mid-traffic:
 See it against the real `openai` SDK and a local fake provider — a rate limit,
 then an outage, then every parked job replayed:
 
+![Terminal demo: eight workers hit an LLM provider's 429 with retry-after 5 — with the SDK's own retries the provider receives 8 requests inside the wait, through baldur.llm.wrap it receives 1. Then the provider answers 503: 12 jobs are parked with their arguments, and once it recovers and the breaker closes, all 12 re-run automatically. Lost 0.](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/demo-llm-outage.gif)
+
+*A real run. Playback shortens each pause to 3 seconds; the times on screen
+are the run's own. Run it yourself:*
+
 ```bash
 pip install "baldur-framework[celery]" openai
 python -m baldur.scripts.demo_llm_outage
@@ -83,21 +88,6 @@ jobs that are safe to run twice, or store each step's result yourself and skip
 the steps that already finished.
 
 Django, FastAPI, Flask, and Celery adapters included.
-
-![Terminal demo: the payment gateway becomes unreachable mid-traffic — five charges fail after their retries and the breaker trips, two more are rejected on the spot, all seven are captured, and on recovery Baldur replays all seven. Zero lost.](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/demo-self-healing.gif)
-
-*The shipped demo's dependency is a payment gateway: it goes unreachable
-mid-traffic, seven charges are captured with their arguments, and all seven are
-replayed on recovery. Zero lost. Same loop for any call — a real run, with the
-breaker states and DLQ tallies read live from the framework. The decorator
-itself is `pip install baldur-framework` and nothing else; the demo adds the
-`celery` extra for its in-process stand-in worker — still one process, no
-Redis, no broker. Run it yourself:*
-
-```bash
-pip install "baldur-framework[celery]"
-python -m baldur.scripts.demo_self_healing
-```
 
 **Already using your SDK's retries?** Around a decorated call, keep them.
 Baldur doesn't replace retry — it adds what retry can't: a breaker so one
@@ -142,6 +132,20 @@ dead-letter queue and come back when it closes. (Replay is for work that failed
 on the way out — never for a business rejection, and never for a checkout the
 customer already walked away from:
 [where that line sits](https://baldur.sh/concepts/foundations/dlq-replay/).)
+
+![Terminal demo: the payment gateway becomes unreachable mid-traffic — five charges fail after their retries and the breaker trips, two more are rejected on the spot, all seven are captured, and on recovery Baldur replays all seven. Zero lost.](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/demo-self-healing.gif)
+
+*The payment demo: the gateway goes unreachable mid-traffic, seven charges are
+captured with their arguments, and all seven are replayed on recovery. Zero
+lost. A real run, with the breaker states and DLQ tallies read live from the
+framework. The decorator itself is `pip install baldur-framework` and nothing
+else; the demo adds the `celery` extra for its in-process stand-in worker —
+still one process, no Redis, no broker. Run it yourself:*
+
+```bash
+pip install "baldur-framework[celery]"
+python -m baldur.scripts.demo_self_healing
+```
 
 Need more than the default? Compose the pipeline declaratively:
 
