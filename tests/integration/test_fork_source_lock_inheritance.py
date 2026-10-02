@@ -43,6 +43,7 @@ Infrastructure: POSIX ``fork()``; category B also needs Redis.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import importlib
 import json
 import logging
@@ -356,6 +357,10 @@ def layered_store_reset(monkeypatch):
         reset_protect_caches()
         reset_circuit_breaker_service()
         ProviderRegistry.circuit_breaker_repo.clear_instances()
+        # A plain thread reads the process-shared cache, not this test's
+        # context: a store an earlier test built on a worker thread would be
+        # handed back without a construction (and without a warm-up).
+        contextvars.Context().run(ProviderRegistry.circuit_breaker_repo.clear_instances)
         LayeredRepositoryBase._reset_warmup_state()
         reset_layered_repository_executor()
         reset_storage_backend()
