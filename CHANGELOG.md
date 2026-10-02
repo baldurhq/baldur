@@ -10,6 +10,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+## [1.17.1] - 2026-10-02
+
 ### Fixed
 
 - The payment demo uses the README's `@baldur.protected(..., dlq=True)` and no longer retries.
