@@ -9,7 +9,7 @@ build-backend = "hatchling.build"
 [project]
 name = "baldur-framework"
 dynamic = ["version"]
-description = "Keeps the Python calls that fail while a dependency is down and re-runs them when it recovers. Circuit breaker, retry and dead-letter replay in one decorator."
+description = "Keeps the Python calls that fail while an API is down, LLM rate limits and outages included, and re-runs them when it recovers. Circuit breaker, retry and dead-letter replay in one decorator."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
@@ -21,6 +21,9 @@ keywords = [
     "dead-letter-queue",
     "dlq",
     "fault-tolerance",
+    "llm",
+    "openai",
+    "rate-limiting",
     "resilience",
     "retry",
     "baldur",

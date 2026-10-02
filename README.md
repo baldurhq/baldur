@@ -66,6 +66,22 @@ pip install "baldur-framework[celery]" openai
 python -m baldur.scripts.demo_llm_outage
 ```
 
+**If Baldur breaks, does my call break?** No. A fault in Baldur's own
+bookkeeping, such as a failed dead-letter write, is logged: your call still
+returns its own result or raises its own error. If Redis is unreachable, calls
+keep running on each process's own state, and the workers stop sharing the 429
+wait and the breaker until it is back. One exception, by design: a call with
+`idempotency_key=` is refused with `IdempotencyUnavailableError` (after a few
+seconds' wait) rather than run without the shared record that keeps it from
+running twice.
+
+**Can a retry or a replay bill me twice?** Yes, so plan for it. A replay runs
+the whole job again: a model call that had already succeeded inside the job is
+made, and billed, a second time. A request that timed out may have finished on
+the provider's side, so retrying it can bill twice too. Use `replay=True` on
+jobs that are safe to run twice, or store each step's result yourself and skip
+the steps that already finished.
+
 Django, FastAPI, Flask, and Celery adapters included.
 
 ![Terminal demo: the payment gateway becomes unreachable mid-traffic — five charges fail after their retries and the breaker trips, two more are rejected on the spot, all seven are captured, and on recovery Baldur replays all seven. Zero lost.](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/demo-self-healing.gif)

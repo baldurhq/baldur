@@ -64,6 +64,21 @@ pip install "baldur-framework[celery]" openai
 python -m baldur.scripts.demo_llm_outage
 ```
 
+**Baldur가 고장 나면 내 호출도 실패하나요?** 아닙니다. 실패한 작업을 보관하다가
+오류가 나는 식으로 Baldur 자체 기록 작업이 실패하면 로그로만 남고, 호출은 원래
+결과를 돌려주거나 원래 오류를 던집니다. Redis에 연결할 수 없으면 호출은 각
+프로세스의 자체 상태로 계속 돌고, Redis가 돌아올 때까지 워커들이 429 대기와
+브레이커를 공유하지 못할 뿐입니다. 예외가 하나 있고 의도된 동작입니다.
+`idempotency_key=`를 단 호출은 두 번 실행을 막아 주는 공유 기록 없이 실행하는
+대신, 몇 초 기다린 뒤 `IdempotencyUnavailableError`로 거절됩니다.
+
+**재시도나 재실행 때문에 요금이 두 번 나갈 수 있나요?** 네, 그러니 대비해야
+합니다. 재실행은 작업 전체를 처음부터 다시 돌립니다. 작업 안에서 이미 성공했던
+모델 호출도 다시 나가고 다시 과금됩니다. 시간 초과로 끝난 요청도 제공자 쪽에서는
+끝까지 처리됐을 수 있어서, 재시도하면 두 번 과금될 수 있습니다. `replay=True`는
+두 번 돌아도 괜찮은 작업에만 쓰거나, 단계마다 결과를 직접 저장해서 이미 끝난
+단계는 건너뛰게 하세요.
+
 Django, FastAPI, Flask, Celery 어댑터가 들어 있습니다.
 
 ![터미널 데모: 트래픽이 흐르는 중에 결제 게이트웨이가 응답 불능이 됩니다 — 결제 5건이 재시도 끝에 실패하고 브레이커가 열리며, 2건은 그 자리에서 거절되고, 7건이 전부 포착되어 복구 시점에 Baldur가 7건을 전부 재실행합니다. 유실 0건.](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/demo-self-healing.gif)
