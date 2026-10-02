@@ -47,7 +47,9 @@ from baldur.services.replay_service.handlers import ReplayHandler
 from baldur.tasks import cleanup_tasks
 
 SERVICE_NAME = "payment_api"
-DOMAIN = "payment"
+# A mapped failure type replays only under the mapped service's own
+# domain, so the parked entries and their handler live under it.
+DOMAIN = SERVICE_NAME
 FAILURE_TYPE = "PG_TIMEOUT"
 FAILURE_TYPE_MAP = {SERVICE_NAME: [FAILURE_TYPE]}
 
