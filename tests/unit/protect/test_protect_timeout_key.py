@@ -18,6 +18,10 @@ in-process ledger:
   on a reused ``PolicyContext``.
 - A keyed call ended by a ``BaseException`` (cancelled from outside) leaves no
   work scope current in the caller's thread or task.
+- 810 D3: such a call with nothing it started still running can be retried
+  with its key at once; the async cancel propagates without waiting on the
+  dedup store; a call whose hook already ran keeps the hook's mark; a
+  coroutine closed by ``GeneratorExit`` marks nothing.
 
 Verification techniques applied: scenario-style behavior, parametrize over
 fallback x work outcome x nesting hop, mark-signal synchronization (the late
@@ -847,4 +851,232 @@ class TestProtectBaseExceptionExitBehavior:
                     )
 
         # Then
+        assert current_work_scope() is before
+
+
+# =============================================================================
+# 810 D3 — a keyed call ended from outside settles its key by the hook's rule
+# =============================================================================
+
+
+def _value(result: Any) -> Any:
+    """The call's value from either facade form."""
+    return getattr(result, "value", result)
+
+
+async def _async_record_becomes(key: str, expected: str) -> bool:
+    """Yield to the loop until the scheduled mark lands (bounded)."""
+    gate = _ensure_async_policy_gate()
+    deadline = time.monotonic() + _HOLD_S
+    while time.monotonic() < deadline:
+        record = await gate._cache.aget(key)
+        if record is not None and record["status"] == expected:
+            return True
+        await asyncio.sleep(_POLL_S)
+    return False
+
+
+async def _suspend_inside(coro: Any, entered: asyncio.Event) -> None:
+    """Drive ``coro`` by hand until its function body is suspended in an await."""
+    while True:
+        yielded = coro.send(None)
+        if entered.is_set():
+            return
+        if yielded is None:
+            await asyncio.sleep(0)
+        else:
+            await asyncio.wait([yielded])
+
+
+class TestProtectEndedFromOutsideBehavior:
+    """SC3: a keyed facade call ended by a ``BaseException`` before its hook ran
+    — interrupted, or cancelled from outside — with nothing it started still
+    running can be retried with its key at once (no ``ABORT`` for the execution
+    window); the async cancel never waits on the dedup store."""
+
+    @pytest.mark.parametrize(
+        "facade", [protect, protect_with_meta], ids=["protect", "protect_with_meta"]
+    )
+    def test_sync_call_ended_from_outside_frees_key_for_immediate_retry(
+        self, marks, facade
+    ):
+        # Given — the first run is interrupted (a gevent timeout, Ctrl-C).
+        calls = {"n": 0}
+
+        def charge() -> str:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _Interrupt
+            return "charged"
+
+        def call() -> Any:
+            return facade(
+                "svc.outside",
+                charge,
+                idempotency_key="order_id",
+                context=PolicyContext(order_id="o-1"),
+                **_BARE,
+            )
+
+        # When
+        with pytest.raises(_Interrupt):
+            call()
+        retried = call()
+
+        # Then — released by the interrupted thread, then run by the retry.
+        assert marks.marks[0] == ("failed", "svc.outside:o-1")
+        assert _value(retried) == "charged"
+        assert calls["n"] == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "facade",
+        [aprotect, aprotect_with_meta],
+        ids=["aprotect", "aprotect_with_meta"],
+    )
+    async def test_async_call_cancelled_from_outside_frees_key_once_mark_lands(
+        self, facade
+    ):
+        # Given — the first run is cancelled while it awaits.
+        entered = asyncio.Event()
+        calls = {"n": 0}
+
+        async def charge() -> str:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                entered.set()
+                await asyncio.Event().wait()
+            return "charged"
+
+        def call() -> Any:
+            return facade(
+                "svc.acancelled",
+                charge,
+                idempotency_key="order_id",
+                context=PolicyContext(order_id="o-1"),
+                **_BARE,
+            )
+
+        # When — a client disconnect cancels it; a retry follows.
+        task = asyncio.ensure_future(call())
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        released = await _async_record_becomes("svc.acancelled:o-1", "failed")
+        retried = await call()
+
+        # Then
+        assert released
+        assert _value(retried) == "charged"
+        assert calls["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_async_cancel_propagates_without_waiting_on_the_dedup_store(self):
+        # Given — a store slow to take the release mark.
+        gate = _ensure_async_policy_gate()
+        real_mark = gate.mark_failed
+        mark_release = asyncio.Event()
+
+        async def slow_mark(key: str, **kwargs: Any) -> None:
+            await mark_release.wait()
+            await real_mark(key, **kwargs)
+
+        entered = asyncio.Event()
+
+        async def never_returns() -> None:
+            entered.set()
+            await asyncio.Event().wait()
+
+        with patch.object(gate, "mark_failed", slow_mark):
+            task = asyncio.ensure_future(
+                aprotect(
+                    "svc.slow-store",
+                    never_returns,
+                    idempotency_key="order_id",
+                    context=PolicyContext(order_id="o-1"),
+                    **_BARE,
+                )
+            )
+            await entered.wait()
+
+            # When — cancelled while the store would still be answering.
+            task.cancel()
+            done, _ = await asyncio.wait([task], timeout=_HOLD_S)
+            ended_before_store = task in done and not mark_release.is_set()
+            mark_release.set()
+            landed = await _async_record_becomes("svc.slow-store:o-1", "failed")
+
+        # Then — the cancel ended the call at once; the mark landed afterwards.
+        assert ended_before_store
+        assert task.cancelled()
+        assert landed
+
+    def test_call_interrupted_after_its_hook_ran_keeps_the_hooks_mark(self, marks):
+        """A ``BaseException`` from a later stage leaves the hook's mark alone."""
+        from baldur.resilience.policies.idempotency import IdempotencyHook
+
+        real_on_success = IdempotencyHook.on_success
+
+        def _marks_then_interrupted(self: Any, *args: Any, **kwargs: Any) -> None:
+            real_on_success(self, *args, **kwargs)
+            raise _Interrupt
+
+        def call() -> Any:
+            return protect(
+                "svc.after-hook",
+                lambda: "charged",
+                idempotency_key="order_id",
+                context=PolicyContext(order_id="o-1"),
+                **_BARE,
+            )
+
+        # When — the hook marks completed, then an interruption unwinds.
+        with patch.object(IdempotencyHook, "on_success", _marks_then_interrupted):
+            with pytest.raises(_Interrupt):
+                call()
+        repeat = _repeat_decision(call)
+
+        # Then — one mark, the hook's; the work is not run again.
+        assert marks.marks == [("completed", "svc.after-hook:o-1")]
+        assert repeat == "SKIP"
+
+    @pytest.mark.asyncio
+    async def test_aprotect_closed_by_generator_exit_marks_nothing(self):
+        """A finalized coroutine leaves the claim to its window, scope closed."""
+        # Given — an aprotect coroutine suspended inside its function.
+        gate = _ensure_async_policy_gate()
+        attempted: list[str] = []
+
+        async def _never(key: str, **kwargs: Any) -> None:
+            attempted.append(key)
+
+        entered = asyncio.Event()
+
+        async def charge() -> None:
+            entered.set()
+            await asyncio.Event().wait()
+
+        before = current_work_scope()
+        coro = aprotect(
+            "svc.finalized",
+            charge,
+            idempotency_key="order_id",
+            context=PolicyContext(order_id="o-1"),
+            **_BARE,
+        )
+        await _suspend_inside(coro, entered)
+
+        # When — the coroutine is closed without finishing.
+        with (
+            patch.object(gate, "mark_failed", _never),
+            patch.object(gate, "mark_completed", _never),
+        ):
+            coro.close()
+            await asyncio.sleep(0)
+
+        # Then
+        assert attempted == []
+        record = await gate._cache.aget("svc.finalized:o-1")
+        assert record["status"] == "executing"
         assert current_work_scope() is before

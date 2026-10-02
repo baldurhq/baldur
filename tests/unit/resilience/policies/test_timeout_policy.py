@@ -9,6 +9,12 @@ UNIT_TEST_GUIDELINES.md compliance:
 - Contract verification: hardcoded expected values (init boundary, name, extra_context)
 - Behavior verification: source references (PolicyOutcome, execute flow)
 - conftest.py: single-file fixtures → inline (§5.1)
+
+810 D1: a wait cut short by anything but the function's own exception (a soft
+time limit, a gevent timeout, ``KeyboardInterrupt``) records running work as
+the call's own and re-raises the interruption unchanged — branch outcomes over
+a real future handed back by a stub executor (running, finished in the
+instant, never started) and the function's own exception on the real executor.
 """
 
 from __future__ import annotations
@@ -26,6 +32,12 @@ from baldur.core.abandoned_work import WorkSummary, close_work_scope, open_work_
 from baldur.core.exceptions import TimeoutPolicyError
 from baldur.interfaces.resilience_policy import PolicyContext, PolicyOutcome
 from baldur.resilience.policies.timeout import AsyncTimeoutPolicy, TimeoutPolicy
+from tests.factories.interruptions import (
+    INTERRUPTION_IDS,
+    INTERRUPTIONS,
+    GeventTimeout,
+    SoftTimeLimitExceeded,
+)
 
 # =============================================================================
 # Fixtures — single-file only (§5.1)
@@ -502,6 +514,159 @@ class TestTimeoutPolicyAbandonedRecordBehavior:
         assert held == 0
         assert summary == WorkSummary()
         assert ran["n"] == 0
+
+
+# =============================================================================
+# TimeoutPolicy — an interrupted wait records the work like a timeout (810 D1)
+# =============================================================================
+
+
+def _interrupted_future(
+    interruption: BaseException, *, started: bool = True, outcome: str | None = None
+) -> Future:
+    """A real future whose ``result()`` raises ``interruption`` instead of waiting.
+
+    ``started`` puts it in the running state (its cancel then fails, as for
+    work a pool worker picked up); ``outcome`` finishes it first — the work
+    ended in the very instant the interruption arrived.
+    """
+    future: Future = Future()
+    if started:
+        future.set_running_or_notify_cancel()
+    if outcome == "returned":
+        future.set_result("charged")
+    elif outcome == "raised":
+        future.set_exception(ConnectionError("gateway reset"))
+
+    def _interrupted(timeout=None):
+        raise interruption
+
+    future.result = _interrupted  # type: ignore[method-assign]
+    return future
+
+
+def _execute_with_future(policy: TimeoutPolicy, future: Future, context):
+    """Run ``policy.execute`` with the shared executor handing back ``future``."""
+    executor = MagicMock(spec=ThreadPoolExecutor)
+    executor.submit.return_value = future
+    with patch.object(TimeoutPolicy, "_get_executor", return_value=executor):
+        return policy.execute(lambda: None, context=context)
+
+
+class TestTimeoutPolicyInterruptedWaitBehavior:
+    """810 D1: a wait cut short by anything other than the function's own
+    exception records the work as the call's own, like its own timeout, and
+    lets the interruption propagate unchanged."""
+
+    @pytest.mark.parametrize(
+        ("outcome", "expected"),
+        [
+            ("returned", WorkSummary(own_finished=True, own_failed=False)),
+            ("raised", WorkSummary(own_finished=True, own_failed=True)),
+        ],
+        ids=["work_returned", "work_raised"],
+    )
+    @pytest.mark.parametrize("kind", INTERRUPTIONS, ids=INTERRUPTION_IDS)
+    def test_interrupted_wait_on_running_work_holds_scope_as_own_work(
+        self, kind, outcome, expected
+    ):
+        # Given — a keyed call's scope, and work its wait was cut short on.
+        context = PolicyContext(order_id="o-1")
+        interruption = kind()
+        future = _interrupted_future(interruption)
+        scope, token = open_work_scope(origin=context)
+        settled: list[WorkSummary] = []
+
+        # When
+        with pytest.raises(kind) as raised:
+            _execute_with_future(TimeoutPolicy(timeout_seconds=5.0), future, context)
+        held = scope.running_count
+        at_close = close_work_scope(scope, token, settled.append)
+        if outcome == "returned":
+            future.set_result("charged")
+        else:
+            future.set_exception(ConnectionError("gateway reset"))
+
+        # Then — re-raised as it came, held while running, then own work.
+        assert raised.value is interruption
+        assert held == 1
+        assert at_close is None
+        assert settled == [expected]
+
+    @pytest.mark.parametrize(
+        ("outcome", "expected"),
+        [
+            ("returned", WorkSummary(own_finished=True, own_failed=False)),
+            ("raised", WorkSummary(own_finished=True, own_failed=True)),
+        ],
+        ids=["work_returned", "work_raised"],
+    )
+    def test_interruption_as_the_work_finishes_folds_at_once_with_its_outcome(
+        self, outcome, expected
+    ):
+        """No ``done()`` precondition: a function that just returned is not lost."""
+        # Given — the work finished in the instant the interruption arrived.
+        context = PolicyContext(order_id="o-1")
+        interruption = SoftTimeLimitExceeded()
+        future = _interrupted_future(interruption, outcome=outcome)
+        scope, token = open_work_scope(origin=context)
+
+        # When
+        with pytest.raises(SoftTimeLimitExceeded):
+            _execute_with_future(TimeoutPolicy(timeout_seconds=5.0), future, context)
+        held = scope.running_count
+        summary = close_work_scope(scope, token)
+
+        # Then — recorded and folded at once with its real outcome.
+        assert held == 0
+        assert summary == expected
+
+    @pytest.mark.parametrize("kind", INTERRUPTIONS, ids=INTERRUPTION_IDS)
+    def test_interrupted_wait_before_work_started_cancels_it_and_records_nothing(
+        self, kind
+    ):
+        # Given — the work is still queued when the wait is interrupted.
+        context = PolicyContext(order_id="o-1")
+        interruption = kind()
+        future = _interrupted_future(interruption, started=False)
+        scope, token = open_work_scope(origin=context)
+
+        # When
+        with pytest.raises(kind) as raised:
+            _execute_with_future(TimeoutPolicy(timeout_seconds=5.0), future, context)
+        summary = close_work_scope(scope, token)
+
+        # Then — cancelled, so it never runs and nothing holds the scope.
+        assert raised.value is interruption
+        assert future.cancelled()
+        assert summary == WorkSummary()
+
+    @pytest.mark.parametrize(
+        "own",
+        [
+            ValueError("declined"),
+            SoftTimeLimitExceeded("raised by the function itself"),
+            GeventTimeout(),
+        ],
+        ids=["exception", "interruption_shaped_exception", "base_exception"],
+    )
+    def test_function_own_exception_propagates_and_records_nothing(self, own):
+        """Only the caught object being the future's own makes it the function's."""
+        # Given — a function that raises on its own, run on the real executor.
+        context = PolicyContext(order_id="o-1")
+        scope, token = open_work_scope(origin=context)
+
+        def _raises():
+            raise own
+
+        # When
+        with pytest.raises(type(own)) as raised:
+            TimeoutPolicy(timeout_seconds=_WAIT_S).execute(_raises, context=context)
+        summary = close_work_scope(scope, token)
+
+        # Then — unchanged, and no piece was recorded (nothing to fold).
+        assert raised.value is own
+        assert summary == WorkSummary()
 
 
 # =============================================================================

@@ -35,7 +35,6 @@ Note: in-memory and SQLite stores — no Docker.
 
 from __future__ import annotations
 
-import sqlite3
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
@@ -52,8 +51,6 @@ from baldur.adapters.memory import InMemoryFailedOperationRepository
 from baldur.adapters.memory.circuit_breaker import (
     InMemoryCircuitBreakerStateRepository,
 )
-from baldur.adapters.sql.base import SchemaVersionManager
-from baldur.adapters.sql.failed_operation import SQLFailedOperationRepository
 from baldur.celery_tasks.dlq_tasks import conditional_replay_on_circuit_close
 from baldur.core.exceptions import CircuitBreakerError, LLMUnavailableError
 from baldur.interfaces.governance import GovernanceChecker
@@ -80,7 +77,6 @@ from baldur.services.replay_service.recovery import (
 from baldur.services.retry_handler.sinks import retry_exhausted_failure_type
 from baldur.settings.dlq_outbox import reset_dlq_outbox_settings
 from baldur.settings.protect import reset_protect_settings
-from baldur.settings.sql import reset_sql_settings
 from baldur.utils.time import utc_now
 from tests.factories.time_helpers import freeze_time, mock_sleep
 
@@ -123,20 +119,6 @@ def sandbox(monkeypatch) -> Iterator[None]:
     reset_protect_settings()
     reset_dlq_outbox_settings()
     reset_recovery_trial_state()
-
-
-@pytest.fixture
-def sqlite_repo(monkeypatch) -> Iterator[SQLFailedOperationRepository]:
-    monkeypatch.setenv("BALDUR_SQL_DSN", "sqlite:///:memory:")
-    reset_sql_settings()
-    SchemaVersionManager._reset_applied_cache()
-    conn = sqlite3.connect(":memory:", check_same_thread=False)
-    try:
-        yield SQLFailedOperationRepository(lambda: conn)
-    finally:
-        conn.close()
-        reset_sql_settings()
-        SchemaVersionManager._reset_applied_cache()
 
 
 @pytest.fixture(params=["memory", "sqlite"], ids=["memory", "sqlite"])

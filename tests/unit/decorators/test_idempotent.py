@@ -34,6 +34,9 @@ Verification techniques applied:
   its key held (a repeat reads ABORT) until that work ends, then releases it
   whatever the work did (the decorator has no own timeout stage); a return
   marks completed at once with the claim it took.
+- 810 D3: a ``BaseException`` exit (cancelled, interrupted) settles like a
+  raise — released at once, or once the work it left running ends — and a
+  coroutine closed by ``GeneratorExit`` writes nothing to the store.
 """
 
 # NOTE: do NOT use ``from __future__ import annotations`` here. The source's
@@ -1834,3 +1837,130 @@ class TestIdempotentAbandonedWorkBehavior:
         assert repeat.value.decision == "SKIP"
         assert claims[0] is not None
         assert marked_claims == [claims[0]]
+
+
+# =============================================================================
+# 810 D3 — a call ended from outside settles its key like a raise
+# =============================================================================
+
+
+class _Interrupt(BaseException):
+    """Stands in for a gevent timeout or ``KeyboardInterrupt``."""
+
+
+class TestIdempotentEndedFromOutsideBehavior:
+    """A ``BaseException`` exit (a cancel, a gevent timeout, Ctrl-C) settles
+    like a raise — released once nothing the call started still runs — and a
+    coroutine closed by ``GeneratorExit`` leaves the claim to its window."""
+
+    @pytest.fixture(autouse=True)
+    def _in_process_ledger(self):
+        """The in-process fallback ledger outside production."""
+        from baldur.runtime import reset_runtime
+        from baldur.settings.idempotency import reset_idempotency_settings
+
+        reset_idempotency_settings()
+        reset_runtime()
+        with patch(
+            "baldur.factory.registry.ProviderRegistry.get_cache",
+            side_effect=AdapterNotFoundError(adapter_type="cache"),
+        ):
+            yield
+        reset_idempotency_settings()
+        reset_runtime()
+
+    def test_sync_call_ended_from_outside_frees_key_for_immediate_retry(self):
+        """No ABORT for the execution window after the call ended (#805-1)."""
+        calls = {"n": 0}
+
+        @idempotent(key_fn=lambda order_id: f"outside:{order_id}")
+        def charge(order_id):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _Interrupt
+            return "charged"
+
+        oid = _unique_key("oid")
+        with pytest.raises(_Interrupt):
+            charge(oid)
+
+        assert charge(oid) == "charged"
+        assert calls["n"] == 2
+
+    @pytest.mark.parametrize("outcome", ["returned", "raised"])
+    def test_sync_call_ended_from_outside_holds_key_while_work_runs_then_releases(
+        self, outcome
+    ):
+        """Never SKIP: the decorator has no own work, so the end releases."""
+        # Given — the first call leaves work running, then is interrupted.
+        calls = {"n": 0}
+        piece: Future = Future()
+
+        @idempotent(key_fn=lambda order_id: f"outside-held:{order_id}")
+        def charge(order_id):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                record_abandoned(piece, origin=None)
+                raise _Interrupt
+            return "charged"
+
+        oid = _unique_key("oid")
+        with pytest.raises(_Interrupt):
+            charge(oid)
+
+        # When — a repeat while the work runs; then the work ends.
+        with pytest.raises(IdempotencyDuplicateError) as held:
+            charge(oid)
+        _end_piece(piece, outcome)
+        repeat = charge(oid)
+
+        # Then
+        assert held.value.decision == "ABORT"
+        assert repeat == "charged"
+        assert calls["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_async_call_cancelled_frees_key_for_immediate_retry(self):
+        calls = {"n": 0}
+
+        @idempotent(key_fn=lambda order_id: f"cancelled:{order_id}")
+        async def charge(order_id):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                await asyncio.Event().wait()  # only the cancel ends it
+            return "charged"
+
+        oid = _unique_key("oid")
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.01):
+                await charge(oid)
+
+        assert await charge(oid) == "charged"
+        assert calls["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_async_call_ended_from_outside_by_generator_exit_marks_nothing(self):
+        # Given — the call took its claim and is suspended in its function.
+        @idempotent(key_fn=lambda order_id: f"finalized:{order_id}")
+        async def charge(order_id):
+            await asyncio.Event().wait()
+
+        oid = _unique_key("oid")
+        before = current_work_scope()
+        coro = charge(oid)
+        coro.send(None)
+
+        # When — the coroutine is finalized without finishing.
+        with (
+            patch.object(IdempotencyGate, "mark_failed", autospec=True) as failed,
+            patch.object(IdempotencyGate, "mark_completed", autospec=True) as done,
+        ):
+            coro.close()
+
+        # Then — no store write; the claim keeps its window; scope closed.
+        failed.assert_not_called()
+        done.assert_not_called()
+        assert current_work_scope() is before
+        with pytest.raises(IdempotencyDuplicateError) as repeat:
+            await charge(oid)
+        assert repeat.value.decision == "ABORT"

@@ -2,27 +2,47 @@
 
 The pure-OSS capture chain, wired to one in-memory repository: a call parked
 through ``protect(dlq=True)`` lands in the same instance the replay side reads,
-with both PRO registry slots empty and the outbox draining for real.
+with both PRO registry slots empty and the outbox draining for real. A SQLite
+repository stands in for the SQL store where a round trip runs over both.
 """
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
 
 import pytest
 
 from baldur.adapters.memory.failed_operation import InMemoryFailedOperationRepository
+from baldur.adapters.sql.base import SchemaVersionManager
+from baldur.adapters.sql.failed_operation import SQLFailedOperationRepository
 from baldur.audit.ring_buffer import RingBuffer
 from baldur.services.dlq_outbox import outbox as outbox_module
 from baldur.services.dlq_outbox.outbox import Outbox
 from baldur.services.dlq_outbox.worker import DLQOutboxWorker
 from baldur.settings.backpressure import BackpressureStrategy
+from baldur.settings.sql import reset_sql_settings
 
 
 @pytest.fixture
 def repository() -> InMemoryFailedOperationRepository:
     """A fresh in-memory DLQ repository — the instance both halves share."""
     return InMemoryFailedOperationRepository()
+
+
+@pytest.fixture
+def sqlite_repo(monkeypatch) -> Iterator[SQLFailedOperationRepository]:
+    """A SQL DLQ repository over one in-memory SQLite connection."""
+    monkeypatch.setenv("BALDUR_SQL_DSN", "sqlite:///:memory:")
+    reset_sql_settings()
+    SchemaVersionManager._reset_applied_cache()
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    try:
+        yield SQLFailedOperationRepository(lambda: conn)
+    finally:
+        conn.close()
+        reset_sql_settings()
+        SchemaVersionManager._reset_applied_cache()
 
 
 @pytest.fixture

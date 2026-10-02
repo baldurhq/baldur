@@ -17,11 +17,16 @@ Covers:
   ``idempotency.mark_failed_failed``
 - 805 D10 abandoned-work rule: while recorded work runs the claim stays
   ``executing`` (a repeat reads ABORT); when it ends the key is completed only
-  for a timeout whose own work returned, else failed — claim-scoped, carrying
-  the record read at close, run in a copy of the caller's context; the async
-  hook marks through the sync gate on the shared ledger and on its own loop on
-  the in-process one; ``idempotency.mark_deferred`` /
-  ``idempotency.deferred_mark_failed`` logs
+  when the call's own cut-off work returned (810 D2: whatever ended the call),
+  else failed — claim-scoped, carrying the record read at close, run in a copy
+  of the caller's context; the async hook marks through the sync gate on the
+  shared ledger and on its own loop on the in-process one;
+  ``idempotency.mark_deferred`` / ``idempotency.deferred_mark_failed`` logs
+- 810 D3: a call that left the composer by a ``BaseException`` before its
+  hook ran settles by the same rule (sync on the interrupted thread; async
+  scheduled on the loop, nothing awaited); ``GeneratorExit`` only closes the
+  scope; a claim the store grants to a call cancelled meanwhile is released
+  once answered; the async hook's immediate marks finish through a cancel
 """
 
 import asyncio
@@ -55,11 +60,16 @@ from baldur.resilience.policies.idempotency import (
     IdempotencyHook,
     _ensure_async_policy_gate,
     _ensure_policy_gate,
+    _KeyedCall,
     _read_keyed_call,
+    _release_claim_of_cancelled_call,
     _reset_policy_gate,
+    _settle_async_call_ended_from_outside,
     _settle_call_ended_from_outside,
+    _settled_as_completed,
     _write_keyed_call,
 )
+from tests.factories.interruptions import GeventTimeout, SoftTimeLimitExceeded
 
 # =============================================================================
 # Fixtures
@@ -1435,6 +1445,8 @@ def _end_call(context: PolicyContext, ended_by: str) -> None:
         )
     elif ended_by == "other_error":
         hook.on_failure("composer", ValueError("declined"), 1, context=context)
+    elif ended_by == "soft_limit_error":
+        hook.on_failure("composer", SoftTimeLimitExceeded(), 1, context=context)
     else:
         hook.on_success(
             "composer",
@@ -1488,7 +1500,8 @@ _DEFERRED_ROWS = [
     ("timeout_error", "raised", "failed"),
     ("timeout_fallback", "returned", "completed"),
     ("timeout_fallback", "raised", "failed"),
-    ("other_error", "returned", "completed"),
+    ("soft_limit_error", "returned", "completed"),
+    ("soft_limit_error", "raised", "failed"),
     ("failure_fallback", "returned", "completed"),
 ]
 _DEFERRED_IDS = [
@@ -1496,9 +1509,28 @@ _DEFERRED_IDS = [
     "timeout_own_raised_releases",
     "timeout_answer_own_returned_completes",
     "timeout_answer_own_raised_releases",
-    "raise_own_returned_completes",
+    "interrupted_own_work_returned_completes",
+    "interrupted_own_work_raised_releases",
     "failure_answer_own_returned_completes",
 ]
+
+
+class TestSettledAsCompletedContract:
+    """810 D2: the key rule for a call that did not return reads only how its
+    own cut-off work ended — never what ended the call."""
+
+    @pytest.mark.parametrize(
+        ("summary", "expected"),
+        [
+            (WorkSummary(own_finished=False, own_failed=False), False),
+            (WorkSummary(own_finished=True, own_failed=False), True),
+            (WorkSummary(own_finished=True, own_failed=True), False),
+            (WorkSummary(own_finished=False, own_failed=True), False),
+        ],
+        ids=["no_own_work", "own_work_returned", "own_work_raised", "failed_only"],
+    )
+    def test_settled_as_completed_own_work_decision_table(self, summary, expected):
+        assert _settled_as_completed(summary) is expected
 
 
 class TestIdempotencyHookAbandonedWorkBehavior:
@@ -1570,6 +1602,29 @@ class TestIdempotencyHookAbandonedWorkBehavior:
         assert _status() == "completed"
         piece.set_result("done")
         assert _status() == "completed"
+
+    @pytest.mark.parametrize(
+        "ended_by",
+        ["timeout_error", "soft_limit_error", "failure_fallback"],
+        ids=["timeout", "soft_time_limit", "answered_by_fallback"],
+    )
+    def test_interrupted_call_with_only_other_work_releases_even_when_it_returned(
+        self, ended_by
+    ):
+        """Work cut off deeper inside (a compartment, origin None) never decides."""
+        # Given — the only abandoned work is another stage's, still running.
+        context = _claim()
+        piece = Future()
+        record_abandoned(piece, origin=None)
+
+        # When — the call ends; a repeat arrives; then that work returns.
+        _end_call(context, ended_by)
+        repeat = _ensure_policy_gate().check_and_acquire(_ABANDONED_KEY)
+        piece.set_result("charged")
+
+        # Then — held while it ran, then released although it succeeded.
+        assert repeat.decision == IdempotencyDecision.ABORT
+        assert _status() == "failed"
 
     def test_late_mark_runs_on_finishing_thread_in_copy_of_caller_context(self):
         # Given — the caller set a context variable before the call ended.
@@ -1860,3 +1915,518 @@ class TestCallEndedFromOutsideScopeBehavior:
         _settle_call_ended_from_outside(None, KeyboardInterrupt())
 
         assert current_work_scope() is before
+
+
+# =============================================================================
+# 810 D3 — a call ended from outside settles its key by the hook's rule
+# =============================================================================
+
+
+async def _claim_async_call(key: str = _ABANDONED_KEY) -> PolicyContext:
+    """An async keyed call that passed the guard."""
+    context = PolicyContext(domain="abandoned", extra={})
+    guard = AsyncIdempotencyGuard(key_generator=lambda c: key)
+    assert (await guard.check(context)).allowed
+    return context
+
+
+async def _async_status(key: str = _ABANDONED_KEY):
+    record = await _ensure_async_policy_gate()._cache.aget(key)
+    return None if record is None else record["status"]
+
+
+async def _async_status_becomes(expected: str, key: str = _ABANDONED_KEY) -> bool:
+    """Yield to the loop until a scheduled mark lands (bounded)."""
+    deadline = time.monotonic() + _WAIT_S
+    while time.monotonic() < deadline:
+        if await _async_status(key) == expected:
+            return True
+        await asyncio.sleep(0.002)
+    return await _async_status(key) == expected
+
+
+class TestCallEndedFromOutsideBehavior:
+    """810 D3 (sync): a keyed call ended by a ``BaseException`` before its hook
+    ran is released at once when nothing it started runs, else held while
+    recorded work runs and then marked by its own cut-off work."""
+
+    @pytest.fixture(autouse=True)
+    def _iso(self, policy_gate_isolation):
+        return
+
+    @pytest.mark.parametrize(
+        "error",
+        [KeyboardInterrupt(), GeventTimeout()],
+        ids=["keyboard_interrupt", "gevent_timeout"],
+    )
+    def test_ended_from_outside_with_nothing_running_releases_key_at_once(self, error):
+        """No ABORT for the execution window after the call ended (#805-1)."""
+        context = _claim()
+
+        _settle_call_ended_from_outside(context, error)
+
+        assert _status() == "failed"
+        repeat = _ensure_policy_gate().check_and_acquire(_ABANDONED_KEY)
+        assert repeat.decision == IdempotencyDecision.CONTINUE
+
+    @pytest.mark.parametrize(
+        ("outcome", "expected"),
+        [("returned", "completed"), ("raised", "failed")],
+        ids=["own_work_returned", "own_work_raised"],
+    )
+    def test_ended_from_outside_with_own_work_running_holds_then_follows_it(
+        self, outcome, expected
+    ):
+        # Given — the call's own interrupted wait left its work running.
+        context = _claim()
+        piece = Future()
+        record_abandoned(piece, origin=context)
+
+        # When — the interruption unwinds; a repeat arrives; the work ends.
+        _settle_call_ended_from_outside(context, GeventTimeout())
+        held = _status()
+        repeat = _ensure_policy_gate().check_and_acquire(_ABANDONED_KEY)
+        _finish(piece, outcome)
+
+        # Then
+        assert held == "executing"
+        assert repeat.decision == IdempotencyDecision.ABORT
+        assert _status() == expected
+
+    def test_ended_from_outside_with_other_work_running_releases_after_it_returned(
+        self,
+    ):
+        context = _claim()
+        piece = Future()
+        record_abandoned(piece, origin=None)
+
+        _settle_call_ended_from_outside(context, KeyboardInterrupt())
+        held = _status()
+        piece.set_result("charged")
+
+        assert held == "executing"
+        assert _status() == "failed"
+
+    def test_ended_from_outside_after_hook_ran_makes_no_second_mark(self):
+        """A BaseException raised after the hook (a sink) keeps the hook's mark."""
+        # Given — the hook marked the call completed.
+        recording = _RecordingGate(_ensure_policy_gate())
+        context = _claim()
+        with patch(
+            "baldur.resilience.policies.idempotency._ensure_policy_gate",
+            return_value=recording,
+        ):
+            IdempotencyHook().on_success(
+                "composer", PolicyResult(value=1), context=context
+            )
+
+            # When
+            _settle_call_ended_from_outside(context, KeyboardInterrupt())
+
+        # Then — the hook's mark is the only one.
+        assert [mark["kind"] for mark in recording.marks] == ["completed"]
+        assert _status() == "completed"
+
+    def test_ended_from_outside_by_generator_exit_closes_scope_and_marks_nothing(
+        self,
+    ):
+        # Given
+        before = current_work_scope()
+        recording = _RecordingGate(_ensure_policy_gate())
+        context = _claim()
+        scope = current_work_scope()
+
+        # When — a coroutine closed without finishing.
+        with patch(
+            "baldur.resilience.policies.idempotency._ensure_policy_gate",
+            return_value=recording,
+        ):
+            _settle_call_ended_from_outside(context, GeneratorExit())
+
+        # Then — the claim keeps its window; the scope left the context.
+        assert recording.marks == []
+        assert _status() == "executing"
+        assert scope.closed
+        assert current_work_scope() is before
+
+    def test_ended_from_outside_with_record_but_no_scope_settles_at_once(self):
+        """An interruption between the claim and the scope's opening."""
+        # Given — the record was written, its scope never opened.
+        acquired = _ensure_policy_gate().check_and_acquire(_ABANDONED_KEY)
+        context = PolicyContext(
+            domain="abandoned",
+            extra={
+                "_idempotency_key": _ABANDONED_KEY,
+                "_idempotency_retry_count": acquired.retry_count,
+                "_idempotency_ttl": None,
+                "_idempotency_claim_id": acquired.claim_id,
+            },
+        )
+
+        # When
+        _settle_call_ended_from_outside(context, KeyboardInterrupt())
+
+        # Then
+        assert _status() == "failed"
+
+
+class TestAsyncCallEndedFromOutsideBehavior:
+    """810 D3 (async): a cancelled keyed call schedules its mark on the running
+    loop and awaits nothing; ``GeneratorExit`` and a missing loop only close
+    the scope."""
+
+    @pytest.fixture(autouse=True)
+    def _iso(self, policy_gate_isolation):
+        return
+
+    @pytest.mark.asyncio
+    async def test_async_ended_from_outside_with_nothing_running_schedules_release(
+        self,
+    ):
+        # Given
+        context = await _claim_async_call()
+
+        # When — a cancel unwinds through the facade's raise exit.
+        _settle_async_call_ended_from_outside(context, asyncio.CancelledError())
+
+        # Then — the mark lands on the loop; the next call takes the key.
+        assert await _async_status_becomes("failed")
+        retry = await AsyncIdempotencyGuard(
+            key_generator=lambda c: _ABANDONED_KEY
+        ).check(PolicyContext(domain="abandoned", extra={}))
+        assert retry.allowed
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("outcome", "expected"),
+        [("returned", "completed"), ("raised", "failed")],
+        ids=["own_work_returned", "own_work_raised"],
+    )
+    async def test_async_ended_from_outside_with_own_work_running_holds_then_follows(
+        self, outcome, expected
+    ):
+        # Given — own sync work of the cancelled call still runs.
+        context = await _claim_async_call()
+        piece = Future()
+        record_abandoned(piece, origin=context)
+
+        # When — cancelled; then another thread ends the work.
+        _settle_async_call_ended_from_outside(context, asyncio.CancelledError())
+        await asyncio.sleep(0)
+        held = await _async_status()
+        finisher = threading.Thread(target=_finish, args=(piece, outcome))
+        finisher.start()
+        finisher.join(_WAIT_S)
+
+        # Then — held while it ran, then marked by its outcome on the loop.
+        assert held == "executing"
+        assert await _async_status_becomes(expected)
+
+    @pytest.mark.asyncio
+    async def test_async_ended_from_outside_by_generator_exit_schedules_nothing(self):
+        # Given
+        context = await _claim_async_call()
+        call = _read_keyed_call(context)
+
+        # When
+        with patch(
+            "baldur.resilience.policies.idempotency._spawn_deferred_async_mark",
+            autospec=True,
+        ) as spawn:
+            _settle_async_call_ended_from_outside(context, GeneratorExit())
+            await asyncio.sleep(0)
+
+        # Then — scope closed, no mark, the claim keeps its window.
+        spawn.assert_not_called()
+        assert call.scope.closed
+        assert await _async_status() == "executing"
+
+    def test_async_ended_from_outside_without_running_loop_closes_scope_only(self):
+        """A coroutine driven with no loop has nothing to schedule a mark on."""
+        # Given — the claim was taken on a loop that has since ended.
+        context = asyncio.run(_claim_async_call())
+        call = _read_keyed_call(context)
+
+        # When — settled from plain sync code.
+        with patch(
+            "baldur.resilience.policies.idempotency._spawn_deferred_async_mark",
+            autospec=True,
+        ) as spawn:
+            _settle_async_call_ended_from_outside(context, asyncio.CancelledError())
+
+        # Then
+        spawn.assert_not_called()
+        assert call.scope.closed
+
+    @pytest.mark.asyncio
+    async def test_async_ended_from_outside_after_hook_ran_schedules_nothing(self):
+        # Given — the async hook marked the call completed.
+        context = await _claim_async_call()
+        await AsyncIdempotencyHook().on_success(
+            "composer", PolicyResult(value=1), context=context
+        )
+
+        # When
+        with patch(
+            "baldur.resilience.policies.idempotency._spawn_deferred_async_mark",
+            autospec=True,
+        ) as spawn:
+            _settle_async_call_ended_from_outside(context, asyncio.CancelledError())
+
+        # Then
+        spawn.assert_not_called()
+        assert await _async_status() == "completed"
+
+
+# =============================================================================
+# 810 D3 — a claim granted to a call cancelled meanwhile is released
+# =============================================================================
+
+
+class _HeldGateMethod:
+    """Holds one async gate method until released, then runs the real one."""
+
+    def __init__(self, real) -> None:
+        self._real = real
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.answered = asyncio.Event()
+
+    async def __call__(self, key, **kwargs):
+        self.entered.set()
+        await self.release.wait()
+        try:
+            return await self._real(key, **kwargs)
+        finally:
+            self.answered.set()
+
+
+class TestAsyncGuardCancelledClaimBehavior:
+    """810 D3: the async guard awaits its claim through a shield; a claim the
+    store grants to a call cancelled meanwhile is marked failed (claim-scoped)
+    once the store answered, and no other claim is touched."""
+
+    @pytest.fixture(autouse=True)
+    def _iso(self, policy_gate_isolation):
+        return
+
+    @staticmethod
+    async def _cancel_while_claim_is_answered(held: _HeldGateMethod) -> None:
+        guard = AsyncIdempotencyGuard(key_generator=lambda c: _ABANDONED_KEY)
+        task = asyncio.ensure_future(
+            guard.check(PolicyContext(domain="abandoned", extra={}))
+        )
+        await held.entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    @pytest.mark.asyncio
+    async def test_cancel_while_claim_is_answered_releases_the_granted_claim(self):
+        # Given — the store is slow to answer the claim.
+        gate = _ensure_async_policy_gate()
+        held = _HeldGateMethod(gate.check_and_acquire)
+        with patch.object(gate, "check_and_acquire", held):
+            # When — the caller is cancelled before the answer, then it arrives.
+            await self._cancel_while_claim_is_answered(held)
+            before_answer = await _async_status()
+            held.release.set()
+            released = await _async_status_becomes("failed")
+
+        # Then — the claim was taken, then released; the next call proceeds.
+        assert before_answer is None
+        assert released
+        retry = await AsyncIdempotencyGuard(
+            key_generator=lambda c: _ABANDONED_KEY
+        ).check(PolicyContext(domain="abandoned", extra={}))
+        assert retry.allowed
+
+    @pytest.mark.asyncio
+    async def test_cancel_while_claim_is_answered_leaves_another_callers_claim(self):
+        # Given — another caller already holds the key.
+        gate = _ensure_async_policy_gate()
+        other = await gate.check_and_acquire(_ABANDONED_KEY)
+        held = _HeldGateMethod(gate.check_and_acquire)
+        with (
+            patch.object(gate, "check_and_acquire", held),
+            patch(
+                "baldur.resilience.policies.idempotency._spawn_deferred_async_mark",
+                autospec=True,
+            ) as spawn,
+        ):
+            # When — this caller is cancelled; its claim is answered ABORT.
+            await self._cancel_while_claim_is_answered(held)
+            held.release.set()
+            await held.answered.wait()
+            await asyncio.sleep(0)
+
+        # Then — nothing marked; the other claim is unchanged.
+        spawn.assert_not_called()
+        record = await gate._cache.aget(_ABANDONED_KEY)
+        assert record["status"] == "executing"
+        assert record["claim_id"] == other.claim_id
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "answer",
+        ["cancelled", "store_fault", "skip", "abort", "continue_without_claim"],
+    )
+    async def test_release_of_cancelled_call_marks_nothing_without_a_granted_claim(
+        self, answer
+    ):
+        from baldur.core.idempotency_gate import (
+            AsyncIdempotencyGate,
+            IdempotencyCheckResult,
+        )
+
+        # Given — how the store's answer to the claim ended.
+        claim = asyncio.get_running_loop().create_future()
+        if answer == "cancelled":
+            claim.cancel()
+        elif answer == "store_fault":
+            claim.set_exception(ConnectionError("cache down"))
+        elif answer == "skip":
+            # An id on a refusal never names a claim this call took.
+            claim.set_result(
+                IdempotencyCheckResult(IdempotencyDecision.SKIP, claim_id="c-1")
+            )
+        elif answer == "abort":
+            claim.set_result(
+                IdempotencyCheckResult(IdempotencyDecision.ABORT, claim_id="c-1")
+            )
+        else:
+            claim.set_result(IdempotencyCheckResult(IdempotencyDecision.CONTINUE))
+        gate = MagicMock(spec=AsyncIdempotencyGate)
+
+        # When
+        with patch(
+            "baldur.resilience.policies.idempotency._spawn_deferred_async_mark",
+            autospec=True,
+        ) as spawn:
+            _release_claim_of_cancelled_call(gate, _ABANDONED_KEY, None, claim)
+
+        # Then
+        spawn.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_release_of_cancelled_call_marks_the_granted_claim_failed(self):
+        from baldur.core.idempotency_gate import (
+            AsyncIdempotencyGate,
+            IdempotencyCheckResult,
+        )
+
+        # Given — the store granted claim c-1 (third attempt on the key).
+        claim = asyncio.get_running_loop().create_future()
+        claim.set_result(
+            IdempotencyCheckResult(
+                IdempotencyDecision.CONTINUE, retry_count=2, claim_id="c-1"
+            )
+        )
+        gate = MagicMock(spec=AsyncIdempotencyGate)
+        ttl = timedelta(hours=1)
+
+        # When
+        with patch(
+            "baldur.resilience.policies.idempotency._spawn_deferred_async_mark",
+            autospec=True,
+        ) as spawn:
+            _release_claim_of_cancelled_call(gate, _ABANDONED_KEY, ttl, claim)
+
+        # Then — a claim-scoped failed mark with the guard's window.
+        spawn.assert_called_once_with(
+            gate,
+            _KeyedCall(
+                key=_ABANDONED_KEY,
+                retry_count=2,
+                ttl=ttl,
+                claim_id="c-1",
+                scope=None,
+                token=None,
+            ),
+            False,
+            "CancelledError",
+        )
+
+    @pytest.mark.asyncio
+    async def test_release_of_cancelled_call_mark_fault_logs_and_does_not_raise(
+        self,
+    ):
+        from baldur.core.idempotency_gate import (
+            AsyncIdempotencyGate,
+            IdempotencyCheckResult,
+        )
+
+        claim = asyncio.get_running_loop().create_future()
+        claim.set_result(
+            IdempotencyCheckResult(IdempotencyDecision.CONTINUE, claim_id="c-1")
+        )
+
+        with (
+            patch(
+                "baldur.resilience.policies.idempotency._spawn_deferred_async_mark",
+                autospec=True,
+                side_effect=RuntimeError("no running event loop"),
+            ),
+            capture_logs() as logs,
+        ):
+            _release_claim_of_cancelled_call(
+                MagicMock(spec=AsyncIdempotencyGate), _ABANDONED_KEY, None, claim
+            )
+
+        failed = [
+            log for log in logs if log["event"] == "idempotency.deferred_mark_failed"
+        ]
+        assert len(failed) == 1
+        assert failed[0]["log_level"] == "warning"
+        assert failed[0]["key"] == _ABANDONED_KEY
+
+
+# =============================================================================
+# 810 D3 — the async hook's immediate mark finishes through a cancel
+# =============================================================================
+
+
+class TestAsyncHookShieldedMarkBehavior:
+    """810 D3: a cancel arriving while the async hook writes its immediate mark
+    lands on the hook's await only; the mark finishes on the loop."""
+
+    @pytest.fixture(autouse=True)
+    def _iso(self, policy_gate_isolation):
+        return
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("ended_by", "method", "expected"),
+        [
+            ("returned", "mark_completed", "completed"),
+            ("raised", "mark_failed", "failed"),
+        ],
+        ids=["success_mark", "release_mark"],
+    )
+    async def test_cancel_during_immediate_mark_lets_the_mark_land(
+        self, ended_by, method, expected
+    ):
+        # Given — a keyed call ending, and a store slow to take its mark.
+        gate = _ensure_async_policy_gate()
+        context = await _claim_async_call()
+        held = _HeldGateMethod(getattr(gate, method))
+        hook = AsyncIdempotencyHook()
+        if ended_by == "returned":
+            ending = hook.on_success("composer", PolicyResult(value=1), context=context)
+        else:
+            ending = hook.on_failure(
+                "composer", ValueError("declined"), 1, context=context
+            )
+
+        with patch.object(gate, method, held):
+            # When — the caller is cancelled mid-mark, then the store answers.
+            task = asyncio.ensure_future(ending)
+            await held.entered.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            held.release.set()
+            landed = await _async_status_becomes(expected)
+
+        # Then — the mark was not cut in half.
+        assert landed

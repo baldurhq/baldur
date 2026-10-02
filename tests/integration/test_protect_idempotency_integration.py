@@ -13,27 +13,45 @@ via ``_ensure_policy_gate()``, so the acquire → mark state-transition lifecycl
 spans a transaction boundary across two components plus the cache — a
 composition a single-function unit test cannot drive end-to-end.
 
+A keyed call whose wait was cut short (810) adds the timeout stage, the work
+scope it records the running charge into, and the outside-end settle a
+``BaseException`` exit takes instead of the hook: the key is held while the
+charge runs, then follows it.
+
 Infrastructure: in-process ``InMemoryCacheAdapter`` fallback (no Docker).
 ``ProviderRegistry.get_cache`` is patched to raise ``AdapterNotFoundError`` so
-resolution lands on the fallback. The cross-worker (Redis) ``requires_redis``
-variant is deferred — see #564 Test Assessment.
+resolution lands on the fallback. The cross-worker (Redis) variants live in
+``redis/test_timeout_key_redis.py``.
 """
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from unittest.mock import patch
 
 import pytest
 
-from baldur.core.exceptions import AdapterNotFoundError, IdempotencyDuplicateError
+from baldur.core.exceptions import (
+    AdapterNotFoundError,
+    IdempotencyDuplicateError,
+    TimeoutPolicyError,
+)
 from baldur.interfaces.resilience_policy import PolicyContext, PolicyOutcome
 from baldur.protect_facade import (
+    aprotect,
     aprotect_with_meta,
     protect,
     protect_with_meta,
     reset_protect_caches,
+)
+from tests.factories.interruptions import (
+    GeventTimeout,
+    SoftTimeLimitExceeded,
+    interrupted_timeout_wait,
 )
 
 
@@ -246,3 +264,191 @@ class TestProtectIdempotencyConcurrency:
         assert len(dups) == n_callers - 1
         assert all(decision == "ABORT" for _, decision in dups)
         assert side_effect_runs["n"] == 1
+
+
+# =============================================================================
+# A keyed call whose wait was cut short holds its key while its work runs
+# =============================================================================
+
+_HOLD_S = 5.0
+# A sync timeout that fires while the work is already running.
+_SYNC_TIMEOUT_FIRES_S = 1.0
+_BARE = {"circuit_breaker": False, "retry": False, "dlq": False}
+_poll = threading.Event()
+
+
+def _eventually(predicate, timeout: float = _HOLD_S) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        _poll.wait(0.002)
+    return predicate()
+
+
+class _HeldCharge:
+    """A charge that runs until released, then returns or raises."""
+
+    def __init__(self, outcome: str = "returned") -> None:
+        self.outcome = outcome
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.calls = 0
+
+    def __call__(self) -> str:
+        self.calls += 1
+        if self.calls > 1:
+            return "charged-again"
+        self.entered.set()
+        self.release.wait(_HOLD_S)
+        if self.outcome == "raised":
+            raise ConnectionError("gateway reset")
+        return "charged"
+
+
+def _decision(call) -> str:
+    """A repeat's refusal decision, or "ran"."""
+    try:
+        call()
+    except IdempotencyDuplicateError as e:
+        return e.decision
+    return "ran"
+
+
+class TestProtectInterruptedKeyedCallLifecycle:
+    """Guard → composer → timeout stage → (hook | outside-end settle) → gate,
+    with the timeout stage's wait cut short by an interruption while the
+    charge runs on the shared timeout executor."""
+
+    @pytest.mark.parametrize(
+        "interruption",
+        [SoftTimeLimitExceeded, GeventTimeout],
+        ids=["soft_time_limit_through_hook", "gevent_timeout_from_outside"],
+    )
+    @pytest.mark.parametrize(
+        ("outcome", "after_end"),
+        [("returned", "SKIP"), ("raised", "ran")],
+        ids=["work_returned", "work_raised"],
+    )
+    def test_interrupted_keyed_call_holds_key_then_follows_its_own_work(
+        self, interruption, outcome, after_end
+    ):
+        """
+        Purpose:
+            Verify that a keyed call whose wait on its running charge was cut
+            short — by an ``Exception`` the hook sees (a soft time limit) or a
+            ``BaseException`` that skips it (a gevent timeout) — keeps its key
+            while the charge runs, then follows how the charge ended.
+        Expected:
+            - the interruption reaches the caller unchanged
+            - a same-key repeat reads ``ABORT`` while the charge runs
+            - once it ends: ``SKIP`` when it returned (never run twice),
+              the repeat runs when it raised
+        """
+        # Given
+        charge = _HeldCharge(outcome)
+
+        def call():
+            return protect(
+                "payment.interrupted",
+                charge,
+                timeout=_HOLD_S,
+                idempotency_key="order_id",
+                context=PolicyContext(order_id="ord-cut"),
+                **_BARE,
+            )
+
+        # When — the wait is cut while the charge runs; a repeat arrives.
+        try:
+            with interrupted_timeout_wait(interruption(), entered=charge.entered):
+                with pytest.raises(interruption):
+                    call()
+            during = _decision(call)
+        finally:
+            charge.release.set()
+        outcomes: list[str] = []
+
+        def _settled() -> bool:
+            outcomes.append(_decision(call))
+            return outcomes[-1] != "ABORT"
+
+        # Then
+        assert during == "ABORT"
+        assert _eventually(_settled)
+        assert outcomes[-1] == after_end
+        assert charge.calls == (1 if after_end == "SKIP" else 2)
+
+    @pytest.mark.asyncio
+    async def test_cancelled_aprotect_holds_key_while_nested_work_runs_then_releases(
+        self,
+    ):
+        """
+        Purpose:
+            Verify that an ``aprotect`` call cancelled from outside while sync
+            work it started (a nested ``protect(timeout=...)`` cut off on a
+            worker thread) still runs keeps its key until that work ends, and
+            is then released.
+        Expected:
+            - the cancel reaches the caller
+            - a same-key repeat reads ``ABORT`` while the nested work runs
+            - once it ends, a repeat runs (the nested work never decides)
+        """
+        # Given — the outer call's nested timed work is cut off and runs on.
+        inner = _HeldCharge("returned")
+        cut = asyncio.Event()
+        calls = {"n": 0}
+
+        async def outer() -> str:
+            calls["n"] += 1
+            if calls["n"] > 1:
+                return "charged"
+            timed = functools.partial(
+                protect,
+                "payment.inner",
+                inner,
+                timeout=_SYNC_TIMEOUT_FIRES_S,
+                **_BARE,
+            )
+            try:
+                await asyncio.to_thread(timed)
+            except TimeoutPolicyError:
+                cut.set()
+            await asyncio.Event().wait()  # only the cancel ends it
+            return "never"
+
+        async def call():
+            return await aprotect(
+                "payment.outer",
+                outer,
+                idempotency_key="order_id",
+                context=PolicyContext(order_id="ord-outer"),
+                **_BARE,
+            )
+
+        async def decision() -> str:
+            try:
+                await call()
+            except IdempotencyDuplicateError as e:
+                return e.decision
+            return "ran"
+
+        # When — cancelled from outside; a repeat; then the nested work ends.
+        try:
+            task = asyncio.ensure_future(call())
+            await asyncio.wait_for(cut.wait(), _HOLD_S)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            during = await decision()
+        finally:
+            inner.release.set()
+        after = "ABORT"
+        deadline = time.monotonic() + _HOLD_S
+        while after == "ABORT" and time.monotonic() < deadline:
+            await asyncio.sleep(0.002)
+            after = await decision()
+
+        # Then
+        assert during == "ABORT"
+        assert after == "ran"
+        assert calls["n"] == 2
