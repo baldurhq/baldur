@@ -126,10 +126,12 @@ def charge(order_id: str, amount_cents: int) -> dict:
 상의 거절이나 고객이 이미 떠나버린 결제를 위한 것이 아닙니다 —
 [그 경계가 어디인지](https://baldur.sh/concepts/foundations/dlq-replay/).)
 
-![터미널 데모: 트래픽이 흐르는 중에 결제 게이트웨이가 응답 불능이 됩니다 — 결제 5건이 재시도 끝에 실패하고 브레이커가 열리며, 2건은 그 자리에서 거절되고, 7건이 전부 포착되어 복구 시점에 Baldur가 7건을 전부 재실행합니다. 유실 0건.](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/demo-self-healing.gif)
+![터미널 데모: 트래픽이 흐르는 중에 결제 게이트웨이가 응답 불능이 되고 결제 1,000건이 들어옵니다 — 5건은 게이트웨이까지 가서 실패하고, 브레이커가 열려 나머지 995건을 그 자리에서 거절하며, 1,000건이 전부 포착되어 복구 시점에 Baldur가 10번에 나눠 1,000건을 전부 재실행합니다. 유실 0건.](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/demo-self-healing.gif)
 
-*결제 데모입니다. 트래픽이 흐르는 중에 게이트웨이가 응답 불능이 되고, 결제 7건이
-인자와 함께 포착되며, 복구 시점에 7건이 전부 재실행됩니다. 유실 0건. 실제 실행
+*결제 데모입니다. 트래픽이 흐르는 중에 게이트웨이가 응답 불능이 되고 결제
+1,000건이 들어옵니다. 5건은 게이트웨이까지 가서 실패하고, 열린 브레이커가 나머지
+995건을 게이트웨이를 부르지 않고 거절하며, 1,000건이 전부 인자와 함께 포착되어
+복구 시점에 전부 재실행됩니다. 유실 0건. 실제 실행을 실제 시간 그대로 녹화한
 화면이고, 브레이커 상태와 DLQ 집계는 프레임워크에서 실시간으로 읽어온 값입니다.
 데코레이터 자체는 `pip install baldur-framework`가 전부입니다. 데모는 프로세스
 안의 대역 워커를 위해 `celery` extra를 추가할 뿐, 여전히 프로세스 하나에 Redis도
@@ -137,7 +139,7 @@ def charge(order_id: str, amount_cents: int) -> dict:
 
 ```bash
 pip install "baldur-framework[celery]"
-python -m baldur.scripts.demo_self_healing
+python -m baldur.scripts.demo_self_healing --outage-charges 1000
 ```
 
 기본값 이상이 필요하다면 파이프라인을 선언적으로 조합하면 됩니다.

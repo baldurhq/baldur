@@ -132,18 +132,20 @@ on the way out — never for a business rejection, and never for a checkout the
 customer already walked away from:
 [where that line sits](https://baldur.sh/concepts/foundations/dlq-replay/).)
 
-![Terminal demo: the payment gateway becomes unreachable mid-traffic — five charges fail after their retries and the breaker trips, two more are rejected on the spot, all seven are captured, and on recovery Baldur replays all seven. Zero lost.](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/demo-self-healing.gif)
+![Terminal demo: the payment gateway becomes unreachable mid-traffic and 1,000 charges arrive — five reach it and fail, the breaker trips and rejects the other 995 on the spot, all 1,000 are captured, and on recovery Baldur replays all 1,000 in ten passes. Zero lost.](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/demo-self-healing.gif)
 
-*The payment demo: the gateway goes unreachable mid-traffic, seven charges are
-captured with their arguments, and all seven are replayed on recovery. Zero
-lost. A real run, with the breaker states and DLQ tallies read live from the
-framework. The decorator itself is `pip install baldur-framework` and nothing
-else; the demo adds the `celery` extra for its in-process stand-in worker —
-still one process, no Redis, no broker. Run it yourself:*
+*The payment demo: the gateway goes unreachable mid-traffic and 1,000 charges
+arrive. Five reach it and fail, the open breaker rejects the other 995 without
+calling it, all 1,000 are captured with their arguments, and all 1,000 are
+replayed on recovery. Zero lost. A real run, recorded in real time, with the
+breaker states and DLQ tallies read live from the framework. The decorator
+itself is `pip install baldur-framework` and nothing else; the demo adds the
+`celery` extra for its in-process stand-in worker — still one process, no
+Redis, no broker. Run it yourself:*
 
 ```bash
 pip install "baldur-framework[celery]"
-python -m baldur.scripts.demo_self_healing
+python -m baldur.scripts.demo_self_healing --outage-charges 1000
 ```
 
 Need more than the default? Compose the pipeline declaratively:
