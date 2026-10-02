@@ -10,6 +10,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+## [1.17.0] - 2026-10-02
+
 ### Changed
 
 - `[django]` installs only Django; add `[django-api]` to mount `baldur.api.django.urls`.
