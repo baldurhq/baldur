@@ -113,6 +113,13 @@ _UNNAMED_MODULE = "<unnamed>"
 # up waiting for imports (see _report_imports_in_progress).
 _FORK_REPORT_THREAD_NAME = "baldur-fork-import-report"
 
+# That report on the stdlib logger, before structlog is configured: the event
+# name, then its fields as key=value, which is how every baldur event reads
+# through a host's plain "%(message)s" formatter.
+_FORK_IMPORT_WAIT_STDLIB_MESSAGE = (
+    "process_utils.fork_import_wait_timeout modules=%s waited_seconds=%s"
+)
+
 # The C lock types the fork repair can re-initialize. Built from the
 # constructors themselves so a lock handed in from outside (a redis-py pool's)
 # is accepted by type, and a test double that answers every attribute is not.
@@ -787,11 +794,7 @@ def _log_imports_in_progress(modules: list[str], waited_seconds: float) -> None:
                 waited_seconds=waited_seconds,
             )
         else:
-            logger.warning(
-                "process_utils.fork_import_wait_timeout modules=%s waited_seconds=%s",
-                modules,
-                waited_seconds,
-            )
+            logger.warning(_FORK_IMPORT_WAIT_STDLIB_MESSAGE, modules, waited_seconds)
     except Exception:
         return
 
