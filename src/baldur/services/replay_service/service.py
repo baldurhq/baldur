@@ -1690,8 +1690,15 @@ class ReplayService(EventEmitterMixin):
 
     def _execute_replay_within(
         self, dlq_id: str, deadline: float | None
-    ) -> ReplayResult:
+    ) -> tuple[ReplayResult, bool]:
         """One conditional replay, bounded by the pass deadline when there is one.
+
+        Returns the result and whether the deadline cut the replay: it failed,
+        and either the deadline has passed or work inside it noted that the
+        deadline ended it early — a retry with no room left before the deadline,
+        a cooldown longer than the time left, an LLM call never started. That
+        early end comes before the deadline itself, so the clock alone would
+        read it as an ordinary failure.
 
         The deadline is set as the request-scoped deadline around the replay,
         which every retry stage inside it already reads: their cooldown waits
@@ -1708,23 +1715,26 @@ class ReplayService(EventEmitterMixin):
         pass deadline already keeps its own margin to the task's time limit.
         """
         if deadline is None:
-            return self._execute_replay(
+            result = self._execute_replay(
                 dlq_id,
                 replay_type="conditional",
                 trigger=ResolutionTrigger.AUTO_REPLAY_CIRCUIT_CLOSE,
             )
+            return result, False
         from baldur.scaling.deadline_context import (
             DEFAULT_NETWORK_LATENCY_BUFFER_MS,
             deadline_scope,
         )
 
         remaining_ms = max(0.0, deadline - time.monotonic()) * 1000.0
-        with deadline_scope(remaining_ms + DEFAULT_NETWORK_LATENCY_BUFFER_MS):
-            return self._execute_replay(
+        with deadline_scope(remaining_ms + DEFAULT_NETWORK_LATENCY_BUFFER_MS) as stop:
+            result = self._execute_replay(
                 dlq_id,
                 replay_type="conditional",
                 trigger=ResolutionTrigger.AUTO_REPLAY_CIRCUIT_CLOSE,
             )
+        cut = not result.success and (stop.stopped or time.monotonic() >= deadline)
+        return result, cut
 
     def _replay_on_circuit_close_locked(  # noqa: C901, PLR0912
         self,
@@ -1888,18 +1898,14 @@ class ReplayService(EventEmitterMixin):
                     batch_result, selection, processed, lane_cursors, service_name
                 )
                 break
-            result = self._execute_replay_within(entry.id, deadline)
-            if (
-                deadline is not None
-                and not result.success
-                and time.monotonic() >= deadline
-            ):
+            result, cut = self._execute_replay_within(entry.id, deadline)
+            if cut:
                 # The deadline cut this replay. It goes back to the backlog, not
                 # to review: the entry is already PENDING again (below its
                 # replay cap — the attempt it used stays used, so a job longer
                 # than a whole pass still reaches review at the cap), and it
                 # is left unprocessed so the cursor rolls back to just before
-                # it and the continuation replays it first.
+                # it and the continuation re-selects it first in its lane.
                 self._stop_pass_at_deadline(
                     batch_result,
                     selection,

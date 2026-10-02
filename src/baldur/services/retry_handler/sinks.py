@@ -365,6 +365,10 @@ class DLQSink:
                 "dlq_sink.create_dlq_entry_failed",
                 result=result.error,
             )
+            if result.is_fallback:
+                # The local fallback record holds the entry: custody was taken,
+                # so a later capture layer must not write a second copy.
+                self._mark_capture_dispatched(error)
             return None
 
         except Exception as dlq_error:

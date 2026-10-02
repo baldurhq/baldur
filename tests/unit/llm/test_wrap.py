@@ -57,6 +57,7 @@ from baldur.services.circuit_breaker.service import CircuitBreakerService
 from baldur.services.rate_limit_coordinator import RateLimitCoordinator
 from baldur.services.rate_limit_coordinator.models import RateLimitCoordinatorConfig
 from baldur.services.retry_handler.models import RetryPolicyConfig
+from baldur.services.retry_handler.sinks import retry_exhausted_failure_type
 from baldur.settings.protect import reset_protect_settings
 from baldur.utils.domain_validation import validate_and_normalize_domain
 from tests.factories.llm_doubles import (
@@ -75,6 +76,7 @@ _SYNC_RETRY_SLEEP = "baldur.services.retry_handler.policy._DEFAULT_SLEEPER"
 _ASYNC_SLEEP = "baldur.resilience.policies.async_retry.asyncio.sleep"
 _STORE = "baldur.services.retry_handler.sinks.store_to_dlq"
 _MOVE_LOG = "llm.endpoint_call_failed"
+_REMAINING_MS = "baldur.scaling.deadline_context.get_remaining_ms"
 
 
 # =============================================================================
@@ -410,6 +412,30 @@ class TestWrapConstructionBehavior:
                 [],
                 {"name": "again"},
             ),
+            lambda host: (
+                Endpoint(
+                    FakeLLMClient(base_url=f"https://{host}/v1"), model="llama3.1-8b"
+                ),
+                [
+                    Endpoint(
+                        FakeLLMClient(base_url=f"https://{host}/v1"),
+                        model="llama3.1:8b",
+                    )
+                ],
+                {},
+            ),
+            lambda host: (
+                Endpoint(
+                    FakeLLMClient(base_url=f"https://{host}/v1"),
+                    name="llm." + re.sub(r"[^a-z0-9]", "_", host) + ".gpt_4o",
+                ),
+                [
+                    Endpoint(
+                        FakeLLMClient(base_url=f"https://{host}/v1"), model="gpt-4o"
+                    )
+                ],
+                {},
+            ),
         ],
         ids=[
             "same_host_no_model_pin",
@@ -418,6 +444,8 @@ class TestWrapConstructionBehavior:
             "different_sdk",
             "sync_and_async",
             "named_twice",
+            "model_pins_one_name_once_normalized",
+            "name_equal_to_a_pinned_endpoints_name",
         ],
     )
     def test_shared_identity_or_mixed_clients_are_refused_at_wrap_time(self, build):
@@ -442,6 +470,38 @@ class TestWrapConstructionBehavior:
         wrapped = wrap(client, fallbacks=build(client))
 
         assert _create(wrapped) == "answered"
+
+    @pytest.mark.parametrize(
+        ("sdk", "read"),
+        [
+            ("anthropic", lambda wrapped: wrapped.messages.stream.__self__._client),
+            (
+                "openai",
+                lambda wrapped: wrapped.chat.completions.stream.__self__._client,
+            ),
+            ("openai", lambda wrapped: wrapped.with_streaming_response._client),
+            (
+                "openai",
+                lambda wrapped: (
+                    wrapped.chat.completions.with_streaming_response._completions._client
+                ),
+            ),
+        ],
+        ids=[
+            "anthropic_messages_stream",
+            "openai_chat_stream",
+            "openai_client_with_streaming_response",
+            "openai_resource_with_streaming_response",
+        ],
+    )
+    def test_deferred_request_helpers_run_on_the_callers_own_client(self, sdk, read):
+        """A helper that sends its request after it returns keeps the SDK's own retries."""
+        module = pytest.importorskip(sdk)
+        client = (module.Anthropic if sdk == "anthropic" else module.OpenAI)(
+            api_key="test-key"
+        )
+
+        assert read(wrap(client)) is client
 
     def test_derived_identity_segments_are_lowercase_alphanumerics(self):
         """Every derived name is a valid domain: ``[a-z0-9_.]`` only."""
@@ -546,6 +606,25 @@ class TestWrapMoveRuleBehavior:
         fallback_client = _client("from fallback")
 
         with pytest.raises(TypeError) as raised:
+            _create(wrap(_client(error), fallbacks=[fallback_client]))
+
+        assert raised.value is error
+        assert fallback_client.calls == []
+
+    @pytest.mark.parametrize(
+        "module",
+        ["openai._exceptions", "anthropic._exceptions", "google.genai.errors"],
+        ids=["openai", "anthropic", "google_genai"],
+    )
+    def test_sdk_argument_check_is_reraised_without_a_move(self, module):
+        """An error the SDK raised before sending anything is not the provider's answer."""
+        error_class = type(
+            "UnsupportedFunctionError", (ValueError,), {"__module__": module}
+        )
+        error = error_class("an async function was passed to a sync client")
+        fallback_client = _client("from fallback")
+
+        with pytest.raises(ValueError) as raised:
             _create(wrap(_client(error), fallbacks=[fallback_client]))
 
         assert raised.value is error
@@ -799,7 +878,9 @@ class TestWrapMoveRuleBehavior:
             (call.kwargs["domain"], call.kwargs["failure_type"])
             for call in store.call_args_list
         ]
-        assert parked == [(job_name, "MAX_RETRIES_LLMUNAVAILABLEERROR")]
+        assert parked == [
+            (job_name, retry_exhausted_failure_type(LLMUnavailableError.__name__))
+        ]
         assert store.call_args.kwargs["request_data"] == {"doc_id": "doc-1"}
 
 
@@ -920,6 +1001,21 @@ class TestWrapDeadlineBehavior:
             _create(wrap(client, timeout=1.5))
 
         assert client.calls[0].kwargs["timeout"] == 1.5
+
+    def test_retried_attempt_gets_the_time_left_when_it_starts(self):
+        """Each attempt is bounded by the deadline as it stands then, not at the first."""
+        # Given — a first attempt that fails while the time left falls from 10 s to 3 s
+        client = _client(FakeOpenAIError(500), "answered")
+
+        def remaining_ms() -> float:
+            return 10_000.0 if not client.calls else 3_000.0
+
+        # When
+        with patch(_REMAINING_MS, autospec=True, side_effect=remaining_ms):
+            _create(wrap(client))
+
+        # Then
+        assert [call.kwargs["timeout"] for call in client.calls] == [10.0, 3.0]
 
     def test_no_time_left_ends_the_call_before_any_endpoint(self):
         """A spent deadline starts no endpoint: the call ends as ``deadline``, nothing sent."""

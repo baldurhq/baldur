@@ -42,6 +42,8 @@ from baldur.services.replay_service.handlers import (
     register_replay_handler,
 )
 from baldur.services.replay_service.models import ReplayResult
+from baldur.services.retry_handler.models import RetryPolicyConfig
+from baldur.services.retry_handler.sinks import retry_exhausted_failure_type
 from baldur.settings.protect import reset_protect_settings
 from baldur.utils.domain_validation import resolve_stored_domain
 
@@ -159,6 +161,12 @@ def _unaddressable_name(_name):
         return doc_id
 
 
+def _retry_domain_elsewhere(name):
+    @protected(name, replay=True, retry=RetryPolicyConfig(domain="llm_jobs"))
+    def job(doc_id: str) -> str:
+        return doc_id
+
+
 def _async_dlq_off(name):
     @aprotected(name, dlq=False, replay=True)
     async def job(doc_id: str) -> str:
@@ -179,6 +187,7 @@ _REFUSALS = [
     (_var_keyword, "variadic keyword"),
     (_positional_only, "positional-only"),
     (_unaddressable_name, "cannot be stored as a DLQ domain"),
+    (_retry_domain_elsewhere, "parks its failures under 'llm_jobs'"),
     (_async_dlq_off, "dlq=False"),
 ]
 
@@ -199,6 +208,16 @@ class TestProtectedReplayFlagBehavior:
             decorate(name)
 
         assert has_replay_handler(resolve_stored_domain(name)) is False
+
+    def test_retry_config_naming_the_job_itself_is_accepted(self):
+        """A retry config whose domain is the job's own name parks where replay looks."""
+        name = _job_name()
+
+        @protected(name, replay=True, retry=RetryPolicyConfig(domain=name))
+        def job(doc_id: str) -> str:
+            return doc_id
+
+        assert has_replay_handler(resolve_stored_domain(name)) is True
 
     def test_exact_types_and_optionals_are_accepted(self):
         """``str``/``int``/``float``/``bool``/``None``, ``Optional`` of one, unannotated."""
@@ -260,7 +279,7 @@ class TestProtectedReplayFlagBehavior:
         store.assert_called_once()
         assert store.call_args.kwargs["domain"] == name
         assert store.call_args.kwargs["failure_type"] == (
-            "MAX_RETRIES_LLMUNAVAILABLEERROR"
+            retry_exhausted_failure_type(LLMUnavailableError.__name__)
         )
         assert store.call_args.kwargs["request_data"] == {"doc_id": "doc-7"}
 

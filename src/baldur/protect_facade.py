@@ -1662,10 +1662,12 @@ def _check_replay_flags(
     replay: bool,
     dlq: bool | None,
     context_from: Callable[..., PolicyContext] | None | Literal[False],
+    retry: bool | RetryPolicyConfig | ResiliencePolicy[Any] | None,
 ) -> None:
     """Refuse decorator flags under which ``replay=True`` cannot keep its promise."""
     if not replay:
         return
+    _check_replay_retry_domain(name, retry)
     if dlq is False:
         raise ValueError(
             f"replay=True on {name!r} parks failed calls to re-run them; it "
@@ -1676,6 +1678,31 @@ def _check_replay_flags(
             f"replay=True on {name!r} re-runs the function from the arguments "
             "the decorator stores, and a context_from= replaces them; the two "
             "cannot be combined."
+        )
+
+
+def _check_replay_retry_domain(
+    name: str, retry: bool | RetryPolicyConfig | ResiliencePolicy[Any] | None
+) -> None:
+    """Refuse a retry config that parks the job's failures under another name.
+
+    A retry stage's own non-placeholder ``domain`` is the name its exhausted
+    failures are parked under; the recovery sweep for ``name`` would never
+    see them.
+    """
+    if not isinstance(retry, RetryPolicyConfig):
+        return
+    from baldur.services.retry_handler.models import PLACEHOLDER_DOMAIN
+    from baldur.utils.domain_validation import resolve_stored_domain
+
+    if retry.domain == PLACEHOLDER_DOMAIN:
+        return
+    if resolve_stored_domain(retry.domain) != resolve_stored_domain(name):
+        raise ValueError(
+            f"replay=True on {name!r}: retry=RetryPolicyConfig(domain="
+            f"{retry.domain!r}) parks its failures under {retry.domain!r}, where "
+            f"the replay of {name!r} never looks; leave the domain unset or name "
+            "the job."
         )
 
 
@@ -1771,7 +1798,7 @@ def protected(
             not already be replayed by another function or a hand-written
             handler.
     """
-    _check_replay_flags(name, replay, dlq, context_from)
+    _check_replay_flags(name, replay, dlq, context_from, retry)
     dlq_flag: bool | None = True if replay else dlq
 
     def decorator(func: Callable[..., T]) -> Callable[..., T]:
@@ -1870,7 +1897,7 @@ def aprotected(
     so DLQ entries from async pipelines carry the captured context. A replayed
     coroutine runs to completion on the replaying thread.
     """
-    _check_replay_flags(name, replay, dlq, context_from)
+    _check_replay_flags(name, replay, dlq, context_from, retry)
     dlq_flag: bool | None = True if replay else dlq
 
     def decorator(func: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:

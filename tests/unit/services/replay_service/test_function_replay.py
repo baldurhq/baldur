@@ -627,6 +627,8 @@ class _SlowProvider:
             return "summary"
         if self.answer_mode == "quota":
             raise FakeOpenAIError(402)
+        if self.answer_mode == "failing":
+            raise FakeOpenAIError(500)
         timeout = call.kwargs.get("timeout")
         self._never_set.wait(timeout if timeout is not None else 5.0)
         raise FakeOpenAIError(None, message="Request timed out.")
@@ -750,6 +752,26 @@ class TestRecoveryPassDeadlineCutBehavior:
 
         entry = repo.get_by_id(first)
         assert (entry.status, entry.retry_count) == ("requires_review", cap)
+
+    def test_deadline_cut_by_the_retry_budget_before_the_deadline_stays_pending(
+        self, repo, service, provider, job
+    ):
+        """A retry the deadline leaves no room for ends the replay early: a cut too."""
+        # Given — the provider fails at once, and the next retry would outlast the pass
+        name, done, _ = job
+        provider.answer_mode = "failing"
+        first = _park(repo, name, "doc-1")
+
+        # When
+        result = self._cut_pass(service, name)
+
+        # Then — one attempt, ended before the deadline, back in the backlog
+        assert len(provider.timeouts) == 1
+        assert result.capped is True
+        assert (result.failed_count, result.deadline_cut_dlq_id) == (0, first)
+        cut = repo.get_by_id(first)
+        assert (cut.status, cut.retry_count) == ("pending", 1)
+        assert done == []
 
     def test_deadline_failure_before_the_deadline_is_still_escalated(
         self, repo, service, provider, job

@@ -19,6 +19,11 @@ The move rule after an endpoint fails:
 
 When no endpoint answered, the call raises ``LLMUnavailableError`` chained to
 the last endpoint's error.
+
+A helper that sends its request only after it returns — a stream manager
+(``messages.stream``, ``chat.completions.stream``) or anything reached through
+``with_streaming_response`` — cannot run under the wrap: it is the caller's own
+client's, with the SDK's own retries.
 """
 
 from __future__ import annotations
@@ -90,6 +95,13 @@ _UNLOGGED_MOVE_CATEGORIES = frozenset(
 # and runs on the primary alone.
 _MODEL_KEYWORD = "model"
 _TIMEOUT_KEYWORD = "timeout"
+
+# Attributes whose calls send their request only after they return (a stream
+# manager makes it on ``__enter__``). Protecting them would only protect
+# building the manager — a breaker success for a request not yet sent — while
+# the request ran on the copy whose SDK retries are off. They resolve on the
+# caller's own client instead.
+_DEFERRED_REQUEST_ATTRIBUTES = frozenset({"stream", "with_streaming_response"})
 
 # Bound on the per-function "does it take timeout=" cache.
 _SIGNATURE_CACHE_SIZE = 512
@@ -175,7 +187,9 @@ def wrap(
     (``wrapped.close()``) are the primary client's own.
 
     Only a call with a ``model=`` keyword moves between endpoints; other calls
-    run on the primary alone, still waited, retried and broken.
+    run on the primary alone, still waited, retried and broken. A helper that
+    sends its request after it returns (``stream``, ``with_streaming_response``)
+    is the primary client's own, as you passed it, SDK retries included.
 
     The wrapped object is not an instance of the SDK client's class: a library
     that type-checks its client argument needs the raw client.
@@ -291,10 +305,11 @@ def _prepare_client(client: Any, timeout: Any) -> Any:
 class _PreparedEndpoint:
     """An endpoint as the wrap calls it: prepared client, family, host."""
 
-    __slots__ = ("client", "family", "host", "model", "name")
+    __slots__ = ("client", "family", "host", "model", "name", "original")
 
     def __init__(self, endpoint: Endpoint, timeout: Any) -> None:
         self.family = _sdk_family(endpoint.client)
+        self.original = endpoint.client
         self.client = _prepare_client(endpoint.client, timeout)
         self.host = _host_of(self.client, self.family)
         self.model = endpoint.model
@@ -306,10 +321,23 @@ class _PreparedEndpoint:
         model = self.model if self.model is not None else call_model
         return _derived_identity(self.host, model if isinstance(model, str) else None)
 
+    def fixed_identity(self) -> str | None:
+        """The name every call here is kept under, when no call can change it."""
+        if self.name is not None:
+            return self.name
+        if self.model is not None:
+            return _derived_identity(self.host, self.model)
+        return None
+
     def always_shares_identity_with(self, other: _PreparedEndpoint) -> bool:
-        if self.name is not None or other.name is not None:
-            return self.name is not None and self.name == other.name
-        return self.host == other.host and self.model == other.model
+        # Compared as the names the breaker and the wait are kept under, so two
+        # spellings that normalize to one name (``llama3.1-8b`` and
+        # ``llama3.1:8b``), or a name equal to another endpoint's derived one,
+        # count as shared.
+        mine, theirs = self.fixed_identity(), other.fixed_identity()
+        if mine is not None or theirs is not None:
+            return mine == theirs
+        return _identity_segment(self.host) == _identity_segment(other.host)
 
 
 def _validate_endpoints(endpoints: list[_PreparedEndpoint]) -> None:
@@ -354,6 +382,8 @@ class _WrappedClient:
         return self._endpoints[0].client
 
     def __getattr__(self, attr: str) -> Any:
+        if attr in _DEFERRED_REQUEST_ATTRIBUTES:
+            return getattr(self._endpoints[0].original, attr)
         target = getattr(self._primary, attr)
         if attr.startswith("_") or callable(target):
             return target
@@ -381,6 +411,8 @@ class _Resource:
     def __getattr__(self, attr: str) -> Any:
         wrapped = self._wrapped
         path = (*self._path, attr)
+        if attr in _DEFERRED_REQUEST_ATTRIBUTES:
+            return _resolve(wrapped._endpoints[0].original, path)
         target = _resolve(wrapped._primary, path)
         if attr.startswith("_"):
             return target
@@ -456,6 +488,16 @@ def _remaining_seconds() -> float | None:
     except Exception:
         return None
     return None if remaining_ms is None else remaining_ms / 1000.0
+
+
+def _note_deadline_stop() -> None:
+    """Tell the enclosing deadline scope this call ended for want of its time."""
+    try:
+        from baldur.scaling.deadline_context import note_deadline_stop
+
+        note_deadline_stop()
+    except Exception:
+        return
 
 
 def _is_positive_number(value: Any) -> bool:
@@ -540,16 +582,34 @@ class _CallPlan:
         remaining = _remaining_seconds()
         if remaining is not None and remaining <= 0:
             self.attempts.append((self.identity(index), _CATEGORY_DEADLINE))
+            _note_deadline_stop()
             return None
         method = _resolve(endpoint.client, self.path)
         kwargs = dict(self.kwargs)
         if endpoint.model is not None and _MODEL_KEYWORD in kwargs:
             kwargs[_MODEL_KEYWORD] = endpoint.model
-        if remaining is not None and _accepts_timeout(method):
-            kwargs[_TIMEOUT_KEYWORD] = _deadline_timeout(
-                kwargs.get(_TIMEOUT_KEYWORD), remaining, self.wrapped._timeout
-            )
         return method, kwargs
+
+    def bounded(self, method: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """``kwargs`` with the request timeout the deadline leaves as an attempt starts.
+
+        Read per attempt, not once per endpoint: a retry, or a cooldown served
+        before the first attempt, starts with less time left than the endpoint
+        did.
+        """
+        remaining = _remaining_seconds()
+        if remaining is None or not _accepts_timeout(method):
+            return kwargs
+        return {
+            **kwargs,
+            _TIMEOUT_KEYWORD: _deadline_timeout(
+                kwargs.get(_TIMEOUT_KEYWORD), max(remaining, 0.0), self.wrapped._timeout
+            ),
+        }
+
+    def send(self, method: Any, kwargs: dict[str, Any]) -> Any:
+        """One attempt of the SDK call, under the deadline as it stands now."""
+        return method(*self.args, **self.bounded(method, kwargs))
 
     def record_failure(self, index: int, error: Exception) -> bool:
         """Note why endpoint ``index`` failed; False when the error must propagate."""
@@ -613,7 +673,7 @@ def _call(
         try:
             result = protect(
                 plan.identity(index),
-                functools.partial(method, *args, **call_kwargs),
+                functools.partial(plan.send, method, call_kwargs),
                 retry=True,
                 circuit_breaker=True,
                 dlq=False,
@@ -649,7 +709,7 @@ async def _acall(
         async def attempt(
             method: Any = method, call_kwargs: dict[str, Any] = call_kwargs
         ) -> Any:
-            return await method(*args, **call_kwargs)
+            return await method(*args, **plan.bounded(method, call_kwargs))
 
         try:
             result = await aprotect(

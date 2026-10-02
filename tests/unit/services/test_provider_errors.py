@@ -361,6 +361,27 @@ class TestClassifyProviderErrorBehavior:
 
         assert (verdict.status, verdict.category) == (None, TRANSIENT)
 
+    @pytest.mark.parametrize(
+        "module",
+        ["openai._exceptions", "anthropic._exceptions", "google.genai.errors"],
+        ids=["openai", "anthropic", "google_genai"],
+    )
+    def test_sdk_exception_outside_its_api_error_family_gets_no_verdict(self, module):
+        """An SDK's argument check or finish-reason check carries no provider answer."""
+        error_class = type(
+            "LengthFinishReasonError", (Exception,), {"__module__": module}
+        )
+
+        assert classify_provider_error(error_class("stopped at max_tokens")) is None
+
+    def test_real_genai_argument_check_gets_no_verdict(self):
+        """Gen AI refuses an async function on a sync client before any request."""
+        errors = pytest.importorskip("google.genai.errors")
+
+        error = errors.UnsupportedFunctionError("async function on a sync client")
+
+        assert classify_provider_error(error) is None
+
     def test_wrapper_library_subclass_is_recognized_through_its_mro(self):
         """A library subclassing the SDK's error (LiteLLM does) is still the SDK's answer."""
         openai = pytest.importorskip("openai")

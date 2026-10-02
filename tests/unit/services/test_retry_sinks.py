@@ -1113,6 +1113,18 @@ class TestDLQSinkCaptureMarkBehavior:
 
         assert getattr(error, "dlq_capture_dispatched", False) is False
 
+    def test_store_kept_by_the_local_fallback_marks_the_exception(self):
+        """The local fallback record holds the entry, so the hook must not add a copy."""
+        error = TimeoutError("no endpoint answered")
+        with patch(
+            self._STORE,
+            autospec=True,
+            return_value=DLQEntryResult.fallback("DLQ down", "dlq-fallback.jsonl"),
+        ):
+            DLQSink().handle_failure(error, None, self._verdict())
+
+        assert error.dlq_capture_dispatched is True
+
     def test_raising_store_leaves_the_exception_unmarked(self):
         """A store that raises parked nothing, so nothing is marked."""
         error = TimeoutError("no endpoint answered")

@@ -54,6 +54,30 @@ _request_deadline: ContextVar[float | None] = ContextVar(
     "request_deadline", default=None
 )
 
+
+class DeadlineStop:
+    """Whether the work run inside one ``deadline_scope`` was stopped by its deadline.
+
+    Work that ends early because the deadline leaves it no room — a retry that
+    would overrun it, a cooldown longer than the time left, a call never
+    started — ends before the deadline itself, so the clock alone cannot tell
+    that end from an ordinary failure. Such work notes it here
+    (``note_deadline_stop``) and the scope's owner reads ``stopped``.
+    """
+
+    __slots__ = ("stopped",)
+
+    def __init__(self) -> None:
+        self.stopped = False
+
+
+# The innermost scope's stop record. Shared by reference with every context
+# copied from it (a thread, ``asyncio.run``), so a note made there reaches the
+# scope's owner.
+_deadline_stop: ContextVar[DeadlineStop | None] = ContextVar(
+    "deadline_stop", default=None
+)
+
 # Minimum useful time (ms) — below this, Fast-Fail
 DEFAULT_MINIMUM_USEFUL_TIME_MS: float = float(
     os.environ.get("BALDUR_DEADLINE_MINIMUM_USEFUL_MS", "50")
@@ -311,12 +335,25 @@ def get_deadline_aware_statement_timeout(
     return max(1, int(remaining))  # at least 1ms
 
 
+def note_deadline_stop() -> None:
+    """Record that work inside the innermost ``deadline_scope`` stopped because of its deadline.
+
+    No-op outside a scope. Called by work that ends early for want of time, so
+    the scope's owner can tell that end from a failure of the work itself.
+    """
+    record = _deadline_stop.get()
+    if record is not None:
+        record.stopped = True
+
+
 @contextmanager
-def deadline_scope(remaining_ms: float) -> Generator[None, None, None]:
+def deadline_scope(remaining_ms: float) -> Generator[DeadlineStop, None, None]:
     """
     Deadline scope context manager.
 
     Sets the deadline on block entry and restores the previous value on exit.
+    Yields the scope's ``DeadlineStop``: ``stopped`` is true when work inside
+    noted that the deadline ended it (``note_deadline_stop``).
 
     Usage:
         with deadline_scope(3000):
@@ -328,11 +365,15 @@ def deadline_scope(remaining_ms: float) -> Generator[None, None, None]:
         remaining_ms: Remaining time (milliseconds)
     """
     previous = _request_deadline.get()
+    previous_stop = _deadline_stop.get()
+    record = DeadlineStop()
+    _deadline_stop.set(record)
     set_deadline(remaining_ms)
     try:
-        yield
+        yield record
     finally:
         _request_deadline.set(previous)
+        _deadline_stop.set(previous_stop)
 
 
 # =============================================================================

@@ -58,6 +58,10 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
+# Exits that mean "the deadline left no room", when the deadline is the budget
+# (the sync ladder's set).
+_DEADLINE_STOP_REASONS = frozenset({"deadline", "rate_limit_deferred"})
+
 T = TypeVar("T")
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -691,6 +695,15 @@ class AsyncRetryPolicy:
             )
 
             await asyncio.sleep(delay)
+
+        # A ladder the deadline ended early — no room left for the next
+        # attempt, or a cooldown longer than the time left — stops before the
+        # deadline itself. The deadline scope's owner is told, so it can tell
+        # that end from a failure of the call (sync parity).
+        if budget_reason == "deadline" and reason in _DEADLINE_STOP_REASONS:
+            from baldur.scaling.deadline_context import note_deadline_stop
+
+            note_deadline_stop()
 
         # Cooldown-deferral exits are synthesized FIRST, ahead of the
         # result-rejection branch below (sync parity): ``last_error is None``

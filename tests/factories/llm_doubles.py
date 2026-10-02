@@ -85,14 +85,28 @@ class _StatusErrorShape(Exception):
         self.type = error_type
 
 
-class FakeOpenAIError(_StatusErrorShape):
+def _sdk_api_error(module: str) -> type[_StatusErrorShape]:
+    """A stand-in for an SDK's ``APIError``, the base of every failed API call it raises.
+
+    The real status errors and connection errors both derive from it; the
+    classifier reads a status-less exception as a connection failure only
+    inside that family, so the stand-ins carry it too.
+    """
+    return type(
+        "APIError",
+        (_StatusErrorShape,),
+        {"__module__": module, "__qualname__": "APIError"},
+    )
+
+
+class FakeOpenAIError(_sdk_api_error(_OPENAI_ERRORS_MODULE)):  # type: ignore[misc]
     """An exception the classifier reads as raised by the OpenAI SDK."""
 
 
 FakeOpenAIError.__module__ = _OPENAI_ERRORS_MODULE
 
 
-class FakeAnthropicError(_StatusErrorShape):
+class FakeAnthropicError(_sdk_api_error(_ANTHROPIC_ERRORS_MODULE)):  # type: ignore[misc]
     """An exception the classifier reads as raised by the Anthropic SDK."""
 
 

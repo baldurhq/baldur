@@ -17,6 +17,10 @@ rather than on words in a message:
 - **transient** — a 408, 409 or 5xx, or no status at all (a connection error, a
   timeout): retried on the usual ladder.
 
+An exception the SDK raises outside its family of failed API calls (its
+``APIError``) — an argument check before any request, a finish-reason check
+after a 200 — carries no provider answer and gets no verdict.
+
 Only exceptions raised by the OpenAI Python SDK, the Anthropic SDK and the
 Google Gen AI SDK (``google-genai``) are classified, recognized by the module
 their class (or a base class) is defined in. Every other exception gets no
@@ -82,6 +86,11 @@ _SDK_MODULE_ROOTS: dict[str, str] = {"openai": "openai", "anthropic": "anthropic
 _GOOGLE_GENAI_MODULE = "google.genai"
 _GOOGLE_GENAI_PROVIDER = "google-genai"
 
+# The base class each SDK raises a failed API call from: its status errors and
+# its connection / timeout errors. A status-less exception outside it was
+# raised by the SDK's own checks, not by the call.
+_API_ERROR_CLASS_NAME = "APIError"
+
 # Categories under which re-sending the same request cannot help.
 _NON_RETRYABLE_CATEGORIES = frozenset(
     {
@@ -131,6 +140,8 @@ def classify_provider_error(exc: Any) -> ProviderVerdict | None:
             return None
         status = _status_of(exc)
         category = _category_of(exc, status)
+        if category is None:
+            return None
         return ProviderVerdict(
             category=category,
             status=status,
@@ -166,20 +177,34 @@ def is_invalid_request(exc: Any) -> bool:
     )
 
 
+def _provider_of_class(cls: type) -> str | None:
+    """The SDK a class is defined in, or None."""
+    module = getattr(cls, "__module__", None)
+    if not isinstance(module, str):
+        return None
+    root = module.split(".", 1)[0]
+    if root in _SDK_MODULE_ROOTS:
+        return _SDK_MODULE_ROOTS[root]
+    if module == _GOOGLE_GENAI_MODULE or module.startswith(_GOOGLE_GENAI_MODULE + "."):
+        return _GOOGLE_GENAI_PROVIDER
+    return None
+
+
 def _provider_of(exc: BaseException) -> str | None:
     """The SDK that defined ``exc``'s class or one of its bases, or None."""
     for cls in type(exc).__mro__:
-        module = getattr(cls, "__module__", None)
-        if not isinstance(module, str):
-            continue
-        root = module.split(".", 1)[0]
-        if root in _SDK_MODULE_ROOTS:
-            return _SDK_MODULE_ROOTS[root]
-        if module == _GOOGLE_GENAI_MODULE or module.startswith(
-            _GOOGLE_GENAI_MODULE + "."
-        ):
-            return _GOOGLE_GENAI_PROVIDER
+        provider = _provider_of_class(cls)
+        if provider is not None:
+            return provider
     return None
+
+
+def _is_api_error(exc: BaseException) -> bool:
+    """Whether ``exc`` belongs to its SDK's family of failed API calls."""
+    return any(
+        cls.__name__ == _API_ERROR_CLASS_NAME and _provider_of_class(cls) is not None
+        for cls in type(exc).__mro__
+    )
 
 
 def _int_attribute(exc: BaseException, name: str) -> int | None:
@@ -197,12 +222,18 @@ def _status_of(exc: BaseException) -> int | None:
     return _int_attribute(exc, "code")
 
 
-def _category_of(exc: BaseException, status: int | None) -> ProviderErrorCategory:
-    """Apply the category table; the first matching row wins."""
+def _category_of(
+    exc: BaseException, status: int | None
+) -> ProviderErrorCategory | None:
+    """Apply the category table; the first matching row wins.
+
+    ``None`` for a status-less exception the SDK raised outside a call — no
+    provider answered it.
+    """
     if _is_quota_exhausted(exc, status):
         return ProviderErrorCategory.QUOTA_EXHAUSTED
     if status is None:
-        return ProviderErrorCategory.TRANSIENT
+        return ProviderErrorCategory.TRANSIENT if _is_api_error(exc) else None
     if status == _STATUS_TOO_MANY_REQUESTS:
         return ProviderErrorCategory.RATE_LIMITED
     if status in _OVERLOADED_STATUSES:
