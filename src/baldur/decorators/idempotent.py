@@ -460,6 +460,30 @@ def idempotent(  # noqa: C901, PLR0915
                 return
             _mark_failed_fail_open(gate, key, error, check)
 
+        def _end_from_outside(
+            gate: IdempotencyGate,
+            key: str,
+            exc: BaseException,
+            check: IdempotencyCheckResult,
+            scope: WorkScope,
+            token: Token[WorkScope | None],
+        ) -> None:
+            """The function was ended from outside by a ``BaseException``.
+
+            A cancel, a gevent timeout or ``KeyboardInterrupt`` settles like a
+            raise: released once nothing it started still runs. The mark goes
+            through the sync gate on this thread, as on every other path.
+            ``GeneratorExit`` — a coroutine finalized, possibly on an arbitrary
+            thread with no running loop — only closes the scope and leaves the
+            claim to its execution window.
+            """
+            if isinstance(exc, GeneratorExit):
+                close_work_scope(scope, token)
+                return
+            _release_after_abandoned_work(
+                gate, key, type(exc).__name__, check, scope, token
+            )
+
         def _resolve_key(args: tuple, kwargs: dict) -> str:
             if key_fn is not None:
                 return _coerce_key_fn_result(key_fn(*args, **kwargs), resolved_domain)
@@ -535,11 +559,8 @@ def idempotent(  # noqa: C901, PLR0915
                         gate, key, str(exc), check, scope, token
                     )
                     raise
-                except BaseException:
-                    # Cancelled from outside: the claim stays as it is, but the
-                    # scope leaves the context so a long-lived task does not
-                    # chain one scope per cancelled call.
-                    close_work_scope(scope, token)
+                except BaseException as exc:
+                    _end_from_outside(gate, key, exc, check, scope, token)
                     raise
                 close_work_scope(scope, token)
                 _mark_completed_fail_open(gate, key, check)
@@ -565,8 +586,8 @@ def idempotent(  # noqa: C901, PLR0915
             except Exception as exc:
                 _release_after_abandoned_work(gate, key, str(exc), check, scope, token)
                 raise
-            except BaseException:
-                close_work_scope(scope, token)  # see async_wrapper
+            except BaseException as exc:
+                _end_from_outside(gate, key, exc, check, scope, token)
                 raise
             close_work_scope(scope, token)
             _mark_completed_fail_open(gate, key, check)

@@ -1,19 +1,22 @@
 """
 DLQ Replay Execution Mixin.
 
-Provides the single-entry replay-execution primitive (``_execute_replay``)
-and the replay-exhausted metric emission (``_emit_replay_exhausted``) shared by
-every replay caller: the OSS single-entry ``retry_entry`` / ``force_redrive_entry``
-and the PRO batch / throttle-aware replay overlays (which reach these via MRO).
+Provides the single-entry replay-execution primitive (``_run_operator_replay``,
+with the boolean ``_execute_replay`` over it) and the replay-exhausted metric
+emission (``_emit_replay_exhausted``) shared by every replay caller: the OSS
+single-entry ``retry_entry`` / ``force_redrive_entry`` and the PRO batch /
+throttle-aware replay overlays (which reach these via MRO).
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import structlog
 
 from baldur.audit.trace import extract_origin_trace
+from baldur.core.abandoned_work import close_work_scope, open_work_scope
 
 if TYPE_CHECKING:
     from baldur.interfaces.repositories import FailedOperationData
@@ -25,7 +28,26 @@ logger = structlog.get_logger()
 # the published attempts family.
 REPLAY_TYPE_SINGLE = "single"
 
-__all__ = ["REPLAY_TYPE_SINGLE", "ReplayExecutionMixin"]
+__all__ = ["OperatorReplayOutcome", "REPLAY_TYPE_SINGLE", "ReplayExecutionMixin"]
+
+
+@dataclass(frozen=True)
+class OperatorReplayOutcome:
+    """How one operator replay of a DLQ entry ended.
+
+    Attributes:
+        succeeded: The handler ran and reported success.
+        work_may_continue: Work the job stopped waiting for — its own
+            ``timeout=`` cut it off, or an interruption cut the wait short —
+            may still be running. The entry must then stay replaying until the
+            stale-replay release instead of going back to the queue, where any
+            replay could start the job again beside itself.
+        error: The exception the handler raised, if it raised.
+    """
+
+    succeeded: bool
+    work_may_continue: bool = False
+    error: Exception | None = None
 
 
 class ReplayExecutionMixin:
@@ -35,16 +57,44 @@ class ReplayExecutionMixin:
         """
         Execute replay for a single DLQ entry using registered handler.
 
-        This is the convergence point of the whole operator replay surface
-        (single-entry retry, force-redrive, batch and throttle-aware replay), so
-        it is where those replays enter the replay attempt/outcome metrics — the
-        replay service records its own stack separately.
+        The boolean form of :meth:`_run_operator_replay`: an exception the
+        handler raised is raised again, and whether the job may still be
+        running is not reported. Callers that complete the entry afterwards
+        use :meth:`_run_operator_replay` so a job still running holds it.
 
         Args:
             entry: The failed operation entry to replay
 
         Returns:
             True if replay succeeded, False otherwise
+        """
+        outcome = self._run_operator_replay(entry)
+        if outcome.error is not None:
+            raise outcome.error
+        return outcome.succeeded
+
+    def _run_operator_replay(self, entry: FailedOperationData) -> OperatorReplayOutcome:
+        """
+        Execute replay for a single DLQ entry using registered handler.
+
+        This is the convergence point of the whole operator replay surface
+        (single-entry retry, force-redrive, batch and throttle-aware replay), so
+        it is where those replays enter the replay attempt/outcome metrics — the
+        replay service records its own stack separately.
+
+        The handler runs inside a work scope: a timeout site whose cancel
+        failed, or a wait an interruption cut short, records the still-running
+        work into it, and a scope still holding at close means the job may
+        still be running (``work_may_continue``).
+
+        Args:
+            entry: The failed operation entry to replay
+
+        Returns:
+            The outcome. A gate refusal is ``succeeded=False``; an exception
+            from the handler is captured into ``error``. An exception from a
+            gate or the handler lookup, and a ``BaseException`` from the
+            handler, propagate.
         """
         import time
 
@@ -72,7 +122,7 @@ class ReplayExecutionMixin:
                     reason=gate_reason,
                     duration_ms=(time.monotonic() - start) * 1000,
                 )
-                return False
+                return OperatorReplayOutcome(succeeded=False)
 
             handler = get_replay_handler(entry.domain)
 
@@ -85,7 +135,7 @@ class ReplayExecutionMixin:
                     reason=reason,
                     duration_ms=(time.monotonic() - start) * 1000,
                 )
-                return False
+                return OperatorReplayOutcome(succeeded=False)
 
             # 679 D5: centralized origin-trace span link — this is the single
             # point every replay caller converges on (replay / retry_entry /
@@ -100,9 +150,11 @@ class ReplayExecutionMixin:
             ReplayEventHandler.on_replay_started(entry.domain, REPLAY_TYPE_SINGLE)
             replay_start = time.monotonic()
             succeeded = False
+            error: Exception | None = None
 
             # Execute replay. One completion site, reached by the handler's
             # return AND by its crash, so the two counters cannot come apart.
+            scope, token = open_work_scope(None)
             try:
                 with span_with_link(
                     "dlq.replay",
@@ -116,11 +168,18 @@ class ReplayExecutionMixin:
                     handler_ran = True
                     result = handler.replay(entry)
                 succeeded = result.success
+            except Exception as e:
+                error = e
             finally:
+                work_may_continue = close_work_scope(scope, token) is None
                 ReplayEventHandler.on_replay_completed(
                     entry.domain, succeeded, time.monotonic() - replay_start
                 )
-            return succeeded
+            return OperatorReplayOutcome(
+                succeeded=succeeded,
+                work_may_continue=work_may_continue,
+                error=error,
+            )
         finally:
             if handler_ran:
                 duration = time.monotonic() - start

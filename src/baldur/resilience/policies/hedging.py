@@ -156,6 +156,12 @@ class HedgingPolicy(ResiliencePolicy[T], Generic[T]):
     Backpressure logic (load-based delay adjustment/disabling) is Hedging-specific logic,
     so it is kept inside. The load level is updated externally via on_config_updated().
 
+    Hedging runs one operation on several candidates at once, so every candidate
+    must be safe to run concurrently and to run again. A candidate still running
+    when the hedge gives up — another candidate won, or the overall timeout fired —
+    is not stopped and holds nothing: an idempotency key or a DLQ replay of the
+    hedged call can start the operation again while it runs.
+
     Usage example::
 
         hedging = HedgingPolicy(

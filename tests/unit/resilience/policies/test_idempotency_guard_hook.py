@@ -53,11 +53,11 @@ from baldur.resilience.policies.idempotency import (
     AsyncIdempotencyHook,
     IdempotencyGuard,
     IdempotencyHook,
-    _close_unsettled_call_scope,
     _ensure_async_policy_gate,
     _ensure_policy_gate,
     _read_keyed_call,
     _reset_policy_gate,
+    _settle_call_ended_from_outside,
     _write_keyed_call,
 )
 
@@ -1488,23 +1488,24 @@ _DEFERRED_ROWS = [
     ("timeout_error", "raised", "failed"),
     ("timeout_fallback", "returned", "completed"),
     ("timeout_fallback", "raised", "failed"),
-    ("other_error", "returned", "failed"),
-    ("failure_fallback", "returned", "failed"),
+    ("other_error", "returned", "completed"),
+    ("failure_fallback", "returned", "completed"),
 ]
 _DEFERRED_IDS = [
     "timeout_own_returned_completes",
     "timeout_own_raised_releases",
     "timeout_answer_own_returned_completes",
     "timeout_answer_own_raised_releases",
-    "raise_own_returned_releases",
-    "failure_answer_own_returned_releases",
+    "raise_own_returned_completes",
+    "failure_answer_own_returned_completes",
 ]
 
 
 class TestIdempotencyHookAbandonedWorkBehavior:
-    """805 D10 decision table over the real in-process gate: a call that did
-    not return keeps its claim ``executing`` while recorded work runs, then
-    marks completed only for a timeout whose own work returned."""
+    """805 D10 / 810 D2 decision table over the real in-process gate: a call
+    that did not return keeps its claim ``executing`` while recorded work runs,
+    then marks completed only when its own cut-off work returned, whatever
+    ended the call."""
 
     @pytest.fixture(autouse=True)
     def _iso(self, policy_gate_isolation):
@@ -1538,7 +1539,7 @@ class TestIdempotencyHookAbandonedWorkBehavior:
             ("timeout_error", "returned", "completed"),
             ("timeout_error", "raised", "failed"),
             ("timeout_error", None, "failed"),
-            ("other_error", "returned", "failed"),
+            ("other_error", "returned", "completed"),
         ],
         ids=[
             "timeout_own_done_returned",
@@ -1806,12 +1807,16 @@ class TestAsyncIdempotencyHookAbandonedWorkBehavior:
 
 
 # =============================================================================
-# The facade's raise-exit closes a scope left open, never one the hook closed
+# The facade's raise-exit settles a scope left open, never one the hook closed
 # =============================================================================
 
 
-class TestCloseUnsettledCallScopeBehavior:
+class TestCallEndedFromOutsideScopeBehavior:
     """A call that skipped its hook closes its scope; a hook-closed one is kept."""
+
+    @pytest.fixture(autouse=True)
+    def _iso(self, policy_gate_isolation):
+        return
 
     def test_scope_left_open_is_closed_and_leaves_the_context(self):
         # Given — the guard opened the call's scope and no hook ran.
@@ -1821,7 +1826,7 @@ class TestCloseUnsettledCallScopeBehavior:
         opened = current_work_scope()
 
         # When
-        _close_unsettled_call_scope(context)
+        _settle_call_ended_from_outside(context, KeyboardInterrupt())
 
         # Then
         assert opened is not before
@@ -1840,7 +1845,7 @@ class TestCloseUnsettledCallScopeBehavior:
         assert close_work_scope(call.scope, call.token, settled.append) is None
 
         # When — the raise-exit runs, then the piece ends.
-        _close_unsettled_call_scope(context)
+        _settle_call_ended_from_outside(context, KeyboardInterrupt())
         piece.set_result("done")
 
         # Then — the late settle ran once, with the piece's outcome.
@@ -1849,7 +1854,9 @@ class TestCloseUnsettledCallScopeBehavior:
     def test_context_without_a_keyed_call_is_untouched(self):
         before = current_work_scope()
 
-        _close_unsettled_call_scope(PolicyContext(order_id="o-1"))
-        _close_unsettled_call_scope(None)
+        _settle_call_ended_from_outside(
+            PolicyContext(order_id="o-1"), KeyboardInterrupt()
+        )
+        _settle_call_ended_from_outside(None, KeyboardInterrupt())
 
         assert current_work_scope() is before

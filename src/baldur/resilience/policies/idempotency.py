@@ -6,10 +6,16 @@ Two-phase idempotency enforcement:
 - IdempotencyHook (Phase 2): Post-execution mark. The function returned ->
   completed now. Otherwise the key follows the work the call abandoned: it
   stays held (a repeat reads ABORT) while any recorded work still runs, then
-  is marked completed if the call ended on a timeout and its own timed-out
-  work finished successfully, else failed (re-claimable). Work cancelled
-  before it started, and an async timeout (which cancels the coroutine),
-  leave nothing running, so the key is released at once.
+  is marked completed if the call's own cut-off work (the work its own wait
+  gave up on — its timeout, or an interruption of that wait) all returned,
+  else failed (re-claimable). Work cancelled before it started, and an async
+  timeout (which cancels the coroutine), leave nothing running, so the key is
+  released at once.
+- A call that leaves the composer by a ``BaseException`` before its hook ran
+  (cancelled from outside, a gevent timeout, ``KeyboardInterrupt``) settles
+  by the same rule through the facade (``_settle_call_ended_from_outside`` /
+  ``_settle_async_call_ended_from_outside``); a coroutine closed by
+  ``GeneratorExit`` only closes its scope and leaves the claim to its window.
 
 Per-call record via context.extra: the guard writes the key, the per-call
 retry count, the dedup memory window, the claim id and the work scope
@@ -45,6 +51,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import functools
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
@@ -60,7 +67,6 @@ from baldur.core.abandoned_work import (
     close_work_scope,
     open_work_scope,
 )
-from baldur.core.exceptions import TimeoutPolicyError
 from baldur.interfaces.resilience_policy import (
     GuardResult,
     PolicyOutcome,
@@ -68,9 +74,14 @@ from baldur.interfaces.resilience_policy import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Coroutine
     from contextvars import Token
 
-    from baldur.core.idempotency_gate import AsyncIdempotencyGate, IdempotencyGate
+    from baldur.core.idempotency_gate import (
+        AsyncIdempotencyGate,
+        IdempotencyCheckResult,
+        IdempotencyGate,
+    )
     from baldur.interfaces.resilience_policy import PolicyContext
 
 logger = structlog.get_logger()
@@ -117,9 +128,16 @@ _ASYNC_POLICY_FALLBACK_CACHE = AsyncInMemoryCacheAdapter(
 )
 _async_policy_gate_state: dict[str, Any] = {"initialized": False, "gate": None}
 
-# Late async marks scheduled on a caller's loop (in-process async ledger only),
-# held until done so the loop's weak task references cannot drop them.
-_DEFERRED_MARK_TASKS: set[asyncio.Task[None]] = set()
+# Tasks that must outlive the await that started them — late async marks
+# scheduled on a caller's loop, and the shielded claims and marks a cancel
+# leaves running — held until done so the loop's weak task references cannot
+# drop them.
+_HELD_TASKS: set[asyncio.Task[Any]] = set()
+
+
+def _hold_task(task: asyncio.Task[Any]) -> None:
+    _HELD_TASKS.add(task)
+    task.add_done_callback(_HELD_TASKS.discard)
 
 
 def _ensure_policy_gate() -> IdempotencyGate:
@@ -250,13 +268,14 @@ def _read_keyed_call(context: PolicyContext | None) -> _KeyedCall | None:
     )
 
 
-def _settled_as_completed(timed_out: bool, summary: WorkSummary) -> bool:
+def _settled_as_completed(summary: WorkSummary) -> bool:
     """The key rule for a call that did not return.
 
-    Completed only when the call ended on a timeout and its own timed-out work
-    finished successfully; any other work only extends the hold.
+    Completed only when the call's own cut-off work — the work its own wait
+    gave up on, whether its timeout or an interruption ended that wait — was
+    recorded and all of it returned; any other work only extends the hold.
     """
-    return timed_out and summary.own_succeeded
+    return summary.own_succeeded
 
 
 def _close_call_scope(
@@ -267,27 +286,6 @@ def _close_call_scope(
     if call.scope is None:
         return WorkSummary()
     return close_work_scope(call.scope, call.token, on_settled)
-
-
-def _close_unsettled_call_scope(context: PolicyContext | None) -> None:
-    """Close the work scope a keyed call left open; mark nothing.
-
-    The hooks run only when the call ends by an ``Exception`` or a result. A
-    call ended by a ``BaseException`` (cancelled from outside, a gevent
-    timeout) leaves the scope its guard opened current in the caller's
-    context, where a long-lived task or thread would chain one more scope per
-    such exit. The claim is left as it is. A scope the hook already closed is
-    untouched — it may still be holding for a late mark.
-    """
-    call = _read_keyed_call(context)
-    if call is None or call.scope is None or call.scope.closed:
-        return
-    close_work_scope(call.scope, call.token)
-
-
-def _timed_out_trigger(result: PolicyResult) -> bool:
-    """True when a fallback answered a timeout in the function's place."""
-    return result.metadata.get("fallback_trigger") == PolicyOutcome.TIMEOUT.value
 
 
 def _async_ledger_is_process_local(gate: AsyncIdempotencyGate) -> bool:
@@ -377,9 +375,228 @@ def _spawn_deferred_async_mark(
     gate: AsyncIdempotencyGate, call: _KeyedCall, completed: bool, error: str
 ) -> None:
     """Run on the caller's loop: start the late mark and hold its task."""
-    task = asyncio.ensure_future(_run_deferred_async_mark(gate, call, completed, error))
-    _DEFERRED_MARK_TASKS.add(task)
-    task.add_done_callback(_DEFERRED_MARK_TASKS.discard)
+    _hold_task(
+        asyncio.ensure_future(_run_deferred_async_mark(gate, call, completed, error))
+    )
+
+
+async def _run_immediate_async_mark(
+    call: _KeyedCall, completed: bool, error: str
+) -> None:
+    """The async hook's immediate mark; a fault is logged, never raised."""
+    try:
+        await _mark_async(_ensure_async_policy_gate(), call, completed, error)
+    except Exception as e:
+        _log_immediate_mark_failure(call.key, completed, e)
+
+
+async def _await_shielded(coro: Coroutine[Any, Any, None]) -> None:
+    """Await ``coro`` so a cancel of the caller does not cut it in half.
+
+    The coroutine runs as a held task: a cancel lands on this await only, and
+    the task finishes on the loop. ``coro`` handles its own exceptions —
+    nobody reads them once the caller was cancelled.
+    """
+    task = asyncio.ensure_future(coro)
+    _hold_task(task)
+    await asyncio.shield(task)
+
+
+def _release_claim_of_cancelled_call(
+    gate: AsyncIdempotencyGate,
+    key: str,
+    ttl: timedelta | None,
+    claim: asyncio.Future[IdempotencyCheckResult],
+) -> None:
+    """Done-callback: release a claim taken for a call cancelled meanwhile.
+
+    The call was cancelled while the store answered its claim, so it never
+    ran. A claim the answer granted is marked failed, scoped to that claim;
+    no claim (SKIP, ABORT, a store fault, or the task cancelled) marks nothing.
+    """
+    from baldur.core.idempotency_gate import IdempotencyDecision
+
+    if claim.cancelled() or claim.exception() is not None:
+        return
+    result = claim.result()
+    if result.decision != IdempotencyDecision.CONTINUE or result.claim_id is None:
+        return
+    call = _KeyedCall(
+        key=key,
+        retry_count=result.retry_count,
+        ttl=ttl,
+        claim_id=result.claim_id,
+        scope=None,
+        token=None,
+    )
+    try:
+        _spawn_deferred_async_mark(gate, call, False, "CancelledError")
+    except Exception as e:
+        _log_deferred_mark_failure(key, e)
+
+
+def _sync_deferred_settle(
+    call: _KeyedCall, error: str
+) -> Callable[[WorkSummary], None]:
+    """The late sync mark: runs on the thread that finishes the last piece."""
+    captured = contextvars.copy_context()
+
+    def deferred(summary: WorkSummary) -> None:
+        def body() -> None:
+            try:
+                completed = _settled_as_completed(summary)
+                _mark_sync(_ensure_policy_gate(), call, completed, error)
+            except Exception as e:
+                _log_deferred_mark_failure(call.key, e)
+
+        captured.copy().run(body)
+
+    return deferred
+
+
+def _settle_sync(call: _KeyedCall, error: str) -> None:
+    """Mark now if nothing the call abandoned runs, else when it ends."""
+    summary = _close_call_scope(call, _sync_deferred_settle(call, error))
+    if summary is None:
+        _log_mark_deferred(call)
+        return
+    completed = _settled_as_completed(summary)
+    try:
+        _mark_sync(_ensure_policy_gate(), call, completed, error)
+    except Exception as e:
+        _log_immediate_mark_failure(call.key, completed, e)
+
+
+def _async_deferred_settle(
+    call: _KeyedCall, error: str, loop: asyncio.AbstractEventLoop
+) -> Callable[[WorkSummary], None]:
+    """The late async mark, for a call that ran on ``loop``.
+
+    Goes through the sync policy gate when the async ledger is the shared
+    (Redis) one — it survives the loop's teardown — and is scheduled back on
+    ``loop`` when the ledger is in-process.
+    """
+    captured = contextvars.copy_context()
+
+    def deferred(summary: WorkSummary) -> None:
+        def body() -> None:
+            completed = _settled_as_completed(summary)
+            try:
+                async_gate = _ensure_async_policy_gate()
+                if _async_ledger_is_process_local(async_gate):
+                    loop.call_soon_threadsafe(
+                        _spawn_deferred_async_mark,
+                        async_gate,
+                        call,
+                        completed,
+                        error,
+                        context=captured.copy(),
+                    )
+                else:
+                    _mark_sync(_ensure_policy_gate(), call, completed, error)
+            except Exception as e:
+                _log_deferred_mark_failure(call.key, e)
+
+        captured.copy().run(body)
+
+    return deferred
+
+
+def _close_async_call_scope(
+    call: _KeyedCall, error: str, loop: asyncio.AbstractEventLoop
+) -> WorkSummary | None:
+    """Close an async call's scope; the summary when nothing it holds runs."""
+    summary = _close_call_scope(call, _async_deferred_settle(call, error, loop))
+    if summary is None:
+        _log_mark_deferred(call)
+    return summary
+
+
+async def _settle_async(call: _KeyedCall, error: str) -> None:
+    """Async twin of :func:`_settle_sync`; the immediate mark is shielded."""
+    summary = _close_async_call_scope(call, error, asyncio.get_running_loop())
+    if summary is None:
+        return
+    await _await_shielded(
+        _run_immediate_async_mark(call, _settled_as_completed(summary), error)
+    )
+
+
+def _unsettled_call(context: PolicyContext | None) -> _KeyedCall | None:
+    """The keyed call a ``BaseException`` exit left unsettled, else None.
+
+    None for an unkeyed call, and for one whose scope is already closed: its
+    hook ran and marked, or handed a late mark to the still-holding scope.
+    """
+    call = _read_keyed_call(context)
+    if call is None or (call.scope is not None and call.scope.closed):
+        return None
+    return call
+
+
+def _close_scope_only(call: _KeyedCall) -> None:
+    """Close a scope and mark nothing: the claim keeps its execution window."""
+    if call.scope is not None:
+        close_work_scope(call.scope, call.token)
+
+
+def _settle_call_ended_from_outside(
+    context: PolicyContext | None, error: BaseException
+) -> None:
+    """Settle a keyed sync call that left the composer before its hook ran.
+
+    A ``BaseException`` — a gevent timeout, ``KeyboardInterrupt``,
+    ``SystemExit`` — skips the hook. The key then follows the hook's rule:
+    released at once when nothing the call started still runs, else held
+    while recorded work runs and then marked by how its own cut-off work
+    ended. The mark is made on this thread while the interruption unwinds.
+    ``GeneratorExit`` only closes the scope.
+    """
+    call = _unsettled_call(context)
+    if call is None:
+        return
+    if isinstance(error, GeneratorExit):
+        _close_scope_only(call)
+        return
+    _settle_sync(call, type(error).__name__)
+
+
+def _settle_async_call_ended_from_outside(
+    context: PolicyContext | None, error: BaseException
+) -> None:
+    """Settle a keyed async call that left the composer before its hook ran.
+
+    The async twin of :func:`_settle_call_ended_from_outside` for an
+    ``asyncio.CancelledError`` (client disconnect, task-group or
+    ``asyncio.timeout()`` cancel) and the like. Nothing is awaited, so the
+    cancellation propagates at once: a mark due now is scheduled on the
+    running loop. ``GeneratorExit`` — a closed loop's pending task finalized,
+    possibly with no running loop — only closes the scope and leaves the
+    claim to its execution window.
+    """
+    call = _unsettled_call(context)
+    if call is None:
+        return
+    if isinstance(error, GeneratorExit):
+        _close_scope_only(call)
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # A coroutine driven without a loop has nothing to schedule a mark on.
+        _close_scope_only(call)
+        return
+    error_name = type(error).__name__
+    summary = _close_async_call_scope(call, error_name, loop)
+    if summary is None:
+        return
+    completed = _settled_as_completed(summary)
+    try:
+        _spawn_deferred_async_mark(
+            _ensure_async_policy_gate(), call, completed, error_name
+        )
+    except Exception as e:
+        _log_immediate_mark_failure(call.key, completed, e)
 
 
 class IdempotencyGuard:
@@ -530,8 +747,9 @@ class IdempotencyHook:
       fallback answer) the key follows the work the call abandoned. While any
       recorded work still runs, the claim stays executing and a repeat reads
       ABORT. When nothing runs (at once, or when the last piece ends) the key
-      is marked completed if the call ended on a timeout and its own timed-out
-      work finished successfully, else failed — re-claimable by the next call.
+      is marked completed if the call's own cut-off work — what its own wait
+      gave up on, by its timeout or an interruption of that wait — all
+      returned, else failed — re-claimable by the next call.
 
     Every mark is scoped to the claim the guard took, so a late mark never
     lands on a later claim of the same key. A late mark runs on the thread
@@ -554,11 +772,7 @@ class IdempotencyHook:
             except Exception as e:
                 _log_immediate_mark_failure(call.key, True, e)
             return
-        self._settle(
-            call,
-            timed_out=_timed_out_trigger(result),
-            error=str(result.metadata.get("original_error", "")),
-        )
+        _settle_sync(call, str(result.metadata.get("original_error", "")))
 
     def on_failure(
         self,
@@ -570,36 +784,7 @@ class IdempotencyHook:
         call = _read_keyed_call(context)
         if call is None:
             return
-        self._settle(
-            call,
-            timed_out=isinstance(error, TimeoutPolicyError),
-            error=str(error),
-        )
-
-    @staticmethod
-    def _settle(call: _KeyedCall, *, timed_out: bool, error: str) -> None:
-        """Mark now if nothing the call abandoned runs, else when it ends."""
-        captured = contextvars.copy_context()
-
-        def deferred(summary: WorkSummary) -> None:
-            def body() -> None:
-                try:
-                    completed = _settled_as_completed(timed_out, summary)
-                    _mark_sync(_ensure_policy_gate(), call, completed, error)
-                except Exception as e:
-                    _log_deferred_mark_failure(call.key, e)
-
-            captured.copy().run(body)
-
-        summary = _close_call_scope(call, deferred)
-        if summary is None:
-            _log_mark_deferred(call)
-            return
-        completed = _settled_as_completed(timed_out, summary)
-        try:
-            _mark_sync(_ensure_policy_gate(), call, completed, error)
-        except Exception as e:
-            _log_immediate_mark_failure(call.key, completed, e)
+        _settle_sync(call, str(error))
 
     def on_execute(
         self, policy_name: str, attempt: int, context: PolicyContext | None = None
@@ -628,9 +813,12 @@ class AsyncIdempotencyGuard:
     awaitable :class:`AsyncIdempotencyGate`. Same two-phase model, same
     fail-CLOSED-by-default posture, same per-call record in ``context.extra``
     and the same work scope as the sync guard, so the async hook marks the
-    claim it took with the exact window the caller requested. A ``CancelledError`` raised while awaiting the gate is a
-    ``BaseException`` and escapes the fail-open ``except Exception``, so
-    cancellation still propagates.
+    claim it took with the exact window the caller requested. A
+    ``CancelledError`` raised while awaiting the gate is a ``BaseException``
+    and escapes the fail-open ``except Exception``, so cancellation still
+    propagates; the claim itself is awaited through ``asyncio.shield``, and a
+    claim the store grants to a call cancelled meanwhile is released once the
+    store has answered.
     """
 
     def __init__(
@@ -679,7 +867,7 @@ class AsyncIdempotencyGuard:
 
             key = self._key_fn(context)
             gate = _ensure_async_policy_gate()
-            result = await gate.check_and_acquire(key, ttl=self._execution_ttl)
+            result = await self._claim(gate, key)
             if result.decision == IdempotencyDecision.SKIP:
                 logger.warning(
                     "idempotency.duplicate_blocked",
@@ -734,6 +922,29 @@ class AsyncIdempotencyGuard:
                 },
             )
 
+    async def _claim(
+        self, gate: AsyncIdempotencyGate, key: str
+    ) -> IdempotencyCheckResult:
+        """Await the claim so a cancel cannot cut the store's answer in half.
+
+        A cancel landing while the store answers lands on this await only: the
+        claim runs on, and a claim it takes for this call — which never ran —
+        is released once the store has answered.
+        """
+        claim = asyncio.ensure_future(
+            gate.check_and_acquire(key, ttl=self._execution_ttl)
+        )
+        _hold_task(claim)
+        try:
+            return await asyncio.shield(claim)
+        except asyncio.CancelledError:
+            claim.add_done_callback(
+                functools.partial(
+                    _release_claim_of_cancelled_call, gate, key, self._ttl
+                )
+            )
+            raise
+
 
 class AsyncIdempotencyHook:
     """Async twin of :class:`IdempotencyHook` (implements ``AsyncPolicyHook``).
@@ -744,8 +955,10 @@ class AsyncIdempotencyHook:
     (directly, or inside ``asyncio.to_thread``) that is still running holds the
     key until it ends. A late mark goes through the sync policy gate when the
     async ledger is the shared (Redis) one — it survives the loop's teardown —
-    and is scheduled on the caller's loop when the ledger is in-process.
-    Fail-open — a transient mark failure is logged but never raises.
+    and is scheduled on the caller's loop when the ledger is in-process. An
+    immediate mark is shielded: a cancel arriving while it is written lets it
+    finish on the loop. Fail-open — a transient mark failure is logged but
+    never raises.
     """
 
     async def on_success(
@@ -759,16 +972,9 @@ class AsyncIdempotencyHook:
             return
         if result.outcome == PolicyOutcome.SUCCESS:
             _close_call_scope(call, None)
-            try:
-                await _mark_async(_ensure_async_policy_gate(), call, True, "")
-            except Exception as e:
-                _log_immediate_mark_failure(call.key, True, e)
+            await _await_shielded(_run_immediate_async_mark(call, True, ""))
             return
-        await self._settle(
-            call,
-            timed_out=_timed_out_trigger(result),
-            error=str(result.metadata.get("original_error", "")),
-        )
+        await _settle_async(call, str(result.metadata.get("original_error", "")))
 
     async def on_failure(
         self,
@@ -780,48 +986,7 @@ class AsyncIdempotencyHook:
         call = _read_keyed_call(context)
         if call is None:
             return
-        await self._settle(
-            call,
-            timed_out=isinstance(error, TimeoutPolicyError),
-            error=str(error),
-        )
-
-    @staticmethod
-    async def _settle(call: _KeyedCall, *, timed_out: bool, error: str) -> None:
-        """Mark now if nothing the call abandoned runs, else when it ends."""
-        loop = asyncio.get_running_loop()
-        captured = contextvars.copy_context()
-
-        def deferred(summary: WorkSummary) -> None:
-            def body() -> None:
-                completed = _settled_as_completed(timed_out, summary)
-                try:
-                    async_gate = _ensure_async_policy_gate()
-                    if _async_ledger_is_process_local(async_gate):
-                        loop.call_soon_threadsafe(
-                            _spawn_deferred_async_mark,
-                            async_gate,
-                            call,
-                            completed,
-                            error,
-                            context=captured.copy(),
-                        )
-                    else:
-                        _mark_sync(_ensure_policy_gate(), call, completed, error)
-                except Exception as e:
-                    _log_deferred_mark_failure(call.key, e)
-
-            captured.copy().run(body)
-
-        summary = _close_call_scope(call, deferred)
-        if summary is None:
-            _log_mark_deferred(call)
-            return
-        completed = _settled_as_completed(timed_out, summary)
-        try:
-            await _mark_async(_ensure_async_policy_gate(), call, completed, error)
-        except Exception as e:
-            _log_immediate_mark_failure(call.key, completed, e)
+        await _settle_async(call, str(error))
 
     async def on_execute(
         self, policy_name: str, attempt: int, context: PolicyContext | None = None

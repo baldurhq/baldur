@@ -1,9 +1,12 @@
-"""Abandoned work — what a timeout cut off but could not stop.
+"""Abandoned work — what a caller stopped waiting for but could not stop.
 
 A timeout on a thread cannot stop the thread: ``Future.cancel()`` succeeds only
 on work that never started, and running work keeps running after its caller
-was freed. A keyed call (an idempotency key) must not release its key while
-such work may still produce the side effect the key guards.
+was freed — by its own timeout, or by an interruption of its wait (a Celery
+soft time limit, a gevent timeout, ``KeyboardInterrupt``). A keyed call (an
+idempotency key) must not release its key while such work may still produce
+the side effect the key guards, and a replay must not hand its entry back
+while the job it ran may still be running.
 
 A **work scope** is that call's hold on what it abandoned. It is carried in a
 ``ContextVar`` — published once, then mutated in place, so a copied context
@@ -12,7 +15,8 @@ task) still reaches the scope that opened it:
 
 - :func:`open_work_scope` opens a scope for one call, chained to the enclosing
   call's scope.
-- :func:`record_abandoned` (called by a timeout site whose cancel failed) adds
+- :func:`record_abandoned` (called by a site that stopped waiting on running
+  work whose cancel failed) adds
   the running future to every scope in the chain that has not settled; the
   future's own end folds it into each scope's summary and drops it, so a scope
   retains only work still running.
@@ -22,9 +26,9 @@ task) still reaches the scope that opened it:
   once, when the last running piece ends.
 
 A piece is the call's **own** work when it was recorded with the very origin
-object the scope was opened with (a keyed call's own timeout stage); every
-other piece only extends the hold. A scope or a piece whose origin is ``None``
-is never own work.
+object the scope was opened with (a keyed call's own timeout stage, whether its
+timeout or an interruption ended the wait); every other piece only extends the
+hold. A scope or a piece whose origin is ``None`` is never own work.
 """
 
 from __future__ import annotations
@@ -183,15 +187,18 @@ def open_work_scope(origin: Any) -> tuple[WorkScope, Token[WorkScope | None]]:
 
 
 def record_abandoned(future: Future[Any], origin: Any = None) -> None:
-    """Record running work a timeout gave up waiting for.
+    """Record running work a site stopped waiting for.
 
-    Adds the future to every scope in the current chain that has not settled
-    and folds it out of each when it ends. A no-op outside any scope.
+    Called by a site that stopped waiting on running work — its own timeout
+    fired, or an interruption cut the wait short — when the work's cancel
+    failed. Adds the future to every scope in the current chain that has not
+    settled and folds it out of each when it ends; a future already finished
+    folds at once with its outcome. A no-op outside any scope.
 
     Args:
         future: The future whose cancel failed (the work is running, or ended
             in the instant before the cancel).
-        origin: The ``PolicyContext`` the timing-out stage ran with, or None.
+        origin: The ``PolicyContext`` the waiting stage ran with, or None.
     """
     scope = _current_scope.get()
     holders: list[WorkScope] = []

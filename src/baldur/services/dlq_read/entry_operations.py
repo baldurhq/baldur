@@ -27,10 +27,26 @@ if TYPE_CHECKING:
         FailedOperationRepository,
     )
     from baldur.models.dlq import DLQConfig
+    from baldur.services.dlq_read.replay_execution import OperatorReplayOutcome
 
 logger = structlog.get_logger()
 
 __all__ = ["EntryOperationsMixin"]
+
+
+def _record_force_redrive(domain: str) -> None:
+    """Force-redrive occurrence signal (fail-open).
+
+    SRE can alert on force frequency as a systemic-problem signal.
+    """
+    try:
+        from baldur.metrics.prometheus import get_metrics
+
+        metrics = get_metrics()
+        if metrics and hasattr(metrics, "dlq"):
+            metrics.dlq.record_force_redrive(domain)
+    except Exception:
+        pass
 
 
 class EntryOperationsMixin:
@@ -39,15 +55,17 @@ class EntryOperationsMixin:
     if TYPE_CHECKING:
         # Host contract — the composed service (dlq_read.service.DLQReadService)
         # provides ``config`` / ``repository`` / ``_log_dlq_audit`` via
-        # DLQCaptureService, and ``_execute_replay`` / ``_emit_replay_exhausted``
-        # via ReplayExecutionMixin. Typing-only stubs; no runtime definition,
-        # so the MRO is unchanged.
+        # DLQCaptureService, and ``_run_operator_replay`` /
+        # ``_emit_replay_exhausted`` via ReplayExecutionMixin. Typing-only
+        # stubs; no runtime definition, so the MRO is unchanged.
         config: DLQConfig
 
         @property
         def repository(self) -> FailedOperationRepository: ...
 
-        def _execute_replay(self, entry: FailedOperationData) -> bool: ...
+        def _run_operator_replay(
+            self, entry: FailedOperationData
+        ) -> OperatorReplayOutcome: ...
 
         def _emit_replay_exhausted(self, entry: FailedOperationData) -> None: ...
 
@@ -74,7 +92,11 @@ class EntryOperationsMixin:
         Applies the same per-entry pipeline as the batch ``replay()`` path to
         the single operator-selected entry: cap-gate, atomic acquire,
         handler execution, then a cap-aware terminal transition. ``success``
-        means the replay succeeded — not merely that the counter advanced.
+        means the replay succeeded — not merely that the counter advanced. A
+        replay that failed while its job may still be running (the job's
+        ``timeout=`` cut it off, or an interruption cut its wait short) is not
+        completed: the entry stays REPLAYING until the stale-replay release,
+        so no replay starts the job again beside itself.
 
         Args:
             pk: Entry primary key
@@ -87,7 +109,8 @@ class EntryOperationsMixin:
                 - id: str
                 - retry_count: int (post-attempt count)
                 - previous_retry_count: int
-                - status: str (resulting entry status)
+                - status: str (resulting entry status; "replaying" while
+                  its job may still be running)
                 - message: str
 
         Raises:
@@ -141,7 +164,9 @@ class EntryOperationsMixin:
         # Manual retry does NOT go through AdaptiveThrottle — throttle
         # backpressure governs automatic sweeps, not a deliberate operator action.
         try:
-            replay_success = self._execute_replay(acquired)
+            outcome = self._run_operator_replay(acquired)
+            if outcome.error is not None and not outcome.work_may_continue:
+                raise outcome.error
         except Exception as e:
             # Never strand the entry in REPLAYING; release via complete_replay.
             self.repository.complete_replay(pk, success=False, note=str(e))
@@ -156,7 +181,7 @@ class EntryOperationsMixin:
             )
             raise DLQReplayError(f"Retry failed for entry {pk}: {e}") from e
 
-        if replay_success:
+        if outcome.succeeded:
             self.resolve_entry(
                 pk,
                 notes=reason or "manual_retry",
@@ -177,6 +202,17 @@ class EntryOperationsMixin:
                 "status": FailedOperationStatus.RESOLVED.value,
                 "message": f"Replay succeeded for entry {pk}",
             }
+
+        if outcome.work_may_continue:
+            return self._hold_replaying_entry(
+                pk,
+                acquired,
+                outcome,
+                old_count,
+                event="dlq.entry_retry_failed",
+                failure_message=f"Retry failed for entry {pk}",
+                origin_log_fields=origin_log_fields,
+            )
 
         # Handler ran but failed: cap-aware terminal transition (REQUIRES_REVIEW
         # at cap, PENDING under cap) — mirrors the batch path.
@@ -227,7 +263,9 @@ class EntryOperationsMixin:
 
         The normal ``retry_entry()`` hard block on at-cap entries is untouched —
         force is purely additive, and only this ADMIN-gated, audited path grants
-        the fresh budget.
+        the fresh budget. As there, a replay that failed while its job may
+        still be running leaves the entry REPLAYING until the stale-replay
+        release.
 
         Args:
             pk: Entry primary key
@@ -241,7 +279,8 @@ class EntryOperationsMixin:
                 - id: str
                 - retry_count: int (post-acquire count — 1 under the fresh budget)
                 - previous_retry_count: int (pre-acquire count)
-                - status: str (resulting entry status)
+                - status: str (resulting entry status; "replaying" while
+                  its job may still be running)
                 - message: str
 
         Raises:
@@ -304,19 +343,12 @@ class EntryOperationsMixin:
             origin_trace_id=origin_trace_id,
         )
 
-        # D7: force-redrive occurrence signal (fail-open) — SRE can alert on
-        # force frequency as a systemic-problem signal.
-        try:
-            from baldur.metrics.prometheus import get_metrics
-
-            metrics = get_metrics()
-            if metrics and hasattr(metrics, "dlq"):
-                metrics.dlq.record_force_redrive(acquired.domain)
-        except Exception:
-            pass
+        _record_force_redrive(acquired.domain)
 
         try:
-            replay_success = self._execute_replay(acquired)
+            outcome = self._run_operator_replay(acquired)
+            if outcome.error is not None and not outcome.work_may_continue:
+                raise outcome.error
         except Exception as e:
             # Never strand the entry in REPLAYING; release via complete_replay.
             self.repository.complete_replay(pk, success=False, note=str(e))
@@ -331,7 +363,7 @@ class EntryOperationsMixin:
             )
             raise DLQReplayError(f"Force-redrive failed for entry {pk}: {e}") from e
 
-        if replay_success:
+        if outcome.succeeded:
             self.resolve_entry(
                 pk, notes="force_redrive", resolution_type="force_redrive"
             )
@@ -350,6 +382,17 @@ class EntryOperationsMixin:
                 "status": FailedOperationStatus.RESOLVED.value,
                 "message": f"Force-redrive succeeded for entry {pk}",
             }
+
+        if outcome.work_may_continue:
+            return self._hold_replaying_entry(
+                pk,
+                acquired,
+                outcome,
+                old_count,
+                event="dlq.entry_force_redrive_failed",
+                failure_message=f"Force-redrive failed for entry {pk}",
+                origin_log_fields=origin_log_fields,
+            )
 
         # Handler ran but failed: cap-aware terminal transition. Under the fresh
         # budget this reverts to PENDING (re-eligible for automatic replay),
@@ -378,6 +421,50 @@ class EntryOperationsMixin:
             "previous_retry_count": old_count,
             "status": resulting_status,
             "message": f"Force-redrive failed for entry {pk}",
+        }
+
+    def _hold_replaying_entry(
+        self,
+        pk: str,
+        acquired: FailedOperationData,
+        outcome: OperatorReplayOutcome,
+        old_count: int,
+        *,
+        event: str,
+        failure_message: str,
+        origin_log_fields: dict[str, Any],
+    ) -> dict[str, Any]:
+        """A failed operator replay whose job may still be running holds the entry.
+
+        The job's wait was cut off while it ran, so the entry is not completed:
+        it stays REPLAYING until the stale-replay release, and no lane — nor a
+        second operator retry — starts the job again beside itself meanwhile.
+
+        Raises:
+            DLQReplayError: The handler raised (-> HTTP 500).
+        """
+        error_fields = {"error": outcome.error} if outcome.error is not None else {}
+        logger.warning(
+            event,
+            record_pk=pk,
+            entry_domain=acquired.domain,
+            failure_type=acquired.failure_type,
+            work_may_continue=True,
+            **error_fields,
+            **origin_log_fields,
+        )
+        held = "the entry stays replaying until the stale-replay release"
+        if outcome.error is not None:
+            raise DLQReplayError(
+                f"{failure_message}: {outcome.error}; {held}"
+            ) from outcome.error
+        return {
+            "success": False,
+            "id": pk,
+            "retry_count": acquired.retry_count,
+            "previous_retry_count": old_count,
+            "status": FailedOperationStatus.REPLAYING.value,
+            "message": f"{failure_message}; its job may still be running, so {held}",
         }
 
     def resolve_entry(

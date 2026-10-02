@@ -74,6 +74,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A chain rescans from the start at most once.
 - Django `ResolutionType` gains a choice: a concrete model's `makemigrations` adds an `AlterField`.
 - `get_baldur_beat_schedule()` and `configure_baldur_celery()` drop `include_traffic_aware`.
+- A keyed call cancelled from outside no longer holds its key for the execution window.
 
 ### Added
 
@@ -138,6 +139,9 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Without Celery, only a recovery that leaves work parked warns to run a replay worker.
 - `force_close(trigger_replay=True)` on a breaker already closed now replays its backlog.
 - A parked job comes back after an outage too short to open its breaker, or with no breaker.
+- A soft time limit cutting a `timeout=` wait now holds the key and replays until the job ends.
+- A keyed call cut off by a soft time limit marks its key done once its own cut-off work succeeds.
+- A console retry or force-redrive whose job may still be running leaves the entry replaying.
 
 ## [1.16.0] - 2026-09-28
 

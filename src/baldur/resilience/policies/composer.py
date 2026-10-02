@@ -398,9 +398,8 @@ def _build_fallback_result(
     (attempt counts, CB state) before the fallback absorbs; it is merged under
     the fallback's own metadata (fallback keys win). ``fallback_trigger``
     records which failure the fallback answered — ``"timeout"``,
-    ``"rejected"`` or ``"failure"`` — for the idempotency hook: a timed-out
-    call's work may still be running, any other answered failure did not
-    complete.
+    ``"rejected"`` or ``"failure"`` — and reaches the caller in the result
+    metadata.
     """
     fb_result: PolicyResult = signal.result
     original_error = signal.__cause__

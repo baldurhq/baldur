@@ -677,20 +677,32 @@ def _build_idempotency_stage(
     )
 
 
-def _close_scope_on_raise(
-    idempotency_stage: tuple[Any, Any] | None, context: PolicyContext | None
+def _settle_keyed_call_on_raise(
+    idempotency_stage: tuple[Any, Any] | None,
+    context: PolicyContext | None,
+    error: BaseException,
+    *,
+    on_loop: bool,
 ) -> None:
-    """A keyed call that left the composer by a raise closes its work scope.
+    """A keyed call that left the composer by a raise settles its key.
 
-    Only a ``BaseException`` (an outside cancel) skips the idempotency hook;
-    without this the scope its guard opened stays current in the caller's
-    context. The claim is left as it is.
+    Only a ``BaseException`` (an outside cancel, a gevent timeout,
+    ``KeyboardInterrupt``) skips the idempotency hook. The key then follows
+    the hook's rule — released at once when nothing the call started still
+    runs — and the scope its guard opened leaves the caller's context. A call
+    whose hook already ran is left as the hook marked it.
     """
     if idempotency_stage is None:
         return
-    from baldur.resilience.policies.idempotency import _close_unsettled_call_scope
+    from baldur.resilience.policies.idempotency import (
+        _settle_async_call_ended_from_outside,
+        _settle_call_ended_from_outside,
+    )
 
-    _close_unsettled_call_scope(context)
+    if on_loop:
+        _settle_async_call_ended_from_outside(context, error)
+    else:
+        _settle_call_ended_from_outside(context, error)
 
 
 def _build_async_idempotency_stage(
@@ -1262,8 +1274,8 @@ def protect(  # verified-by: test_concurrent_duplicates_run_side_effect_exactly_
     start = time.perf_counter()
     try:
         result: PolicyResult[T] = composer.execute(fn, context=context)
-    except BaseException:
-        _close_scope_on_raise(idempotency_stage, context)
+    except BaseException as exc:
+        _settle_keyed_call_on_raise(idempotency_stage, context, exc, on_loop=False)
         raise
     duration = time.perf_counter() - start
     _record_metrics(name, result, duration, mode="sync")
@@ -1346,8 +1358,8 @@ def protect_with_meta(
     start = time.perf_counter()
     try:
         result: PolicyResult[T] = composer.execute(fn, context=context)
-    except BaseException:
-        _close_scope_on_raise(idempotency_stage, context)
+    except BaseException as exc:
+        _settle_keyed_call_on_raise(idempotency_stage, context, exc, on_loop=False)
         raise
     duration = time.perf_counter() - start
     _record_metrics(name, result, duration, mode="sync")
@@ -1457,8 +1469,8 @@ async def aprotect(  # verified-by: test_concurrent_duplicates_run_side_effect_e
     start = time.perf_counter()
     try:
         result: PolicyResult[T] = await composer.execute(fn, context=context)
-    except BaseException:
-        _close_scope_on_raise(idempotency_stage, context)
+    except BaseException as exc:
+        _settle_keyed_call_on_raise(idempotency_stage, context, exc, on_loop=True)
         raise
     duration = time.perf_counter() - start
     _record_metrics(name, result, duration, mode="async")
@@ -1545,8 +1557,8 @@ async def aprotect_with_meta(
     start = time.perf_counter()
     try:
         result: PolicyResult[T] = await composer.execute(fn, context=context)
-    except BaseException:
-        _close_scope_on_raise(idempotency_stage, context)
+    except BaseException as exc:
+        _settle_keyed_call_on_raise(idempotency_stage, context, exc, on_loop=True)
         raise
     duration = time.perf_counter() - start
     _record_metrics(name, result, duration, mode="async")

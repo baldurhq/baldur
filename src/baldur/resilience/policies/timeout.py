@@ -55,7 +55,10 @@ class TimeoutPolicy:
     Work the cancel could not stop (it was already running) is recorded as
     abandoned work of the enclosing keyed call, so that call's idempotency
     key stays held while the work runs and then follows how it ended; work
-    cancelled before it started is not recorded.
+    cancelled before it started is not recorded. A wait cut short by
+    anything other than the function's own exception — a Celery soft time
+    limit, a gevent timeout, ``KeyboardInterrupt`` — records the work the
+    same way and then lets the interruption propagate unchanged.
 
     The executor is process-shared (class-level DCL singleton mirroring
     ``baldur_pro.services.hedging.executor.HedgingExecutor._get_executor``)
@@ -173,6 +176,18 @@ class TimeoutPolicy:
                 executed_policies=["timeout"],
                 metadata={"timeout_seconds": self._timeout_seconds},
             )
+        except BaseException as e:
+            # The function's own exception, re-raised by ``future.result()``.
+            if future.done() and not future.cancelled() and future.exception() is e:
+                raise
+            # Anything else interrupted the wait (a Celery soft time limit, a
+            # gevent timeout, ``KeyboardInterrupt``): the call stops waiting
+            # on work that may be running, exactly as on its own timeout. A
+            # future that finished in the instant is recorded too and folds
+            # at once with its real outcome.
+            if not future.cancel():
+                record_abandoned(future, origin=context)
+            raise
 
 
 class AsyncTimeoutPolicy:
