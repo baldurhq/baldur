@@ -47,9 +47,18 @@ def clean_env(monkeypatch):
             if key.startswith("BALDUR_") or key == "XDG_CONFIG_HOME":
                 os.environ.pop(key, None)
 
+    # The session's own BALDUR_* defaults (the root conftest pins several,
+    # e.g. the control-state refresher's autostart) come back afterwards, or
+    # every later test on this worker runs without them.
+    saved = {
+        key: value
+        for key, value in os.environ.items()
+        if key.startswith("BALDUR_") or key == "XDG_CONFIG_HOME"
+    }
     _strip()
     yield monkeypatch
     _strip()
+    os.environ.update(saved)
 
 
 @pytest.fixture
