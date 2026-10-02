@@ -31,8 +31,17 @@ REFRESHER_THREAD = "control_state_refresher"
 REQUEST_THREAD = threading.main_thread().name
 
 
+# The event-bus subscriber reports from its own thread while the request loop
+# reports from this one; print() writes the text and the newline separately, so
+# two unlocked emits can land on one line and the test's reader drops it.
+_EMIT_LOCK = threading.Lock()
+
+
 def _emit(event: str, **fields: object) -> None:
-    print("PEER " + json.dumps({"event": event, **fields}), flush=True)
+    line = "PEER " + json.dumps({"event": event, **fields}) + "\n"
+    with _EMIT_LOCK:
+        sys.stdout.write(line)
+        sys.stdout.flush()
 
 
 def _record_store_reads(phase: dict[str, str]) -> dict[str, list[str]]:
