@@ -330,6 +330,22 @@ def _record_dispatch_outcome(
         pass
 
 
+def _nothing_parked(service_name: str) -> bool:
+    """Does the store answer that nothing is parked under this name? (fail-loud)
+
+    Lanes are not consulted: with no worker nothing runs a lane, and this
+    process's replay handler registry is not a worker's. Any failure — the
+    import, the read, a count that cannot be attributed — answers False, which
+    keeps the warning.
+    """
+    try:
+        from baldur.services.replay_service import get_replay_service
+
+        return get_replay_service().parked_count_for_recovery(service_name) == 0
+    except Exception:
+        return False
+
+
 def _on_circuit_breaker_closed(event: BaldurEvent):
     """
     Trigger automatic Replay on CB recovery (on-recovery replay).
@@ -344,7 +360,10 @@ def _on_circuit_breaker_closed(event: BaldurEvent):
     - On-recovery replay disabled in RuntimeConfig/settings: INFO, no dispatch.
     - Armed (enabled) but the Celery task is not importable: the guarantee is
       undeliverable — WARNING ``replay_dispatch_blocked`` naming the
-      remediation, instead of a silent DEBUG skip.
+      remediation, instead of a silent DEBUG skip. A recovery with nothing
+      parked under its name logs ``replay_dispatch_skipped`` at DEBUG instead:
+      no worker had anything to do. Either way the dispatch counter records
+      ``celery_missing``.
 
     Config precedence: RuntimeConfig (present) → static
     ``ReplayAutomationSettings`` (fallback, env-honoring). Each evaluation
@@ -428,19 +447,28 @@ def _on_circuit_breaker_closed(event: BaldurEvent):
         _record_dispatch_outcome("dispatched", service_name=service_name)
     except ImportError:
         # Armed (enabled) but the Celery task is unavailable — the guarantee
-        # is undeliverable. WARNING with remediation rather than a silent
-        # DEBUG skip.
-        logger.warning(
-            "event_handler.replay_dispatch_blocked",
-            service_name=service_name,
-            reason="celery_missing",
-            queue="dlq_processing",
-            worker_command="celery -A <app> worker -Q dlq_processing",
-            remediation=(
-                "Run a Celery worker consuming the 'dlq_processing' queue, or "
-                "drain the DLQ manually via the console Replay action."
-            ),
-        )
+        # is undeliverable for whatever this recovery left parked. WARNING
+        # with remediation rather than a silent DEBUG skip, unless nothing is
+        # parked under the name: then no worker had anything to do.
+        if _nothing_parked(service_name):
+            logger.debug(
+                "event_handler.replay_dispatch_skipped",
+                service_name=service_name,
+                reason="celery_missing",
+                nothing_parked=True,
+            )
+        else:
+            logger.warning(
+                "event_handler.replay_dispatch_blocked",
+                service_name=service_name,
+                reason="celery_missing",
+                queue="dlq_processing",
+                worker_command="celery -A <app> worker -Q dlq_processing",
+                remediation=(
+                    "Run a Celery worker consuming the 'dlq_processing' queue, or "
+                    "drain the DLQ manually via the console Replay action."
+                ),
+            )
         _record_dispatch_outcome("celery_missing", service_name=service_name)
     except Exception as e:
         logger.exception(

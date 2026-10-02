@@ -608,6 +608,25 @@ class FailedOperationRepository(ABC):
         """Get count of pending operations for a domain"""
         ...
 
+    def get_cluster_pending_count_by_domain(self, domain: str) -> int:
+        """Count the shared store's pending operations for a domain, or raise.
+
+        Same answer as ``get_pending_count_by_domain()``, different contract:
+        this one is read to decide that *nothing* is waiting, so it never
+        substitutes a process-local or partial view for the shared store. An
+        adapter that cannot read the shared store raises instead of falling
+        back — a substituted count reads as "nothing is parked", which is the
+        direction that silences the signal for work that is.
+
+        The default implementation delegates to
+        ``get_pending_count_by_domain()``, which is correct wherever this
+        process's view *is* the store (the in-memory adapter: one process is
+        the store; the SQL adapter: the database is, and a failed query
+        raises). Adapters holding a local view in front of a shared store
+        (Redis) MUST override.
+        """
+        return self.get_pending_count_by_domain(domain)
+
     @abstractmethod
     def update_status(
         self,

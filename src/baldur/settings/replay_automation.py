@@ -113,17 +113,21 @@ class ReplayAutomationSettings(BaseSettings):
     # =========================================================================
     # ReplayService.replay_on_circuit_close() uses this to translate
     # "service that recovered" into "failure_types whose DLQ entries are
-    # now safe to retry". An empty/missing entry for the recovered service
-    # is surfaced as a blocked-with-signal outcome (WARNING log +
-    # DLQ_REPLAY_BLOCKED event + metric + audit), not a silent no-op —
-    # operators MUST configure this for on-recovery replay to drain DLQ.
+    # now safe to retry" — one of three lanes a recovery selects through.
+    # The other two need no entry: the open-circuit lane and the failure
+    # types the recovered domain's own replay handler declares. A recovery
+    # that gets no lane and leaves entries parked under its name is surfaced
+    # as a blocked-with-signal outcome (WARNING log + DLQ_REPLAY_BLOCKED
+    # event + metric + audit) naming the missing handler or domain.
     service_failure_type_map: dict[str, list[str]] = Field(
         default_factory=dict,
         description=(
             "Service→failure_types mapping consulted by "
             "replay_on_circuit_close(). Example: "
             '{"payment_api": ["TIMEOUT", "CONNECTION_ERROR"]}. '
-            "Empty default — operator must configure for on-recovery replay to drain."
+            "One of three on-recovery lanes; needed only for failure types the "
+            "recovered domain's replay handler does not declare. A mapped type "
+            "is selected in every domain."
         ),
     )
 

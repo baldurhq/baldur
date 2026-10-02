@@ -177,6 +177,7 @@ class TestCappedTaskSurfaceBehavior:
         from baldur.celery_tasks import dlq_tasks
 
         mock_replay = MagicMock()
+        mock_replay.recovery_is_idle.return_value = False
         mock_replay.replay_on_circuit_close.return_value = SimpleNamespace(
             governance_blocked=False,
             governance_block_reason=None,

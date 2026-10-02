@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.core.exceptions import DLQError
 from baldur.interfaces.repositories import (
     REPLAY_SELECTION_MAX_SCAN,
     FailedOperationData,
@@ -141,6 +142,47 @@ class RedisDLQQuery:
                 )
             )
         return len(self.get_pending_by_domain(domain, limit=10000))
+
+    def get_cluster_pending_count_by_domain(self, domain: str) -> int:
+        """Count a domain's pending entries from Redis itself, or raise.
+
+        The strict sibling of ``get_pending_count_by_domain``: every read goes
+        through the raw client, never through the backend's read methods,
+        which answer from this process's memory whenever the backend is not
+        on Redis — and its mode can leave Redis between a readiness check and
+        the read. Nothing here can reach process memory, so no interleaving
+        returns a substituted count. The count is the ``ZCARD`` of the same
+        warm composite the domain-scoped replay selection walks, so a 0 here
+        means that selection finds nothing either.
+
+        Raises ``DLQError`` when Redis is not this process's active backend,
+        when no raw client exists, when the composite cannot be warmed (no
+        fall-back to the bounded by-domain walk), or when the ``ZCARD`` fails.
+        """
+        status = FailedOperationStatus.PENDING.value
+        if not self._backend.ensure_redis():
+            raise DLQError(f"pending count for {domain!r} unavailable: redis_inactive")
+        client = self._backend.raw_redis_client
+        if client is None:
+            raise DLQError(
+                f"pending count for {domain!r} unavailable: raw_client_missing"
+            )
+        if not self._warm_composite_if_needed(status, domain):
+            raise DLQError(
+                f"pending count for {domain!r} unavailable: composite_unavailable"
+            )
+        try:
+            return int(
+                client.zcard(
+                    self._backend._get_full_key(
+                        self._repo._status_domain_key(status, domain)
+                    )
+                )
+            )
+        except Exception as exc:
+            raise DLQError(
+                f"pending count for {domain!r} unavailable: zcard_failed: {exc}"
+            ) from exc
 
     def by_status(
         self,

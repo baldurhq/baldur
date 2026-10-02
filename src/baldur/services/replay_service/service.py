@@ -55,22 +55,36 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 
-# Block reason emitted when `service_failure_type_map` has no entry for the
-# recovered service (operator misconfig). Mirrors the inline string-literal
-# pattern used by the same-function `max_replay_attempts_exceeded` branch.
-REASON_NO_FAILURE_TYPE_MAPPING = "service_failure_type_map_unconfigured"
+# Block reasons a recovery reports when work is parked under the recovered
+# name and no lane can replay it. A name gets a lane from the operator map,
+# from its own replay handler (the open-circuit lane and the types the handler
+# declares), or not at all — and with no map entry, the handler lanes are
+# missing for exactly one of two causes: the name has no domain of its own, or
+# no replay handler is registered for its domain in this process. The
+# open-circuit lane logs the same two strings when it declines a name.
+REASON_NO_REPLAY_HANDLER = "no_replay_handler_registered"
+REASON_DOMAIN_NOT_ADDRESSABLE = "domain_not_addressable"
 
-# Operator-facing RuntimeConfig path the operator must populate to resolve
-# the misconfig. Surfaced uniformly across log / event / audit channels so
-# Kibana/Loki filters, EventBus subscribers, and WAL audit queries all see
-# the same key.
-CONFIG_PATH_FAILURE_TYPE_MAP = "replay_automation.service_failure_type_map"
+# What the operator does about each. Entries at their replay cap count as
+# parked but no lane selects them, so the console is named for those too.
+_REMEDIATION_NO_REPLAY_HANDLER = (
+    "Import, in the worker that runs the recovery sweep, the module that "
+    "registers this domain's replay handler (for a @protected(replay=True) "
+    "job, the module that defines it); until then, and for entries already at "
+    "their replay cap, the console replays the parked entries."
+)
+_REMEDIATION_DOMAIN_NOT_ADDRESSABLE = (
+    "Name the breaker with a valid domain (lowercase letters, digits and "
+    "underscores, starting with a letter, dot-separated, at most 64 "
+    "characters) so its parked calls are stored under it; until then the "
+    "console replays them."
+)
 
 
 # 497 D4: Block reason emitted when the per-service inflight DistributedLock
-# rejects a duplicate `replay_on_circuit_close` sweep. Defined inline next to
-# REASON_NO_FAILURE_TYPE_MAPPING because both flow through the same 4-channel
-# block surface (log / event / metric / audit) inside this function.
+# rejects a duplicate `replay_on_circuit_close` sweep. It flows through the
+# same 4-channel block surface (log / event / metric / audit) as the no-lane
+# reasons above.
 REASON_CIRCUIT_CLOSE_INFLIGHT = "circuit_close_inflight"
 
 # Block reasons a *chain* of on-recovery passes reports when it stops with work
@@ -103,6 +117,24 @@ class _LaneSelection:
     cursors: dict[str, str] = field(default_factory=dict)
     scan_exhausted_lanes: list[str] = field(default_factory=list)
     capped: bool = False
+
+
+@dataclass(frozen=True)
+class _RecoveryLanes:
+    """Where a recovery of one name may select from, by lane source."""
+
+    mapped_failure_types: list[str]
+    open_circuit_domain: str | None
+    declared_lanes: list[_Lane]
+
+    @property
+    def is_empty(self) -> bool:
+        """No lane: a pass for this name cannot replay anything."""
+        return (
+            not self.mapped_failure_types
+            and self.open_circuit_domain is None
+            and not self.declared_lanes
+        )
 
 
 def _resolution_type_for(trigger: ResolutionTrigger | str) -> str:
@@ -1109,9 +1141,11 @@ class ReplayService(EventEmitterMixin):
     def _load_failure_type_map(self) -> dict[str, list[str]]:
         """Load service→failure_types mapping: RuntimeConfig → static settings.
 
-        This mapping is required for replay_on_circuit_close() to identify
-        which DLQ entries are related to the recovered service. Without it,
-        the method surfaces a blocked-with-signal outcome and drains nothing.
+        One of the three lane sources replay_on_circuit_close() selects
+        through: a mapped type selects its entries in every domain. The other
+        two need no map entry — the open-circuit lane and the types the
+        domain's own replay handler declares — so the map is needed only for
+        failure types the recovered domain's handler does not declare.
         Falling back to the static settings makes
         BALDUR_REPLAY_AUTOMATION_SERVICE_FAILURE_TYPE_MAP effective even when
         the RuntimeConfigManager is absent.
@@ -1375,6 +1409,71 @@ class ReplayService(EventEmitterMixin):
                         error=str(exc),
                     )
 
+    def recovery_is_idle(self, service_name: str) -> bool:
+        """Is a recovery pass for this name certain to replay nothing?
+
+        True only when the name gets no lane — no map entry, and no replay
+        handler lane of its own — and the store answers that nothing is parked
+        under its name. A pass with no lane cannot replay anything whatever is
+        stored, so ending it early changes no replay; the count decides only
+        whether there is work that pass would leave behind, which the operator
+        must hear about.
+
+        A name with a lane is never idle, even with nothing parked: entries
+        that become pending between a count and the selection would be missed.
+        The lane check runs first, so such a name pays no store read.
+        """
+        failure_type_map = self._load_failure_type_map()
+        if not self._resolve_recovery_lanes(service_name, failure_type_map).is_empty:
+            return False
+        return self.parked_count_for_recovery(service_name, failure_type_map) == 0
+
+    def parked_count_for_recovery(
+        self,
+        service_name: str,
+        failure_type_map: dict[str, list[str]] | None = None,
+    ) -> int | None:
+        """Pending entries a recovery of this name could concern, or None.
+
+        The count of pending entries stored under the name's own domain, read
+        from the shared store. None means the question cannot be answered, and
+        every caller treats None as "work may be parked":
+
+        - the name has a map entry — a mapped type selects in every domain, so
+          the name's own domain does not bound it;
+        - the name has no domain of its own — the bucket it shares with every
+          other rejected name cannot be attributed to it;
+        - the store cannot answer from its shared view;
+        - the store returned something that is not a count.
+
+        Args:
+            service_name: The breaker name that recovered.
+            failure_type_map: The service→failure_types map the caller already
+                resolved; read from runtime configuration when omitted.
+        """
+        if failure_type_map is None:
+            failure_type_map = self._load_failure_type_map()
+        if failure_type_map.get(service_name):
+            return None
+
+        domain = resolve_stored_domain(service_name)
+        if domain == FALLBACK_DOMAIN:
+            return None
+
+        try:
+            count = self.repository.get_cluster_pending_count_by_domain(domain)
+        except Exception as exc:
+            logger.debug(
+                "replay_service.parked_count_unavailable",
+                service_name=service_name,
+                healing_domain=domain,
+                error=str(exc),
+            )
+            return None
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            return None
+        return count
+
     def emit_circuit_close_chain_stopped(
         self,
         *,
@@ -1575,6 +1674,38 @@ class ReplayService(EventEmitterMixin):
                 rolled[key] = encode_replay_cursor(entry.created_at, entry.id)
         return rolled
 
+    def _resolve_recovery_lanes(
+        self, service_name: str, failure_type_map: dict[str, list[str]]
+    ) -> _RecoveryLanes:
+        """Every lane a recovery of this name selects through, by source.
+
+        The one resolution both the sweep and the idle check read, so the two
+        cannot disagree about whether a name has a lane.
+        """
+        # Order-preserving dedup at the operator-controlled boundary (D5):
+        # RuntimeConfig may be misconfigured with duplicate failure types
+        # (e.g., ["TIMEOUT", "TIMEOUT"]), which would dilute the divmod
+        # quota allocation by issuing repeated queries against the same ID pool.
+        failure_types = list(dict.fromkeys(failure_type_map.get(service_name, [])))
+
+        # Open-circuit captures need no map entry: the circuit that just closed
+        # is the one that rejected them, which is the whole eligibility test.
+        # The deployment that produces these entries — plain `dlq=True`, no
+        # RuntimeConfig at all — is exactly the one with an empty map.
+        open_circuit_domain = self._resolve_open_circuit_replay_domain(
+            service_name, failure_types
+        )
+        # Same reasoning for the types the service's own replay handler
+        # declares: the handler is the opt-in, so no map entry is needed.
+        declared_lanes = self._resolve_declared_replay_lanes(
+            service_name, failure_types
+        )
+        return _RecoveryLanes(
+            mapped_failure_types=failure_types,
+            open_circuit_domain=open_circuit_domain,
+            declared_lanes=declared_lanes,
+        )
+
     def _resolve_open_circuit_replay_domain(
         self, service_name: str, mapped_failure_types: list[str]
     ) -> str | None:
@@ -1602,7 +1733,7 @@ class ReplayService(EventEmitterMixin):
             logger.debug(
                 "replay_service.open_circuit_auto_replay_skipped",
                 service_name=service_name,
-                reason="domain_not_addressable",
+                reason=REASON_DOMAIN_NOT_ADDRESSABLE,
             )
             return None
         if not has_replay_handler(domain):
@@ -1610,7 +1741,7 @@ class ReplayService(EventEmitterMixin):
                 "replay_service.open_circuit_auto_replay_skipped",
                 healing_domain=domain,
                 service_name=service_name,
-                reason="no_replay_handler_registered",
+                reason=REASON_NO_REPLAY_HANDLER,
             )
             return None
         return domain
@@ -1736,6 +1867,67 @@ class ReplayService(EventEmitterMixin):
         cut = not result.success and (stop.stopped or time.monotonic() >= deadline)
         return result, cut
 
+    def _end_recovery_with_no_lane(
+        self, service_name: str, failure_type_map: dict[str, list[str]]
+    ) -> BatchReplayResult:
+        """End a pass whose name has no lane, loudly only if work is left behind.
+
+        With no lane the pass replays nothing whatever is stored. Nothing
+        parked under the name is a finished recovery: a DEBUG line. Otherwise
+        the parked work stays unreplayed until the operator acts, so the pass
+        raises the blocked surface (WARNING log + DLQ_REPLAY_BLOCKED event +
+        metric + audit) naming what is missing — a domain identity, or a replay
+        handler for the domain in this worker. Mapping the failure type is not
+        the remedy: a mapped lane replays through the default handler, which
+        always fails, and escalates every entry to review.
+        """
+        domain = resolve_stored_domain(service_name)
+        parked = self.parked_count_for_recovery(service_name, failure_type_map)
+        if parked == 0:
+            logger.debug(
+                "replay_service.circuit_close_replay_skipped",
+                service_name=service_name,
+                healing_domain=domain,
+                reason="nothing_parked",
+            )
+            return BatchReplayResult()
+
+        if domain == FALLBACK_DOMAIN:
+            block_reason = REASON_DOMAIN_NOT_ADDRESSABLE
+            remediation = _REMEDIATION_DOMAIN_NOT_ADDRESSABLE
+        else:
+            block_reason = REASON_NO_REPLAY_HANDLER
+            remediation = _REMEDIATION_NO_REPLAY_HANDLER
+        details = {
+            "healing_domain": domain,
+            "pending": parked,
+            "remediation": remediation,
+        }
+        self._emit_replay_blocked(
+            log_event="replay_service.circuit_close_replay_blocked",
+            log_fields={
+                "service_name": service_name,
+                "block_reason": block_reason,
+                **details,
+            },
+            event_data={
+                "trigger": "circuit_close",
+                "service_name": service_name,
+                "block_reason": block_reason,
+                **details,
+            },
+            metric_subject=service_name,
+            metric_reason=block_reason,
+            audit={
+                "domain": "dlq",
+                "reason": block_reason,
+                "service_name": service_name,
+                "trigger": "circuit_close",
+                "details": details,
+            },
+        )
+        return BatchReplayResult()
+
     def _replay_on_circuit_close_locked(  # noqa: C901, PLR0912
         self,
         service_name: str,
@@ -1759,55 +1951,13 @@ class ReplayService(EventEmitterMixin):
         else:
             failure_type_map = self._load_failure_type_map()
 
-        # Order-preserving dedup at the operator-controlled boundary (D5):
-        # RuntimeConfig may be misconfigured with duplicate failure types
-        # (e.g., ["TIMEOUT", "TIMEOUT"]), which would dilute the divmod
-        # quota allocation by issuing repeated queries against the same ID pool.
-        failure_types = list(dict.fromkeys(failure_type_map.get(service_name, [])))
+        recovery_lanes = self._resolve_recovery_lanes(service_name, failure_type_map)
+        if recovery_lanes.is_empty:
+            return self._end_recovery_with_no_lane(service_name, failure_type_map)
 
-        # Open-circuit captures need no map entry: the circuit that just closed
-        # is the one that rejected them, which is the whole eligibility test.
-        # Resolved BEFORE the empty-map branch below, because the deployment
-        # that produces these entries — plain `dlq=True`, no RuntimeConfig at
-        # all — is exactly the one that early-returns there.
-        auto_domain = self._resolve_open_circuit_replay_domain(
-            service_name, failure_types
-        )
-        # Same reasoning for the types the service's own replay handler
-        # declares: the handler is the opt-in, so no map entry is needed.
-        declared_lanes = self._resolve_declared_replay_lanes(
-            service_name, failure_types
-        )
-
-        if not failure_types and auto_domain is None and not declared_lanes:
-            # Operator misconfig: `service_failure_type_map` has no entry for
-            # this service. Surface through the same channels as governance
-            # blocks (WARNING log + DLQ_REPLAY_BLOCKED event + metric + audit)
-            # so a missing RuntimeConfig key is not silent.
-            self._emit_replay_blocked(
-                log_event="replay_service.no_failure_types_mapped",
-                log_fields={
-                    "service_name": service_name,
-                    "block_reason": REASON_NO_FAILURE_TYPE_MAPPING,
-                    "config_path": CONFIG_PATH_FAILURE_TYPE_MAP,
-                },
-                event_data={
-                    "trigger": "circuit_close",
-                    "service_name": service_name,
-                    "block_reason": REASON_NO_FAILURE_TYPE_MAPPING,
-                    "config_path": CONFIG_PATH_FAILURE_TYPE_MAP,
-                },
-                metric_subject=service_name,
-                metric_reason=REASON_NO_FAILURE_TYPE_MAPPING,
-                audit={
-                    "domain": "dlq",
-                    "reason": REASON_NO_FAILURE_TYPE_MAPPING,
-                    "service_name": service_name,
-                    "trigger": "circuit_close",
-                    "details": {"config_path": CONFIG_PATH_FAILURE_TYPE_MAP},
-                },
-            )
-            return BatchReplayResult()
+        failure_types = recovery_lanes.mapped_failure_types
+        auto_domain = recovery_lanes.open_circuit_domain
+        declared_lanes = recovery_lanes.declared_lanes
 
         # Batch-level governance check (replaces per-item checks)
         governance = self._get_governance().check_all_governance(

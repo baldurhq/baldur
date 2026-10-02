@@ -1,8 +1,8 @@
 """
 Tests for ReplayService event emission (381).
 
-DLQ_REPLAY_BLOCKED / COMPLETED / FAILED 이벤트 발행 및
-_execute_replay() 공통 코어, EventBus fail-safe 동작을 검증합니다.
+Covers DLQ_REPLAY_BLOCKED / COMPLETED / FAILED event emission,
+the shared _execute_replay() core, and EventBus fail-safe behavior.
 """
 
 from __future__ import annotations
@@ -562,12 +562,16 @@ class TestReplayOnCircuitCloseEventsBehavior:
         assert data["total"] == 1
         assert data["success_count"] == 1
 
-    def test_no_failure_types_emits_blocked_event(self, replay_service, mock_event_bus):
-        """No failure types mapped emits DLQ_REPLAY_BLOCKED (#496 observability).
+    def test_no_lane_with_parked_work_emits_blocked_event(
+        self, replay_service, mock_repository, mock_event_bus
+    ):
+        """No lane and entries parked emits DLQ_REPLAY_BLOCKED (#496 observability).
 
-        Operator misconfig (missing service_failure_type_map entry) must
-        surface as a blocked event, not a silent no-op.
+        Parked work no lane can replay must surface as a blocked event naming
+        the missing handler, not a silent no-op.
         """
+        mock_repository.get_cluster_pending_count_by_domain.return_value = 2
+
         result = replay_service.replay_on_circuit_close(
             service_name="unknown_service",
             service_failure_type_map={},
@@ -583,8 +587,9 @@ class TestReplayOnCircuitCloseEventsBehavior:
         data = blocked_calls[0][1]["data"]
         assert data["trigger"] == "circuit_close"
         assert data["service_name"] == "unknown_service"
-        assert data["block_reason"] == "service_failure_type_map_unconfigured"
-        assert data["config_path"] == "replay_automation.service_failure_type_map"
+        assert data["block_reason"] == "no_replay_handler_registered"
+        assert data["healing_domain"] == "unknown_service"
+        assert data["pending"] == 2
 
     @patch(
         "baldur_pro.services.governance.checks.check_all_governance",

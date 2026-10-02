@@ -41,6 +41,7 @@ from baldur.services.event_bus.bus._cb_handlers import (
     get_cb_replay_dispatch_state,
     reset_cb_replay_dispatch_state,
 )
+from baldur.services.replay_service import ReplayService
 from baldur.services.replay_service.arming import (
     get_dispatch_ledger,
     reset_dispatch_ledger,
@@ -102,6 +103,15 @@ def _make_task_mock():
     task_mock = MagicMock()
     task_mock.delay = MagicMock()
     return task_mock
+
+
+def _patch_parked(count):
+    """Patch what the replay service counts as parked under the closing name."""
+    service = MagicMock(spec=ReplayService)
+    service.parked_count_for_recovery.return_value = count
+    return patch(
+        "baldur.services.replay_service.get_replay_service", return_value=service
+    )
 
 
 # =============================================================================
@@ -192,7 +202,8 @@ class TestOnRecoveryDispatchVisibilityBehavior:
         record.assert_called_once_with("dispatched", service_name="orders-api")
 
     def test_armed_but_celery_missing_warns_with_remediation(self):
-        # Given: armed (enabled) but the Celery task import fails.
+        # Given: armed (enabled), one entry parked under the name, but the
+        # Celery task import fails.
         # A None entry in sys.modules makes ``import <module>`` raise ImportError.
         event = _make_event()
 
@@ -201,6 +212,7 @@ class TestOnRecoveryDispatchVisibilityBehavior:
             patch(
                 "baldur.services.event_bus.bus._cb_handlers._record_dispatch_outcome"
             ) as record,
+            _patch_parked(1),
             patch.dict("sys.modules", {_CELERY_TASKS_MODULE: None}),
             capture_logs() as cap,
         ):
@@ -250,6 +262,7 @@ class TestOnRecoveryDispatchVisibilityBehavior:
             patch(
                 "baldur.services.event_bus.bus._cb_handlers._record_dispatch_outcome"
             ),
+            _patch_parked(1),
             patch.dict("sys.modules", {_CELERY_TASKS_MODULE: None}),
             capture_logs() as cap,
         ):

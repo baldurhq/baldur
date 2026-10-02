@@ -414,6 +414,7 @@ class _Chain:
 
     def __init__(self, result=None, error=None, states=None):
         self.service = MagicMock(spec=ReplayService)
+        self.service.recovery_is_idle.return_value = False
         if error is not None:
             self.service.replay_on_circuit_close.side_effect = error
         else:

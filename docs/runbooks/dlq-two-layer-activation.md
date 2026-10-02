@@ -263,7 +263,7 @@ The block also carries `last_dispatch`: the outcome, timestamp and pid of the la
 
 Capture is framework-neutral: a Flask, FastAPI or plain-Python service parks open-circuit rejections with no Celery installed anywhere. **Dispatch is not.** The on-recovery sweep has exactly one trigger — a Celery task — so a deployment without the Celery extra *and* a worker on `dlq_processing` captures the work and then never replays it automatically.
 
-Nothing is lost when this happens: the entries sit `PENDING` and stay replayable from the console. But the recovery half is manual until both links are in place, and the log says so on every circuit close:
+Nothing is lost when this happens: the entries sit `PENDING` and stay replayable from the console. But the recovery half is manual until both links are in place, and the log says so on every circuit close that leaves work parked:
 
 ```text
 [warning] event_handler.replay_dispatch_blocked service_name=payment_api reason=celery_missing queue=dlq_processing

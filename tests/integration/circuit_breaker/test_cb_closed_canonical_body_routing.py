@@ -163,6 +163,7 @@ class TestCBClosedRoutesToCanonicalBody:
         # Mock the replay service so the canonical body's
         # `service.replay_on_circuit_close(...)` call is observable.
         mock_replay_service = MagicMock()
+        mock_replay_service.recovery_is_idle.return_value = False
         mock_replay_service.replay_on_circuit_close.return_value = MagicMock(
             governance_blocked=False,
             total=0,

@@ -840,6 +840,9 @@ class RedisDLQRepository(
     def get_pending_count_by_domain(self, domain: str) -> int:
         return self.query.get_pending_count_by_domain(domain)
 
+    def get_cluster_pending_count_by_domain(self, domain: str) -> int:
+        return self.query.get_cluster_pending_count_by_domain(domain)
+
     def get_by_status(self, status: str, limit: int = 100) -> list[FailedOperationData]:
         return self.query.by_status(status, limit)
 

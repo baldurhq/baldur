@@ -237,6 +237,27 @@ def conditional_replay_on_circuit_close(  # noqa: C901, PLR0911
 
     service = get_replay_service()
 
+    # A pass with no lane replays nothing whatever is stored. With nothing
+    # parked under the name either, the recovery is finished — end before the
+    # circuit read, the inflight lock and the sweep, each of which can only
+    # report a stop of nothing. A pass carrying positions always runs: an
+    # earlier pass of its chain had a lane, and its successor with cleared
+    # positions may land on a worker that has one too.
+    if not carried_cursors and service.recovery_is_idle(service_name):
+        bound_logger.info(
+            "dlq.circuit_recovery_completed",
+            service_name=service_name,
+            dlq_total=0,
+            nothing_parked=True,
+            continuation=continuation,
+        )
+        return {
+            "success": True,
+            "service_name": service_name,
+            "total": 0,
+            "nothing_parked": True,
+        }
+
     # Affirmed at the start of EVERY pass, not once before dispatch: a
     # continuation queued while the circuit was CLOSED is picked up seconds
     # later, and the sweep itself reads no circuit state anywhere.

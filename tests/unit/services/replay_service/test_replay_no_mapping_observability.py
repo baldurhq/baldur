@@ -1,20 +1,20 @@
 """
-Tests for ReplayService.replay_on_circuit_close() misconfig observability (#496).
+Tests for ReplayService.replay_on_circuit_close() no-lane observability (#496, 809).
 
-Verifies the 4-channel signal surface emitted when
-`service_failure_type_map` has no entry for the recovered service:
+Verifies the 4-channel signal surface emitted when the recovered service gets
+no lane (no `service_failure_type_map` entry, no replay handler registered for
+its domain) and entries are parked under its domain:
 
-1. WARNING log `replay_service.no_failure_types_mapped` with
-   `service_name`, `block_reason`, `config_path` (D2 + D7)
+1. WARNING log `replay_service.circuit_close_replay_blocked` with
+   `service_name`, `block_reason`, `healing_domain`, `pending`, `remediation`
 2. EventBus emit `DLQ_REPLAY_BLOCKED` with payload carrying
-   `trigger=circuit_close`, `service_name`, `block_reason`, `config_path`
-   (D4 + D7)
+   `trigger=circuit_close` and the same fields
 3. `ReplayEventHandler.on_replay_blocked(service_name, REASON_...)` metric
-   call (D3)
+   call
 4. `log_dlq_replay_blocked_audit(domain="dlq", reason=..., service_name=...,
-   trigger="circuit_close", details={"config_path": ...})` (D6 + D7)
+   trigger="circuit_close", details={healing_domain, pending, remediation})`
 
-Parametrized over the 3 upstream causes that converge on this branch:
+Parametrized over the 3 upstream map shapes that converge on this branch:
 - empty top-level map (`{}`)
 - foreign service mapped, target service absent
 - target service mapped but value is an empty list
@@ -24,7 +24,7 @@ Negative control: a populated map falls through to the governance check.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 from structlog.testing import capture_logs
@@ -32,8 +32,8 @@ from structlog.testing import capture_logs
 from baldur.services.event_bus.bus.event_types import EventType
 from baldur.services.replay_service import ReplayService
 from baldur.services.replay_service.service import (
-    CONFIG_PATH_FAILURE_TYPE_MAP,
-    REASON_NO_FAILURE_TYPE_MAPPING,
+    REASON_DOMAIN_NOT_ADDRESSABLE,
+    REASON_NO_REPLAY_HANDLER,
 )
 
 # =============================================================================
@@ -48,8 +48,10 @@ def mock_event_bus():
 
 @pytest.fixture
 def replay_service(mock_event_bus):
-    """ReplayService with mock repository and injected mock event bus."""
-    svc = ReplayService(repository=MagicMock())
+    """ReplayService with one entry parked under `payment_api` and a mock bus."""
+    repository = MagicMock()
+    repository.get_cluster_pending_count_by_domain.return_value = 1
+    svc = ReplayService(repository=repository)
     svc._event_bus = mock_event_bus
     return svc
 
@@ -73,15 +75,13 @@ MISCONFIG_PARAMS = pytest.mark.parametrize(
 class TestNoMappingObservabilityConstantsContract:
     """Module-level constants — string equality (Contract)."""
 
-    def test_reason_constant_value(self):
-        """REASON_NO_FAILURE_TYPE_MAPPING is the D5 string literal."""
-        assert REASON_NO_FAILURE_TYPE_MAPPING == "service_failure_type_map_unconfigured"
+    def test_no_handler_reason_constant_value(self):
+        """REASON_NO_REPLAY_HANDLER is the no-handler block reason."""
+        assert REASON_NO_REPLAY_HANDLER == "no_replay_handler_registered"
 
-    def test_config_path_constant_value(self):
-        """CONFIG_PATH_FAILURE_TYPE_MAP is the D7 RuntimeConfig key."""
-        assert (
-            CONFIG_PATH_FAILURE_TYPE_MAP == "replay_automation.service_failure_type_map"
-        )
+    def test_domain_not_addressable_reason_constant_value(self):
+        """REASON_DOMAIN_NOT_ADDRESSABLE is the no-domain block reason."""
+        assert REASON_DOMAIN_NOT_ADDRESSABLE == "domain_not_addressable"
 
 
 # =============================================================================
@@ -99,7 +99,7 @@ class TestReplayNoMappingObservabilityBehavior:
         replay_service,
         mock_event_bus,
     ):
-        """DLQ_REPLAY_BLOCKED carries trigger, service_name, block_reason, config_path."""
+        """DLQ_REPLAY_BLOCKED carries the trigger, the cause and the parked count."""
         with patch(
             "baldur.services.replay_service.service.log_dlq_replay_blocked_audit"
         ):
@@ -118,9 +118,12 @@ class TestReplayNoMappingObservabilityBehavior:
         assert data == {
             "trigger": "circuit_close",
             "service_name": "payment_api",
-            "block_reason": REASON_NO_FAILURE_TYPE_MAPPING,
-            "config_path": CONFIG_PATH_FAILURE_TYPE_MAP,
+            "block_reason": REASON_NO_REPLAY_HANDLER,
+            "healing_domain": "payment_api",
+            "pending": 1,
+            "remediation": ANY,
         }
+        assert "console" in data["remediation"]
 
     @MISCONFIG_PARAMS
     def test_misconfig_calls_on_replay_blocked_with_service_name_and_reason(
@@ -144,9 +147,7 @@ class TestReplayNoMappingObservabilityBehavior:
                 service_failure_type_map=service_failure_type_map,
             )
 
-        mock_metric.assert_called_once_with(
-            "payment_api", REASON_NO_FAILURE_TYPE_MAPPING
-        )
+        mock_metric.assert_called_once_with("payment_api", REASON_NO_REPLAY_HANDLER)
 
     @MISCONFIG_PARAMS
     def test_misconfig_calls_log_dlq_replay_blocked_audit_with_full_kwargs(
@@ -154,7 +155,7 @@ class TestReplayNoMappingObservabilityBehavior:
         service_failure_type_map,
         replay_service,
     ):
-        """Audit helper called with domain/reason/service_name/trigger/details (D6+D7)."""
+        """Audit helper called with domain/reason/service_name/trigger/details."""
         with patch(
             "baldur.services.replay_service.service.log_dlq_replay_blocked_audit"
         ) as mock_audit:
@@ -165,10 +166,14 @@ class TestReplayNoMappingObservabilityBehavior:
 
         mock_audit.assert_called_once_with(
             domain="dlq",
-            reason=REASON_NO_FAILURE_TYPE_MAPPING,
+            reason=REASON_NO_REPLAY_HANDLER,
             service_name="payment_api",
             trigger="circuit_close",
-            details={"config_path": CONFIG_PATH_FAILURE_TYPE_MAP},
+            details={
+                "healing_domain": "payment_api",
+                "pending": 1,
+                "remediation": ANY,
+            },
         )
 
     # 525 D4: xdist mock_leak — structlog capture_logs context races with
@@ -182,7 +187,7 @@ class TestReplayNoMappingObservabilityBehavior:
         service_failure_type_map,
         replay_service,
     ):
-        """WARNING log `replay_service.no_failure_types_mapped` carries structured fields."""
+        """WARNING log `replay_service.circuit_close_replay_blocked` carries structured fields."""
         with (
             patch(
                 "baldur.services.replay_service.service.log_dlq_replay_blocked_audit"
@@ -197,14 +202,15 @@ class TestReplayNoMappingObservabilityBehavior:
         matching = [
             entry
             for entry in cap_logs
-            if entry.get("event") == "replay_service.no_failure_types_mapped"
+            if entry.get("event") == "replay_service.circuit_close_replay_blocked"
         ]
         assert len(matching) == 1
         log = matching[0]
         assert log["log_level"] == "warning"
         assert log["service_name"] == "payment_api"
-        assert log["block_reason"] == REASON_NO_FAILURE_TYPE_MAPPING
-        assert log["config_path"] == CONFIG_PATH_FAILURE_TYPE_MAP
+        assert log["block_reason"] == REASON_NO_REPLAY_HANDLER
+        assert log["healing_domain"] == "payment_api"
+        assert log["pending"] == 1
 
     @MISCONFIG_PARAMS
     def test_misconfig_returns_empty_batch_replay_result(
@@ -263,7 +269,7 @@ class TestReplayNoMappingObservabilityNegativeControlBehavior:
         pytest.importorskip("baldur_pro")
 
     def test_populated_map_does_not_emit_misconfig_log(self, replay_service):
-        """No `replay_service.no_failure_types_mapped` log when map is populated."""
+        """No `replay_service.circuit_close_replay_blocked` log when map is populated."""
         with (
             patch(
                 "baldur_pro.services.governance.checks.check_all_governance",
@@ -284,7 +290,7 @@ class TestReplayNoMappingObservabilityNegativeControlBehavior:
         misconfig_logs = [
             e
             for e in cap_logs
-            if e.get("event") == "replay_service.no_failure_types_mapped"
+            if e.get("event") == "replay_service.circuit_close_replay_blocked"
         ]
         assert misconfig_logs == []
 

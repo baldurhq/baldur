@@ -56,6 +56,7 @@ class TestDLQCircuitRecoveryKwargCaptureBehavior:
         from baldur.celery_tasks import dlq_tasks
 
         mock_replay = MagicMock()
+        mock_replay.recovery_is_idle.return_value = False
         mock_replay.replay_on_circuit_close.return_value = BatchReplayResult()
 
         with (
@@ -89,6 +90,7 @@ class TestDLQCircuitRecoveryKwargCaptureBehavior:
         from baldur.celery_tasks import dlq_tasks
 
         mock_replay = MagicMock()
+        mock_replay.recovery_is_idle.return_value = False
         mock_replay.replay_on_circuit_close.return_value = BatchReplayResult(
             total=10, success_count=8, failed_count=2, capped=False
         )
@@ -130,6 +132,7 @@ class TestDLQCircuitRecoveryKwargCaptureBehavior:
         from baldur.celery_tasks import dlq_tasks
 
         mock_replay = MagicMock()
+        mock_replay.recovery_is_idle.return_value = False
         mock_replay.replay_on_circuit_close.return_value = BatchReplayResult(
             governance_blocked=True,
             governance_block_reason="emergency_mode_active",
@@ -168,6 +171,7 @@ class TestDLQCircuitRecoveryKwargCaptureBehavior:
         from baldur.celery_tasks import dlq_tasks
 
         mock_replay = MagicMock()
+        mock_replay.recovery_is_idle.return_value = False
         mock_replay.replay_on_circuit_close.side_effect = RuntimeError("replay boom")
 
         with (

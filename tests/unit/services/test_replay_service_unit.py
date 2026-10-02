@@ -1,7 +1,7 @@
 """
 Tests for ReplayService.
-DLQ 재생 서비스(replay_service.py)의 단위 테스트.
-거버넌스 체크, 단건/배치 재생, 핸들러 레지스트리 등을 검증합니다.
+Unit tests for the DLQ replay service (replay_service.py).
+Covers the governance check, single/batch replay, the handler registry, and more.
 """
 
 import pytest
@@ -36,7 +36,7 @@ from baldur_pro.services.governance.checks import GovernanceCheckResult
 
 @dataclass
 class FakeFailedOperationData:
-    """테스트용 FailedOperationData 대체 데이터클래스."""
+    """FailedOperationData stand-in dataclass for tests."""
 
     id: int
     domain: str = "payment"
@@ -58,7 +58,7 @@ class FakeFailedOperationData:
 
 
 class FakeReplayHandler(ReplayHandler):
-    """테스트용 ReplayHandler 구현체."""
+    """ReplayHandler implementation for tests."""
 
     def __init__(self, domain_name: str, success: bool = True):
         self._domain = domain_name
@@ -79,7 +79,7 @@ class FakeReplayHandler(ReplayHandler):
 
 @pytest.fixture(autouse=True)
 def _clear_handler_registry():
-    """각 테스트 전후로 핸들러 레지스트리를 초기화."""
+    """Reset the handler registry before and after each test."""
     _replay_handlers.clear()
     yield
     _replay_handlers.clear()
@@ -87,7 +87,7 @@ def _clear_handler_registry():
 
 @pytest.fixture
 def mock_repository():
-    """Mock FailedOperationRepository를 생성."""
+    """Create a mock FailedOperationRepository."""
     repo = MagicMock()
     repo.try_acquire_for_replay.return_value = FakeFailedOperationData(id=1)
     repo.get_by_id.return_value = FakeFailedOperationData(id=1)
@@ -103,11 +103,11 @@ def mock_repository():
 
 
 class TestReplayResult:
-    """ReplayResult 데이터클래스 팩토리 메서드 테스트."""
+    """Tests for the ReplayResult dataclass factory methods."""
 
     def test_succeeded_factory(self):
         """Succeeded factory
-        성공 팩토리가 올바른 값을 반환하는지 확인.
+        The success factory returns the right values.
         """
         result = ReplayResult.succeeded(1, "OK", data={"key": "value"})
         assert result.success is True
@@ -117,7 +117,7 @@ class TestReplayResult:
 
     def test_failed_factory(self):
         """Failed factory
-        실패 팩토리가 올바른 값을 반환하는지 확인.
+        The failure factory returns the right values.
         """
         result = ReplayResult.failed(2, "timeout")
         assert result.success is False
@@ -126,7 +126,7 @@ class TestReplayResult:
 
     def test_blocked_factory(self):
         """Blocked factory
-        차단 팩토리가 거버넌스 정보를 포함하는지 확인.
+        The blocked factory carries the governance information.
         """
         governance = MagicMock(spec=GovernanceCheckResult)
         governance.block_message = "Kill Switch active"
@@ -145,11 +145,11 @@ class TestReplayResult:
 
 
 class TestBatchReplayResult:
-    """BatchReplayResult 데이터클래스 테스트."""
+    """Tests for the BatchReplayResult dataclass."""
 
     def test_default_values(self):
         """Default values
-        기본값이 올바르게 초기화되는지 확인.
+        Defaults are initialized correctly.
         """
         result = BatchReplayResult()
         assert result.total == 0
@@ -159,7 +159,7 @@ class TestBatchReplayResult:
 
     def test_priority_metadata(self):
         """Priority metadata
-        우선순위 기반 재생 정보가 올바르게 설정되는지 확인.
+        Priority-based replay information is set correctly.
         """
         result = BatchReplayResult(
             priority_used=True,
@@ -175,11 +175,11 @@ class TestBatchReplayResult:
 
 
 class TestDefaultReplayHandler:
-    """DefaultReplayHandler 테스트."""
+    """Tests for DefaultReplayHandler."""
 
     def test_can_replay_returns_false(self):
         """Can replay returns false
-        기본 핸들러는 항상 can_replay=False를 반환하는지 확인.
+        The default handler always returns can_replay=False.
         """
         handler = DefaultReplayHandler("unknown")
         can, reason = handler.can_replay(FakeFailedOperationData(id=1))
@@ -188,7 +188,7 @@ class TestDefaultReplayHandler:
 
     def test_replay_returns_failed(self):
         """Replay returns failed
-        기본 핸들러의 replay가 실패 결과를 반환하는지 확인.
+        The default handler's replay returns a failure result.
         """
         handler = DefaultReplayHandler("unknown")
         result = handler.replay(FakeFailedOperationData(id=1))
@@ -197,7 +197,7 @@ class TestDefaultReplayHandler:
 
     def test_domain_property(self):
         """Domain property
-        domain 프로퍼티가 올바른 값을 반환하는지 확인.
+        The domain property returns the right value.
         """
         handler = DefaultReplayHandler("payment")
         assert handler.domain == "payment"
@@ -209,11 +209,11 @@ class TestDefaultReplayHandler:
 
 
 class TestHandlerRegistry:
-    """핸들러 레지스트리 테스트."""
+    """Tests for the handler registry."""
 
     def test_register_and_get(self):
         """Register and get
-        핸들러 등록 후 조회가 올바르게 동작하는지 확인.
+        Lookup after registration returns the registered handler.
         """
         handler = FakeReplayHandler("payment")
         register_replay_handler(handler)
@@ -222,14 +222,14 @@ class TestHandlerRegistry:
 
     def test_get_unregistered_returns_default(self):
         """Get unregistered returns default
-        등록되지 않은 도메인 조회 시 DefaultReplayHandler가 반환되는지 확인.
+        Looking up an unregistered domain returns a DefaultReplayHandler.
         """
         handler = get_replay_handler("nonexistent")
         assert isinstance(handler, DefaultReplayHandler)
 
     def test_overwrite_handler(self):
         """Overwrite handler
-        같은 도메인으로 재등록하면 덮어쓰기 되는지 확인.
+        Registering again for the same domain overwrites the handler.
         """
         handler1 = FakeReplayHandler("payment", success=True)
         handler2 = FakeReplayHandler("payment", success=False)
@@ -244,13 +244,13 @@ class TestHandlerRegistry:
 
 
 class TestReplayServiceReplaySingle:
-    """ReplayService.replay_single 테스트."""
+    """Tests for ReplayService.replay_single."""
 
     @patch("baldur_pro.services.governance.checks.check_all_governance")
     @patch("baldur.services.replay_service.log_dlq_replay_audit")
     def test_successful_replay(self, mock_audit, mock_gov, mock_repository):
         """Successful replay
-        거버넌스 통과 + 핸들러 성공 시 ReplayResult.success=True인지 확인.
+        Governance passes and the handler succeeds: ReplayResult.success=True.
         """
         mock_gov.return_value = MagicMock(allowed=True)
         handler = FakeReplayHandler("payment", success=True)
@@ -265,7 +265,7 @@ class TestReplayServiceReplaySingle:
     @patch("baldur_pro.services.governance.checks.check_all_governance")
     def test_governance_blocked(self, mock_gov, mock_repository):
         """Governance blocked
-        거버넌스 차단 시 replay_single이 blocked 결과를 반환하는지 확인.
+        Governance blocks: replay_single returns a blocked result.
         """
         mock_gov.return_value = MagicMock(
             allowed=False,
@@ -282,7 +282,7 @@ class TestReplayServiceReplaySingle:
     @patch("baldur.services.replay_service.log_dlq_replay_audit")
     def test_entry_not_found(self, mock_audit, mock_gov, mock_repository):
         """Entry not found
-        DLQ 엔트리를 찾을 수 없을 때 적절한 에러 메시지를 반환하는지 확인.
+        A missing DLQ entry returns an explanatory error message.
         """
         mock_gov.return_value = MagicMock(allowed=True)
         mock_repository.try_acquire_for_replay.return_value = None
@@ -298,7 +298,7 @@ class TestReplayServiceReplaySingle:
     @patch("baldur.services.replay_service.log_dlq_replay_audit")
     def test_max_replays_exceeded(self, mock_audit, mock_gov, mock_repository):
         """Max replays exceeded
-        최대 재시도 횟수 초과 시 적절한 에러 메시지를 반환하는지 확인.
+        Exceeding the maximum retry count returns an explanatory error message.
         """
         mock_gov.return_value = MagicMock(allowed=True)
         mock_repository.try_acquire_for_replay.return_value = None
@@ -316,7 +316,7 @@ class TestReplayServiceReplaySingle:
     @patch("baldur.services.replay_service.log_dlq_replay_audit")
     def test_handler_crash_escalates(self, mock_audit, mock_gov, mock_repository):
         """Handler crash escalates
-        핸들러가 예외를 발생시키면 에러가 적절히 처리되는지 확인.
+        An exception raised by the handler is handled as an error.
         """
         mock_gov.return_value = MagicMock(allowed=True)
 
@@ -344,7 +344,7 @@ class TestReplayServiceReplaySingle:
     @patch("baldur.services.replay_service.log_dlq_replay_audit")
     def test_non_pending_entry_rejected(self, mock_audit, mock_gov, mock_repository):
         """Non-pending entry rejected
-        pending 상태가 아닌 엔트리는 재생이 거부되는지 확인.
+        An entry that is not pending is refused for replay.
         """
         mock_gov.return_value = MagicMock(allowed=True)
         mock_repository.try_acquire_for_replay.return_value = None
@@ -360,12 +360,12 @@ class TestReplayServiceReplaySingle:
 
 
 class TestReplayServiceReplayBatch:
-    """ReplayService.replay_batch 테스트."""
+    """Tests for ReplayService.replay_batch."""
 
     @patch("baldur_pro.services.governance.checks.check_all_governance")
     def test_governance_blocked_batch(self, mock_gov, mock_repository):
         """Governance blocked batch
-        거버넌스 차단 시 배치 재생이 차단되는지 확인.
+        Governance blocks: the batch replay is blocked.
         """
         mock_gov.return_value = MagicMock(
             allowed=False,
@@ -380,7 +380,7 @@ class TestReplayServiceReplayBatch:
     @patch("baldur_pro.services.governance.checks.check_all_governance")
     def test_empty_batch(self, mock_gov, mock_repository):
         """Empty batch
-        대상 엔트리가 없을 때 빈 결과를 반환하는지 확인.
+        No matching entries returns an empty result.
         """
         mock_gov.return_value = MagicMock(allowed=True)
         mock_repository.find_replayable.return_value = []
@@ -393,13 +393,14 @@ class TestReplayServiceReplayBatch:
 
 
 class TestReplayServiceReplayOnCircuitClose:
-    """ReplayService.replay_on_circuit_close 테스트."""
+    """Tests for ReplayService.replay_on_circuit_close."""
 
     @patch("baldur_pro.services.governance.checks.check_all_governance")
-    def test_no_failure_types_mapped(self, mock_gov, mock_repository):
-        """No failure types mapped
-        서비스에 매핑된 failure_type이 없으면 빈 결과를 반환하는지 확인.
+    def test_no_lane_nothing_parked(self, mock_gov, mock_repository):
+        """No lane, nothing parked
+        No lane and nothing parked returns an empty result.
         """
+        mock_repository.get_cluster_pending_count_by_domain.return_value = 0
         service = ReplayService(repository=mock_repository)
         result = service.replay_on_circuit_close(service_name="unknown_service")
 
@@ -409,7 +410,7 @@ class TestReplayServiceReplayOnCircuitClose:
     @patch("baldur.services.replay_service.log_dlq_replay_audit")
     def test_with_failure_type_map(self, mock_audit, mock_gov, mock_repository):
         """With failure type map
-        커스텀 매핑을 통해 적절한 엔트리가 재생되는지 확인.
+        A custom mapping replays the matching entries.
         """
         mock_gov.return_value = MagicMock(allowed=True)
         entry = FakeFailedOperationData(id=10, domain="payment")

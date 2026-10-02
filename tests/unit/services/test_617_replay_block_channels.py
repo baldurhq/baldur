@@ -64,8 +64,8 @@ _BLOCK_SITES = [
         True,
     ),
     (
-        "no_failure_types_mapped",
-        "replay_service.no_failure_types_mapped",
+        "circuit_close_no_lane",
+        "replay_service.circuit_close_replay_blocked",
         "warning",
         True,
     ),

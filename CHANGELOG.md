@@ -55,6 +55,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A provider's exhausted quota, 401 or 403 is not retried.
 - A recovery pass bounds each replay by its deadline; a replay the deadline cut stays pending.
 - A failure the DLQ sink parked is not parked a second time by the Celery signal hook.
+- `replay_service.no_failure_types_mapped` is now `replay_service.circuit_close_replay_blocked`.
+- Its `block_reason` names the missing replay handler or domain, with `pending` and `remediation`.
 
 ### Added
 
@@ -69,6 +71,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `ReplayHandler.auto_replay_failure_types`: a handler's failure types replayed on recovery.
 - `BALDUR_DLQ_REPLAY_REQUEST_DATA_MAX_BYTES` (256 KiB): stored arguments of a replayable job.
 - `python -m baldur.scripts.demo_llm_outage`: a rate limit and an outage against the openai SDK.
+- `FailedOperationRepository.get_cluster_pending_count_by_domain()`: never a process-local count.
 
 ### Removed
 
@@ -107,6 +110,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A bulkhead waited on from a second event loop no longer raises `RuntimeError`.
 - A cancelled async bulkhead waiter no longer leaves its waiting count behind.
 - An `@idempotent` call let through on a cache error no longer marks a key another call holds.
+- A breaker with nothing parked (each `baldur.llm.wrap` endpoint) recovers with no replay warning.
+- Without Celery, only a recovery that leaves work parked warns to run a replay worker.
 
 ## [1.16.0] - 2026-09-28
 
