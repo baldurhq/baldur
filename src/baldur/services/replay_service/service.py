@@ -1422,11 +1422,23 @@ class ReplayService(EventEmitterMixin):
         A name with a lane is never idle, even with nothing parked: entries
         that become pending between a count and the selection would be missed.
         The lane check runs first, so such a name pays no store read.
+
+        Never raises: a failure while deciding answers False, so the pass runs
+        as it would have and reports that failure where it always did.
         """
-        failure_type_map = self._load_failure_type_map()
-        if not self._resolve_recovery_lanes(service_name, failure_type_map).is_empty:
+        try:
+            failure_type_map = self._load_failure_type_map()
+            lanes = self._resolve_recovery_lanes(service_name, failure_type_map)
+            if not lanes.is_empty:
+                return False
+            return self.parked_count_for_recovery(service_name, failure_type_map) == 0
+        except Exception as exc:
+            logger.debug(
+                "replay_service.recovery_idle_unavailable",
+                service_name=service_name,
+                error=str(exc),
+            )
             return False
-        return self.parked_count_for_recovery(service_name, failure_type_map) == 0
 
     def parked_count_for_recovery(
         self,

@@ -620,10 +620,11 @@ class FailedOperationRepository(ABC):
 
         The default implementation delegates to
         ``get_pending_count_by_domain()``, which is correct wherever this
-        process's view *is* the store (the in-memory adapter: one process is
-        the store; the SQL adapter: the database is, and a failed query
-        raises). Adapters holding a local view in front of a shared store
-        (Redis) MUST override.
+        process's view *is* the store (the in-memory adapter: the store is one
+        process's, so a count read in another process — a Celery worker —
+        sees only that process's entries; the SQL adapter: the database is,
+        and a failed query raises). Adapters holding a local view in front of
+        a shared store (Redis) MUST override.
         """
         return self.get_pending_count_by_domain(domain)
 

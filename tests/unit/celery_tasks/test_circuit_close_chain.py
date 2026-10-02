@@ -40,12 +40,20 @@ from baldur.celery_tasks.dlq_tasks import (
     conditional_replay_on_circuit_close,
 )
 from baldur.core.exceptions import DLQError
-from baldur.interfaces.repositories import FailedOperationRepository
+from baldur.interfaces.repositories import (
+    FailedOperationData,
+    FailedOperationRepository,
+)
 from baldur.services.circuit_breaker import CircuitBreakerService
 from baldur.services.event_bus.bus.event_bus import BaldurEventBus
 from baldur.services.event_bus.bus.event_types import EventType
 from baldur.services.replay_service import ReplayService
-from baldur.services.replay_service.models import BatchReplayResult
+from baldur.services.replay_service.handlers import (
+    ReplayHandler,
+    _replay_handlers,
+    register_replay_handler,
+)
+from baldur.services.replay_service.models import BatchReplayResult, ReplayResult
 from baldur.services.replay_service.service import (
     REASON_CIRCUIT_REOPENED,
     REASON_CONTINUATION_BOUND_REACHED,
@@ -53,7 +61,7 @@ from baldur.services.replay_service.service import (
     REASON_PASS_ERRORED,
     REASON_PASS_MADE_NO_PROGRESS,
 )
-from baldur.utils.domain_validation import FALLBACK_DOMAIN
+from baldur.utils.domain_validation import FALLBACK_DOMAIN, resolve_stored_domain
 
 SERVICE = "payment_api"
 # A name with no domain identity of its own: it projects onto the shared
@@ -817,3 +825,56 @@ class TestCircuitRecoveryIdlePassBehavior:
         assert len(blocked) == 1
         assert blocked[0]["pending"] is None
         assert blocked[0]["block_reason"] == REASON_NO_REPLAY_HANDLER
+
+    def test_an_idle_check_that_raises_runs_the_pass_and_reports_it_errored(self):
+        """A handler whose declared failure types cannot be read as lanes
+        breaks lane resolution. The pass-start check must not let that escape
+        the task with no signal: the pass runs, and the sweep's own failure is
+        reported as an errored pass, as before the check existed."""
+        # Given: a registered handler declaring an unhashable failure type.
+        service = _real_service(0)
+        chain = _Chain(service=service)
+        register_replay_handler(_UnhashableDeclaringHandler())
+
+        # When
+        try:
+            with (
+                _runtime_map({}),
+                patch(_AFFIRM_PATH, autospec=True, return_value=(True, None)) as affirm,
+                patch(
+                    "baldur.services.replay_service.service.log_dlq_replay_blocked_audit",
+                    autospec=True,
+                ),
+            ):
+                result = chain.run()
+        finally:
+            _replay_handlers.pop(resolve_stored_domain(SERVICE), None)
+
+        # Then
+        affirm.assert_called_once_with(SERVICE)
+        assert result["success"] is False
+        assert "nothing_parked" not in result
+        blocked = [
+            c.kwargs["data"]
+            for c in service._event_bus.emit.call_args_list
+            if c.args[0] == EventType.DLQ_REPLAY_BLOCKED
+        ]
+        assert [event["block_reason"] for event in blocked] == [REASON_PASS_ERRORED]
+
+
+class _UnhashableDeclaringHandler(ReplayHandler):
+    """A handler whose declared failure types hold a list, not strings."""
+
+    @property
+    def domain(self) -> str:
+        return SERVICE
+
+    @property
+    def auto_replay_failure_types(self):
+        return (["MAX_RETRIES_TIMEOUTERROR"],)
+
+    def can_replay(self, failed_op: FailedOperationData) -> tuple[bool, str]:
+        return True, ""
+
+    def replay(self, failed_op: FailedOperationData) -> ReplayResult:
+        return ReplayResult.succeeded(failed_op.id, "done")

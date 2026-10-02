@@ -20,7 +20,7 @@ Verification techniques applied:
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from unittest.mock import create_autospec, patch
+from unittest.mock import PropertyMock, create_autospec, patch
 
 import pytest
 from structlog.testing import capture_logs
@@ -302,3 +302,31 @@ class TestRecoveryIsIdleBehavior:
             service.recovery_is_idle(SERVICE)
 
         assert loader.call_count == 1
+
+    def test_recovery_is_idle_failure_while_deciding_answers_not_idle(
+        self, service, repository, register_handler
+    ):
+        """A handler whose declared types break lane resolution: the check
+        answers False instead of raising, so the pass runs as it would have."""
+        handler = register_handler(SERVICE)
+        repository.get_cluster_pending_count_by_domain.return_value = 0
+
+        with (
+            patch.object(
+                type(handler),
+                "auto_replay_failure_types",
+                new_callable=PropertyMock,
+                return_value=(["MAX_RETRIES_TIMEOUTERROR"],),
+            ),
+            _runtime_map({}),
+            capture_logs() as logs,
+        ):
+            result = service.recovery_is_idle(SERVICE)
+
+        assert result is False
+        unavailable = [
+            e for e in logs if e["event"] == "replay_service.recovery_idle_unavailable"
+        ]
+        assert len(unavailable) == 1
+        assert unavailable[0]["log_level"] == "debug"
+        assert unavailable[0]["service_name"] == SERVICE
