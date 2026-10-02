@@ -7,8 +7,8 @@ Runs entirely in this process — no Redis, no database, no message broker::
 
 What it shows:
 
-1. ``charge()`` is protected by ``@dlq_protect``: circuit breaker, retry,
-   and DLQ capture composed by one decorator.
+1. ``charge()`` is protected by ``@baldur.protected(..., dlq=True)``: the
+   circuit breaker and DLQ capture composed by one decorator.
 2. The fake payment gateway goes down. Every failed charge is captured with
    its arguments; after enough failures the circuit breaker opens and starts
    rejecting instantly instead of piling onto the dying dependency. A charge
@@ -53,8 +53,6 @@ _DEMO_ENV = {
     "BALDUR_OBSERVABILITY_PROFILE": "local",
     "BALDUR_CB_FAILURE_THRESHOLD": "5",
     "BALDUR_CB_RECOVERY_TIMEOUT": "3",
-    "BALDUR_RETRY_MAX_ATTEMPTS": "2",
-    "BALDUR_RETRY_BASE_DELAY": "0.2",
     # Keep retry/backoff ceilings inside the shortened breaker window — the
     # settings conflict detector flags the defaults against a 3s recovery
     # timeout (see the backoff-cb-timeout and retry-cb-timeout runbooks).
@@ -193,11 +191,11 @@ def _start_demo_process() -> bool:
 class _Tally:
     """What the demo counts, kept apart from how it observes the framework.
 
-    A charge is *parked* when it failed on the way out — either it exhausted
-    its retries against the dead gateway, or the OPEN breaker rejected it
-    before it ran. Both are captured to the DLQ and both must come back for
-    "zero lost" to hold, so ``lost`` is measured against every parked order,
-    not against the retry-exhausted ones alone.
+    A charge is *parked* when it failed on the way out — either the dead
+    gateway raised, or the OPEN breaker rejected it before it ran. Both are
+    captured to the DLQ and both must come back for "zero lost" to hold, so
+    ``lost`` is measured against every parked order, not against the failed
+    ones alone.
     """
 
     ok: int = 0
@@ -290,7 +288,7 @@ class _Demo:
     """One demo run: protected app, replay wiring, observation taps, phases."""
 
     def __init__(self) -> None:
-        from baldur.decorators import dlq_protect
+        from baldur import protected
         from baldur.services.circuit_breaker import get_circuit_breaker_service
         from baldur.services.dlq_capture import resolve_dlq_backing
         from baldur.services.event_bus import EventType, get_event_bus
@@ -304,7 +302,7 @@ class _Demo:
         self.replayed_ok = self.replayed_total = 0
 
         # -- the "application" under protection ----------------------------
-        @dlq_protect(_DOMAIN)
+        @protected(_DOMAIN, dlq=True)
         def charge(order_id: int, amount: str = "49.99") -> dict:
             if not self.gateway_up:
                 raise GatewayDownError("payment gateway unreachable")
@@ -347,11 +345,12 @@ class _Demo:
     def banner(self) -> None:
         _say(f"{BOLD}  ⚡ Baldur self-healing demo — kill the gateway, lose nothing{R}")
         _say(f"  {DIM}{'─' * 58}{R}")
-        _say(f"{DIM}  charge() is protected by @dlq_protect('demo.charge'): circuit{R}")
         _say(
-            f"{DIM}  breaker + retry + DLQ capture in one decorator. No Redis, no DB,{R}"
+            f"{DIM}  charge() is protected by"
+            f" @baldur.protected('demo.charge', dlq=True):{R}"
         )
-        _say(f"{DIM}  no broker — this process is everything. Reproduce it:{R}")
+        _say(f"{DIM}  circuit breaker + DLQ capture in one decorator. No Redis,{R}")
+        _say(f"{DIM}  no DB, no broker — this process is everything. Reproduce it:{R}")
         _say(f'{DIM}      pip install "baldur-framework[celery]"{R}')
         _say(f"{DIM}      python -m baldur.scripts.demo_self_healing{R}")
         _say()
@@ -391,7 +390,7 @@ class _Demo:
             f" {YELLOW}⚡ {burst_rejected} rejected{R}"
         )
         if burst_failed:
-            line += f"{DIM},{R} {RED}✖ {burst_failed} failed{R} {DIM}(retried){R}"
+            line += f"{DIM},{R} {RED}✖ {burst_failed} failed{R}"
         _say(line)
 
     def _one_outage_charge(self, *, narrate: bool = True) -> None:
@@ -411,9 +410,7 @@ class _Demo:
                 note = "← breaker OPEN"
             else:
                 note = ""
-            self.charge_line(
-                f"{RED}✖ GatewayDownError{R} {DIM}(retried){R}", extra=note
-            )
+            self.charge_line(f"{RED}✖ GatewayDownError{R}", extra=note)
         except Exception:  # CircuitBreakerOpenError — fail fast, captured too
             self.tally.record_rejected(self.order)
             if not narrate:

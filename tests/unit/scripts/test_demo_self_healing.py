@@ -3,10 +3,10 @@
 The demo's closing line ("lost N", and the exit code behind it) is computed
 from what the demo itself counted, so the counting has to agree with what the
 framework captures. Every charge that failed on the way out is parked — the
-ones that exhausted their retries AND the ones the OPEN breaker rejected before
+ones the dead gateway failed AND the ones the OPEN breaker rejected before
 they ran — and every parked charge is replayed on recovery. A tally that
-measured "lost" against the retry-exhausted charges alone ended a healthy run
-at ``lost -2`` with exit code 2, which is the regression pinned here.
+measured "lost" against the failed charges alone ended a healthy run at
+``lost -2`` with exit code 2, which is the regression pinned here.
 
 A larger outage (``--outage-charges``) replays its backlog in passes, one batch
 event each, and the passes keep landing after the first. A tally taken at the
@@ -37,7 +37,7 @@ from baldur.scripts.demo_self_healing import (
 
 
 def _outage_tally() -> _Tally:
-    """Five charges exhaust their retries, then two are fast-rejected."""
+    """Five charges fail against the dead gateway, then two are fast-rejected."""
     tally = _Tally()
     for _ in range(3):
         tally.record_ok()
