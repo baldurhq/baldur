@@ -742,7 +742,8 @@ class ContinuousAuditRecorder:
         manager = getattr(self.audit_adapter, "hash_chain_manager", None)
         if manager is None:
             return {"sequence": None, "previous_hash": None, "source": "no_hash_chain"}
-        return manager.get_state()
+        state: dict[str, Any] = manager.get_state()
+        return state
 
     # ─────────────────────────────────────────────────────────────
     # Internal methods

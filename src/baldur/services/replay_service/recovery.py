@@ -1015,7 +1015,11 @@ class RecoveryTrialRunner:
         from baldur.services.replay_service.service import _handler_refusal
 
         for _position, lane_walk, entry in merged:
-            lane_walk.move_to(encode_replay_cursor(entry.created_at, entry.id), walk)
+            # Positioned entries all carry a created_at (_positioned skips the rest).
+            if entry.created_at is not None:
+                lane_walk.move_to(
+                    encode_replay_cursor(entry.created_at, entry.id), walk
+                )
             allowed, _ = _truncate_gate(entry)
             if allowed and _handler_refusal(handler, entry) is None:
                 walk.candidate = entry

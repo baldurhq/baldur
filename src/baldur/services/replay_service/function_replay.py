@@ -325,7 +325,7 @@ def _is_exact_annotation(annotation: Any) -> bool:
 
 def _is_masked_name(param_name: str) -> bool:
     masked = mask_sensitive_fields({param_name: _MASKING_PROBE})
-    return masked.get(param_name) != _MASKING_PROBE
+    return bool(masked.get(param_name) != _MASKING_PROBE)
 
 
 def _check_signature(

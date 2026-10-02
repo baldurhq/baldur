@@ -6,6 +6,7 @@ Tasks for replaying failed operations from the Dead Letter Queue.
 
 import math
 import time
+from collections.abc import Callable
 from typing import Any
 
 import structlog
@@ -116,12 +117,14 @@ def _affirm_circuit_closed(
             if resolve_stored_domain(row.service_name) == stored_domain
         ]
 
-    if trigger == ResolutionTrigger.AUTO_REPLAY_RECOVERY.value:
-        fails_rule = cb_service.refuses_calls
-    else:
+    def reads_not_closed(row: Any) -> bool:
+        return row.state != CircuitState.CLOSED
 
-        def fails_rule(row: Any) -> bool:
-            return row.state != CircuitState.CLOSED
+    fails_rule: Callable[[Any], bool] = (
+        cb_service.refuses_calls
+        if trigger == ResolutionTrigger.AUTO_REPLAY_RECOVERY.value
+        else reads_not_closed
+    )
 
     pinned = [row for row in projecting if is_manual_pin_active(row)]
     unpinned_offenders = [

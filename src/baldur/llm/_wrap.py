@@ -372,6 +372,9 @@ class _WrappedClient:
 
     __slots__ = ("_endpoints", "_timeout")
 
+    _endpoints: tuple[_PreparedEndpoint, ...]
+    _timeout: Any
+
     def __init__(self, endpoints: list[_PreparedEndpoint], timeout: Any) -> None:
         _validate_endpoints(endpoints)
         object.__setattr__(self, "_endpoints", tuple(endpoints))
