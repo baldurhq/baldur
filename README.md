@@ -120,28 +120,33 @@ changes:
 ```python
 @baldur.protected("charge-customer", dlq=True)
 def charge(order_id: str, amount_cents: int) -> dict:
-    # Circuit breaker by default; dlq=True parks the call if it fails for
-    # good, with its arguments, and replays it once the gateway recovers.
+    # Circuit breaker by default; dlq=True keeps the call if it fails for
+    # good, with its arguments, so it can run again once the gateway is back.
     return payment_gateway.charge(order_id, amount_cents)
 ```
 
 When the gateway dies, the breaker opens and your service answers fast instead
 of stacking up timeouts; the charges that failed on the way out wait in the
-dead-letter queue and come back when it closes. (Replay is for work that failed
-on the way out — never for a business rejection, and never for a checkout the
-customer already walked away from:
+dead-letter queue, listed in the built-in console. Running a charge twice can
+bill twice, so a parked charge comes back only the way you decide: register a
+replay handler for `charge-customer` that says which charges are safe to run
+again, and they replay from the console with a click, or automatically when the
+breaker closes for the failure types you opt in — the demo below does exactly
+that. For a job that is safe to run twice, `replay=True` needs no handler.
+(Replay is for work that failed on the way out — never for a business
+rejection, and never for a checkout the customer already walked away from:
 [where that line sits](https://baldur.sh/concepts/foundations/dlq-replay/).)
 
-![Terminal demo: the payment gateway becomes unreachable mid-traffic and 1,000 charges arrive — five reach it and fail, the breaker trips and rejects the other 995 on the spot, all 1,000 are captured, and on recovery Baldur replays all 1,000 in ten passes. Zero lost.](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/demo-self-healing.gif)
+![Terminal demo: the payment gateway becomes unreachable mid-traffic and 1,000 charges arrive — five reach it and fail, the breaker trips and rejects the other 995 on the spot, all 1,000 are captured, and on recovery Baldur replays all 1,000 in ten passes through the demo's replay handler. Zero lost.](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/demo-payment-outage.gif)
 
 *The payment demo: the gateway goes unreachable mid-traffic and 1,000 charges
 arrive. Five reach it and fail, the open breaker rejects the other 995 without
-calling it, all 1,000 are captured with their arguments, and all 1,000 are
-replayed on recovery. Zero lost. A real run, recorded in real time, with the
-breaker states and DLQ tallies read live from the framework. The decorator
-itself is `pip install baldur-framework` and nothing else; the demo adds the
-`celery` extra for its in-process stand-in worker — still one process, no
-Redis, no broker. Run it yourself:*
+calling it, all 1,000 are captured with their arguments, and through the replay
+handler the demo registers, all 1,000 are replayed on recovery. Zero lost. A
+real run, recorded in real time, with the breaker states and DLQ tallies read
+live from the framework. The decorator itself is `pip install baldur-framework`
+and nothing else; the demo adds the `celery` extra for its in-process stand-in
+worker — still one process, no Redis, no broker. Run it yourself:*
 
 ```bash
 pip install "baldur-framework[celery]"
