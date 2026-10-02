@@ -503,6 +503,7 @@ class FakeOtherSdkClient(SyncAPIClient):
 # The SDK every fake class belongs to, by the module it claims. Resources need it
 # too: the wrap protects a method only when the object it hangs off belongs to
 # the primary client's SDK.
+_cls: type
 for _cls in (
     SyncAPIClient,
     AsyncAPIClient,
