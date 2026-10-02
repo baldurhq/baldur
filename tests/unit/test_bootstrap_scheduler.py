@@ -1000,6 +1000,16 @@ class TestReplayRecoveryDispatchContract:
 class TestReplayRecoveryDispatchBehavior:
     """The scheduler thread is never blocked, and only a tick with work is queued."""
 
+    def test_replay_recovery_job_runs_at_the_recovery_tick_cadence(self):
+        """The leader path queues the tick as often as the beat row does."""
+        from baldur.services.replay_service.recovery import RECOVERY_TICK_SECONDS
+
+        by_name = {
+            name: interval for name, _mod, _attr, interval in _DEFAULT_SCHEDULED_JOBS
+        }
+
+        assert by_name["replay_recovery"] == RECOVERY_TICK_SECONDS
+
     def test_replay_recovery_dispatch_tick_returns_at_once_while_the_publish_blocks(
         self, dispatch_world
     ):

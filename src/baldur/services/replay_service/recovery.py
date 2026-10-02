@@ -134,6 +134,7 @@ OUTCOME_NOT_RUN = "not_run"
 # What a successful trial did about the rest of the backlog besides dispatch.
 _DISPATCH_LEFT_TO_CLOSED_EVENT = "closed_by_trial"
 _DISPATCH_HELD_BY_REFUSAL = "breaker_refusing"
+_DISPATCH_HELD_BY_PIN = "operator_hold"
 
 
 @dataclass(frozen=True)
@@ -147,7 +148,8 @@ class TrialRecord:
             ``breaker_refused`` / ``not_run``).
         dispatch: For a success, what happened to the rest of the backlog: a
             dispatch outcome, ``closed_by_trial`` (the trial closed the
-            breaker and its CLOSED event dispatches), or ``breaker_refusing``.
+            breaker and its CLOSED event dispatches), ``breaker_refusing``, or
+            ``operator_hold`` (an operator pinned a breaker while it ran).
     """
 
     domain: str
@@ -886,7 +888,7 @@ class RecoveryTrialRunner:
             switch_open = False
         if not switch_open:
             logger.debug(
-                "replay_service.recovery_trial_governance_blocked",
+                "replay_service.recovery_trial_governance_skipped",
                 healing_domain=domain,
                 reason="kill_switch",
             )
@@ -903,7 +905,7 @@ class RecoveryTrialRunner:
         )
         if not governance.allowed:
             logger.debug(
-                "replay_service.recovery_trial_governance_blocked",
+                "replay_service.recovery_trial_governance_skipped",
                 healing_domain=domain,
                 reason=governance.block_message,
             )
@@ -916,9 +918,12 @@ class RecoveryTrialRunner:
         """Dispatch the sweep for the rest of the backlog after a successful trial.
 
         Not when the trial itself closed a projecting breaker — its CLOSED
-        event dispatches the (escalating) sweep — and not while a projecting
-        row refuses calls. A HALF_OPEN row does not hold the dispatch: every
-        replay of the sweep goes through the job's own breaker.
+        event dispatches the (escalating) sweep — not while a projecting row
+        refuses calls, and not while one carries an operator's pin (placed
+        while the trial ran: the pins were read before it). A HALF_OPEN row
+        does not hold the dispatch: every replay of the sweep goes through the
+        job's own breaker. Rows that cannot be read again do not hold it
+        either: the chain's first pass reads them and applies the same rules.
         """
         try:
             rows_after = _rows_by_domain(self._read_rows()).get(domain, [])
@@ -940,6 +945,8 @@ class RecoveryTrialRunner:
             cb_service = self._cb_service
             if any(cb_service.refuses_calls(row) for row in rows_after):
                 return _DISPATCH_HELD_BY_REFUSAL
+            if any(_is_pinned(row) for row in rows_after):
+                return _DISPATCH_HELD_BY_PIN
         return dispatch_recovery_sweep(
             domain,
             trigger=ResolutionTrigger.AUTO_REPLAY_RECOVERY,
@@ -1084,10 +1091,16 @@ class RecoveryTrialRunner:
         )
 
     def _record_in_daily_report(self, result: RecoveryTickResult) -> None:
-        """One auto-replay result per tick that ran a trial (fail-open)."""
+        """One auto-replay result per tick whose trials ran a job (fail-open).
+
+        A trial whose job never began — not run, or refused by its own
+        breaker — reached no dependency, so it is neither recovered nor failed:
+        the sweep leaves a replay its breaker refused out of its count too.
+        """
         from baldur.services.replay_service.models import BatchReplayResult
 
-        ran = [trial for trial in result.trials if trial.outcome != OUTCOME_NOT_RUN]
+        never_began = (OUTCOME_NOT_RUN, OUTCOME_BREAKER_REFUSED)
+        ran = [trial for trial in result.trials if trial.outcome not in never_began]
         if not ran:
             return
         succeeded = sum(1 for trial in ran if trial.outcome == OUTCOME_SUCCEEDED)

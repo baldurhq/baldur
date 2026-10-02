@@ -304,6 +304,13 @@ class TestReleaseStaleReplayingRedis:
         assert _in_index(repo, raw_redis, PENDING, dlq_id) == (False, False)
 
     def test_release_leaves_a_fresh_replaying_entry_alone(self, redis_dlq_repository):
+        """
+        Purpose:
+            An entry taken five minutes ago is still inside the release window.
+        Expected:
+            - nothing is released
+            - the entry stays REPLAYING
+        """
         repo = redis_dlq_repository
         dlq_id = _park_and_take(repo, at=utc_now() - timedelta(minutes=5))
 

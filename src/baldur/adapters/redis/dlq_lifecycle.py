@@ -498,7 +498,7 @@ class RedisDLQLifecycle:
                     )
                     return self._return_attempt_python(id, acquired_retry_count)
                 raise
-        logger.debug("dlq.replay_attempt_return_watch_exhausted", entry_id=id)
+        logger.warning("dlq.replay_attempt_return_watch_exhausted", entry_id=id)
         return False
 
     def _return_attempt_python(self, id: str, acquired_retry_count: int) -> bool:
@@ -602,7 +602,7 @@ class RedisDLQLifecycle:
                     )
                     return self._release_one_stale_python(id, cutoff)
                 raise
-        logger.debug("dlq.stale_release_watch_exhausted", entry_id=id)
+        logger.warning("dlq.stale_release_watch_exhausted", entry_id=id)
         return False
 
     def _mark_stale_released(self, data: dict[str, Any]) -> str:

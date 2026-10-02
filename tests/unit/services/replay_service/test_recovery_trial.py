@@ -663,8 +663,20 @@ class TestRecoveryTickExitsBehavior:
             BatchReplayResult(total=2, success_count=1, failed_count=1),
         )
 
-    def test_tick_whose_trials_all_did_not_run_records_no_daily_report(self, harness):
-        harness.handler(steps=[STEP_NOT_STARTED])
+    @pytest.mark.parametrize(
+        ("step", "outcome"),
+        [
+            (STEP_NOT_STARTED, OUTCOME_NOT_RUN),
+            (STEP_BREAKER_REFUSED, OUTCOME_BREAKER_REFUSED),
+        ],
+        ids=["not_run", "breaker_refused"],
+    )
+    def test_tick_whose_trials_never_began_their_job_records_no_daily_report(
+        self, harness, step, outcome
+    ):
+        """A trial whose job never began reached no dependency: it is neither a
+        recovered nor a failed auto-replay, as the sweep leaves out a refusal."""
+        harness.handler(steps=[step])
         harness.park()
 
         with patch.object(
@@ -672,7 +684,7 @@ class TestRecoveryTickExitsBehavior:
         ) as report:
             result = harness.tick()
 
-        assert [t.outcome for t in result.trials] == [OUTCOME_NOT_RUN]
+        assert [t.outcome for t in result.trials] == [outcome]
         report.assert_not_called()
 
 
@@ -1582,6 +1594,9 @@ class TestRecoveryDispatchAfterSuccessBehavior:
                 lambda: [_open_inside_timeout()],
                 "breaker_refusing",
             ),
+            # An operator pinned the breaker while the trial ran: the pins
+            # were read before it, so the hold is read again after it.
+            (lambda: [_row("closed")], lambda: [_pinned_closed()], "operator_hold"),
         ],
         ids=[
             "closed_closed",
@@ -1589,6 +1604,7 @@ class TestRecoveryDispatchAfterSuccessBehavior:
             "half_open_closed",
             "no_breaker",
             "reopened_by_the_trial",
+            "pinned_while_the_trial_ran",
         ],
     )
     def test_dispatch_after_success_rows_before_and_after_decide_the_sweep(
@@ -1806,11 +1822,12 @@ class TestRecoveryTrialScenarioBehavior:
             first = harness.tick()
             harness.clock.advance(RECOVERY_TRIAL_BASE_SECONDS)
             during = harness.tick()
+            # Read under the frozen clock: the record's TTL runs on it.
+            pacing = harness.pacing()
 
         assert [t.outcome for t in first.trials] == [OUTCOME_STILL_RUNNING]
         # Nothing PENDING is left under the job name: the tick has no work.
         assert (during.status, during.trials) == (TICK_IDLE, [])
         assert handler.replayed == [dlq_id]
         assert harness.entry(dlq_id).status == "replaying"
-        pacing = harness.pacing()
         assert (pacing.streak, pacing.next_at) == (1, T0 + 60.0)

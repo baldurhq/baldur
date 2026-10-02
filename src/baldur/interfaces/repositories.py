@@ -943,9 +943,11 @@ class FailedOperationRepository(ABC):
         they are — ``updated_at`` included, so a stale release that ages
         entries by it is not reset.
 
-        The count is the holder's fence: every acquisition raises it, so a
-        replay that was overtaken by another acquisition finds a different
-        count and gives nothing back.
+        The count is the holder's fence: every ordinary acquisition raises
+        it, so a replay that was overtaken by another acquisition finds a
+        different count and gives nothing back. An operator's force-redrive
+        resets the count to 1 instead; a replay overtaken by one finds the
+        fence only while its own acquired count differs from 1.
 
         Not abstract: a repository that does not override it raises
         ``NotImplementedError``, and callers treat that as "the attempt stays
