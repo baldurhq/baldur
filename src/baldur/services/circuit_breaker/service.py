@@ -511,6 +511,37 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             self.get_effective_config(service_name).sliding_window_size,
         )
 
+    def refuses_calls(self, state: CircuitBreakerStateData) -> bool:
+        """Would this breaker refuse a call right now, by its own admission rule?
+
+        A pure read over a state row (from any process's view, the shared
+        store included): True for an OPEN row under an operator's Block, an
+        OPEN row inside its recovery timeout (or with no ``opened_at``) whose
+        pin lift is not due, and any non-CLOSED row while automatic
+        transitions are frozen. An OPEN row past its recovery timeout and a
+        HALF_OPEN row admit a call — the admission itself moves the row and
+        takes a half-open slot — so they are not refusing. A CLOSED row never
+        is. Never raises; an unreadable row reads as refusing.
+        """
+        try:
+            if state.state == CircuitState.CLOSED:
+                return False
+            return (
+                self._admission_refusal_reason(
+                    state.service_name,
+                    state,
+                    self.get_effective_config(state.service_name),
+                )
+                is not None
+            )
+        except Exception as e:
+            logger.debug(
+                "circuit_breaker.refusal_read_failed",
+                service_name=getattr(state, "service_name", None),
+                error=str(e),
+            )
+            return True
+
     def _admission_refusal_reason(
         self,
         service_name: str,

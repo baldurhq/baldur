@@ -114,6 +114,20 @@ def _make_compressed_entry(
     )
 
 
+def _stale_replaying_blob(entry_id, now: datetime) -> bytes:
+    """A REPLAYING entry blob last written an hour before ``now``, below its cap."""
+    return _blob(
+        {
+            "id": str(entry_id),
+            "domain": "payment",
+            "status": FailedOperationStatus.REPLAYING.value,
+            "retry_count": 1,
+            "max_retries": 2,
+            "updated_at": (now - timedelta(minutes=60)).isoformat(),
+        }
+    )
+
+
 def _make_repo(mock_backend=None):
     """Create RedisDLQRepository with mock backend, matching overflow test pattern."""
     from baldur.adapters.redis.dlq import RedisDLQRepository
@@ -877,7 +891,11 @@ class TestRedisDLQLifecycleBehavior:
         assert call_kwargs["status"] == FailedOperationStatus.REQUIRES_REVIEW.value
 
     def test_release_stale_replaying_releases_old_entries(self):
-        """release_stale_replaying resets stale replaying entries to PENDING."""
+        """release_stale_replaying resets stale replaying entries to PENDING.
+
+        Degraded mode: the write is the read-modify-write through ``_update``,
+        re-checked on the blob the release reads back.
+        """
         now = datetime(2026, 3, 16, 12, 0, 0, tzinfo=UTC)
         repo = _make_repo()
         stale_entry = _make_failed_op_data(
@@ -891,6 +909,10 @@ class TestRedisDLQLifecycleBehavior:
             updated_at=now - timedelta(minutes=10),
         )
         repo.query.by_status = MagicMock(return_value=[stale_entry, fresh_entry])
+        repo._ensure_redis_available = MagicMock(return_value=False)
+        repo._load_blob = MagicMock(
+            side_effect=lambda entry_id: _stale_replaying_blob(entry_id, now)
+        )
         repo._update = MagicMock(return_value=True)
 
         with patch(
@@ -941,6 +963,10 @@ class TestRedisDLQLifecycleBehavior:
             for i in (1, 2, 3)
         ]
         repo.query.by_status = MagicMock(return_value=stale_entries)
+        repo._ensure_redis_available = MagicMock(return_value=False)
+        repo._load_blob = MagicMock(
+            side_effect=lambda entry_id: _stale_replaying_blob(entry_id, now)
+        )
         # First and third writes succeed; second one fails (e.g. Redis stutter
         # mid-loop). Expected released count = 2, not 3.
         repo._update = MagicMock(side_effect=[True, False, True])

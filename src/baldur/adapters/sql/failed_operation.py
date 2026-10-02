@@ -964,18 +964,65 @@ class SQLFailedOperationRepository(GenericSQLRepository, FailedOperationReposito
         )
         return True
 
+    def return_replay_attempt(self, id: str, acquired_retry_count: int) -> bool:
+        """Give back an attempt this replay's acquisition took (fenced on its count).
+
+        One conditional UPDATE: ``retry_count`` is a column, so the fence and
+        the decrement are the same statement. ``updated_at`` is not touched.
+        """
+        row_id = _coerce_row_id(id)
+        if row_id is None:
+            return False
+        conn = self._borrow_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                self._prepare(
+                    f"UPDATE {_TABLE} SET retry_count = retry_count - 1 "
+                    f"WHERE id = %s AND status = %s AND retry_count = %s"
+                ),
+                (
+                    row_id,
+                    FailedOperationStatus.REPLAYING.value,
+                    int(acquired_retry_count),
+                ),
+            )
+            returned = int(cursor.rowcount or 0) > 0
+            if self._should_commit(conn):
+                conn.commit()
+            return returned
+        except Exception:
+            if self._should_commit(conn):
+                try:
+                    conn.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+            raise
+        finally:
+            cursor.close()
+
     def release_stale_replaying(self, older_than_minutes: int = 30) -> int:
+        """Move REPLAYING entries older than the cutoff out of REPLAYING.
+
+        One UPDATE: below its stored cap an entry goes back to PENDING, at the
+        cap (interrupted on its last allowed attempt) to REQUIRES_REVIEW. The
+        ``WHERE`` is the compare-and-set — an entry another replay acquired
+        meanwhile carries a fresh ``last_retry_at`` and is left alone.
+        """
         cutoff = utc_now() - timedelta(minutes=older_than_minutes)
         conn = self._borrow_connection()
         cursor = conn.cursor()
         try:
             stmt = self._prepare(
-                f"UPDATE {_TABLE} SET status = %s, updated_at = %s "
+                f"UPDATE {_TABLE} SET status = CASE "
+                f"WHEN retry_count >= max_retries THEN %s ELSE %s END, "
+                f"updated_at = %s "
                 f"WHERE status = %s AND last_retry_at IS NOT NULL AND last_retry_at < %s"
             )
             cursor.execute(
                 stmt,
                 (
+                    FailedOperationStatus.REQUIRES_REVIEW.value,
                     FailedOperationStatus.PENDING.value,
                     self._dt_to_db(utc_now()),
                     FailedOperationStatus.REPLAYING.value,

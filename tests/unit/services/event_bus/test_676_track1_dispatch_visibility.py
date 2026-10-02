@@ -1,20 +1,15 @@
-"""676 — On-recovery dispatch visibility + RuntimeConfig reader pattern.
+"""676 — On-recovery dispatch visibility.
 
-Target: ``baldur.services.event_bus.bus._cb_handlers``
+Target: ``baldur.services.event_bus.bus._cb_handlers._on_circuit_breaker_closed``
+through the one recovery dispatch path
+(``baldur.services.replay_service.recovery.dispatch_recovery_sweep``)
 
-    - ``_on_circuit_breaker_closed`` — armed-aware skip semantics (D3): a
-      CB auto-CLOSE either dispatches, skips (disabled), or WARNs
-      (armed-but-undeliverable / error) — never goes silently inert. Each
-      outcome records a dispatch counter; an attempt also lands in the arming
-      ledger the operator surfaces read as ``last_dispatch``. The dispatch path is
-      slot-blind (710): it never consults the PRO ``dlq_service`` slot —
-      auto-replay on CB recovery is OSS.
-    - ``_get_replay_automation_config`` — the 617 reader pattern (D1):
-      RuntimeConfig absent = DEBUG-once (OSS-normal), read-failure = WARNING
-      every time, and the public ``get_config`` accessor is used (never the
-      private ``_get_config``).
-    - ``get_cb_replay_dispatch_state`` / ``reset_cb_replay_dispatch_state``
-      — the DEBUG-once marker and its reset hook (test isolation).
+    - armed-aware skip semantics (D3): a CB auto-CLOSE either dispatches, skips
+      (disabled), or WARNs (armed-but-undeliverable / error) — never goes
+      silently inert. Each outcome records a dispatch counter; an attempt also
+      lands in the arming ledger the operator surfaces read as
+      ``last_dispatch``. The dispatch path is slot-blind (710): it never
+      consults the PRO ``dlq_service`` slot — auto-replay on CB recovery is OSS.
     - D2/D5 config precedence: on the RuntimeConfig-absent path the dispatch
       resolves ``on_recovery_max_items`` from ``ReplayAutomationSettings`` (env-
       honoring), not a hardcoded literal.
@@ -34,18 +29,13 @@ from structlog.testing import capture_logs
 
 from baldur.factory.registry import ProviderRegistry
 from baldur.metrics.recorders.dlq import DLQMetricRecorder
-from baldur.services.event_bus.bus._cb_handlers import (
-    _get_replay_automation_config,
-    _on_circuit_breaker_closed,
-    _record_dispatch_outcome,
-    get_cb_replay_dispatch_state,
-    reset_cb_replay_dispatch_state,
-)
+from baldur.services.event_bus.bus._cb_handlers import _on_circuit_breaker_closed
 from baldur.services.replay_service import ReplayService
 from baldur.services.replay_service.arming import (
     get_dispatch_ledger,
     reset_dispatch_ledger,
 )
+from baldur.services.replay_service.recovery import _record_dispatch_outcome
 from baldur.settings.replay_automation import (
     ReplayAutomationSettings,
     get_replay_automation_settings,
@@ -53,6 +43,15 @@ from baldur.settings.replay_automation import (
 
 _TASK_PATH = "baldur.adapters.celery.tasks.conditional_replay_on_circuit_close"
 _CELERY_TASKS_MODULE = "baldur.adapters.celery.tasks"
+_RECORD_PATH = "baldur.services.replay_service.recovery._record_dispatch_outcome"
+
+# What a CLOSED event's dispatch adds to the chain's first pass: the provenance
+# and the escalation of the CLOSED-transition lane, not operator-requested.
+_CLOSED_EVENT_CHAIN = {
+    "trigger": "auto_replay_circuit_close",
+    "escalate_failures": True,
+    "operator_requested": False,
+}
 
 
 # =============================================================================
@@ -62,17 +61,10 @@ _CELERY_TASKS_MODULE = "baldur.adapters.celery.tasks"
 
 @pytest.fixture(autouse=True)
 def _reset_dispatch_markers():
-    """Reset the module-global DEBUG-once marker around every test.
-
-    The marker is process-global (``get_*/reset_*`` convention), so without
-    this the first test's ``runtime_config_absent`` DEBUG would suppress a
-    later test's expectation (xdist-safe isolation). The arming ledger the
-    dispatch path writes into is process-global for the same reason.
-    """
-    reset_cb_replay_dispatch_state()
+    """Reset the process-global arming ledger the dispatch path writes into
+    around every test (xdist-safe isolation)."""
     reset_dispatch_ledger()
     yield
-    reset_cb_replay_dispatch_state()
     reset_dispatch_ledger()
 
 
@@ -97,8 +89,8 @@ def _events(cap_logs: list[dict], name: str) -> list[dict]:
 def _patch_config(config):
     """Patch the resolved RuntimeConfig block the dispatch reads."""
     return patch(
-        "baldur.services.event_bus.bus._cb_handlers._get_replay_automation_config",
-        return_value=config,
+        "baldur.services.replay_service.recovery._replay_automation_config",
+        return_value=config or {},
     )
 
 
@@ -144,9 +136,7 @@ class TestOnRecoveryDispatchVisibilityBehavior:
                 ),
             ),
             _patch_config({"on_recovery_enabled": True, "on_recovery_max_items": 50}),
-            patch(
-                "baldur.services.event_bus.bus._cb_handlers._record_dispatch_outcome"
-            ) as record,
+            patch(_RECORD_PATH) as record,
             patch(_TASK_PATH, new=task_mock),
             capture_logs() as cap,
         ):
@@ -167,9 +157,7 @@ class TestOnRecoveryDispatchVisibilityBehavior:
 
         with (
             _patch_config({"on_recovery_enabled": False}),
-            patch(
-                "baldur.services.event_bus.bus._cb_handlers._record_dispatch_outcome"
-            ) as record,
+            patch(_RECORD_PATH) as record,
             patch(_TASK_PATH, new=_make_task_mock()) as task_mock,
             capture_logs() as cap,
         ):
@@ -189,9 +177,7 @@ class TestOnRecoveryDispatchVisibilityBehavior:
 
         with (
             _patch_config({"on_recovery_enabled": True, "on_recovery_max_items": 42}),
-            patch(
-                "baldur.services.event_bus.bus._cb_handlers._record_dispatch_outcome"
-            ) as record,
+            patch(_RECORD_PATH) as record,
             patch(_TASK_PATH, new=task_mock),
             capture_logs() as cap,
         ):
@@ -199,7 +185,10 @@ class TestOnRecoveryDispatchVisibilityBehavior:
 
         # Then: exactly-once dispatch with the resolved kwargs, counter=dispatched.
         task_mock.delay.assert_called_once_with(
-            service_name="orders-api", max_items=42, max_continuations=100
+            service_name="orders-api",
+            max_items=42,
+            max_continuations=100,
+            **_CLOSED_EVENT_CHAIN,
         )
         assert len(_events(cap, "event_handler.circuit_breaker_closed_triggered")) == 1
         record.assert_called_once_with("dispatched", service_name="orders-api")
@@ -212,9 +201,7 @@ class TestOnRecoveryDispatchVisibilityBehavior:
 
         with (
             _patch_config({"on_recovery_enabled": True, "on_recovery_max_items": 50}),
-            patch(
-                "baldur.services.event_bus.bus._cb_handlers._record_dispatch_outcome"
-            ) as record,
+            patch(_RECORD_PATH) as record,
             _patch_parked(1),
             patch.dict("sys.modules", {_CELERY_TASKS_MODULE: None}),
             capture_logs() as cap,
@@ -239,9 +226,7 @@ class TestOnRecoveryDispatchVisibilityBehavior:
 
         with (
             _patch_config({"on_recovery_enabled": True, "on_recovery_max_items": 50}),
-            patch(
-                "baldur.services.event_bus.bus._cb_handlers._record_dispatch_outcome"
-            ) as record,
+            patch(_RECORD_PATH) as record,
             patch(_TASK_PATH, new=task_mock),
             capture_logs() as cap,
         ):
@@ -262,9 +247,7 @@ class TestOnRecoveryDispatchVisibilityBehavior:
 
         with (
             _patch_config({"on_recovery_enabled": True, "on_recovery_max_items": 50}),
-            patch(
-                "baldur.services.event_bus.bus._cb_handlers._record_dispatch_outcome"
-            ),
+            patch(_RECORD_PATH),
             _patch_parked(1),
             patch.dict("sys.modules", {_CELERY_TASKS_MODULE: None}),
             capture_logs() as cap,
@@ -335,9 +318,7 @@ class TestCeleryMissingParkedGateBehavior:
         # When
         with (
             _patch_config({"on_recovery_enabled": True, "on_recovery_max_items": 50}),
-            patch(
-                "baldur.services.event_bus.bus._cb_handlers._record_dispatch_outcome"
-            ) as record,
+            patch(_RECORD_PATH) as record,
             patch(
                 "baldur.services.replay_service.get_replay_service",
                 return_value=service,
@@ -369,9 +350,7 @@ class TestCeleryMissingParkedGateBehavior:
 
         with (
             _patch_config({"on_recovery_enabled": True, "on_recovery_max_items": 50}),
-            patch(
-                "baldur.services.event_bus.bus._cb_handlers._record_dispatch_outcome"
-            ) as record,
+            patch(_RECORD_PATH) as record,
             patch(
                 "baldur.services.replay_service.get_replay_service",
                 side_effect=RuntimeError("registry unavailable"),
@@ -395,9 +374,7 @@ class TestCeleryMissingParkedGateBehavior:
 
         with (
             _patch_config({"on_recovery_enabled": True, "on_recovery_max_items": 50}),
-            patch(
-                "baldur.services.event_bus.bus._cb_handlers._record_dispatch_outcome"
-            ) as record,
+            patch(_RECORD_PATH) as record,
             patch(
                 "baldur.services.replay_service.get_replay_service",
                 return_value=service,
@@ -412,6 +389,7 @@ class TestCeleryMissingParkedGateBehavior:
             max_continuations=(
                 get_replay_automation_settings().on_recovery_max_continuations
             ),
+            **_CLOSED_EVENT_CHAIN,
         )
         service.parked_count_for_recovery.assert_not_called()
         record.assert_called_once_with("dispatched", service_name="payment-api")
@@ -445,9 +423,7 @@ class TestOnRecoveryDispatchSettingsFallbackBehavior:
                 "baldur.settings.replay_automation.get_replay_automation_settings",
                 return_value=fresh,
             ),
-            patch(
-                "baldur.services.event_bus.bus._cb_handlers._record_dispatch_outcome"
-            ),
+            patch(_RECORD_PATH),
             patch(_TASK_PATH, new=task_mock),
         ):
             _on_circuit_breaker_closed(event)
@@ -455,95 +431,8 @@ class TestOnRecoveryDispatchSettingsFallbackBehavior:
         # Then: the dispatch used the env-derived settings value, proving the
         # fallback reads settings rather than the old hardcoded 50/100.
         task_mock.delay.assert_called_once_with(
-            service_name="payment-api", max_items=77, max_continuations=100
+            service_name="payment-api",
+            max_items=77,
+            max_continuations=100,
+            **_CLOSED_EVENT_CHAIN,
         )
-
-
-# =============================================================================
-# D1 — RuntimeConfig reader pattern (617 sister site)
-# =============================================================================
-
-
-class TestCBReaderBehavior:
-    """``_get_replay_automation_config`` classifies absent (DEBUG-once) vs
-    read-failure (WARNING each) and reads via the public ``get_config``.
-    """
-
-    def test_absent_manager_returns_none_and_debugs_once(self):
-        with (
-            patch.object(
-                ProviderRegistry.runtime_config_manager, "safe_get", return_value=None
-            ),
-            capture_logs() as cap,
-        ):
-            first = _get_replay_automation_config()
-            second = _get_replay_automation_config()
-
-        assert first is None
-        assert second is None
-        # OSS-normal absence surfaces as DEBUG, at most once per process.
-        absent = _events(cap, "event_handler.runtime_config_absent")
-        assert len(absent) == 1
-        assert absent[0]["log_level"] == "debug"
-
-    def test_read_failure_warns_every_occurrence(self):
-        manager = MagicMock()
-        manager.get_config.side_effect = RuntimeError("config store down")
-
-        with (
-            patch.object(
-                ProviderRegistry.runtime_config_manager,
-                "safe_get",
-                return_value=manager,
-            ),
-            capture_logs() as cap,
-        ):
-            first = _get_replay_automation_config()
-            second = _get_replay_automation_config()
-
-        assert first is None
-        assert second is None
-        # A genuine read failure is abnormal — WARNING on every occurrence.
-        failures = _events(cap, "event_handler.runtime_config_read_failed")
-        assert len(failures) == 2
-        assert all(e["log_level"] == "warning" for e in failures)
-
-    def test_uses_public_get_config_accessor_not_private(self):
-        manager = MagicMock()
-        manager.get_config.return_value = {"on_recovery_enabled": True}
-
-        with patch.object(
-            ProviderRegistry.runtime_config_manager, "safe_get", return_value=manager
-        ):
-            result = _get_replay_automation_config()
-
-        assert result == {"on_recovery_enabled": True}
-        manager.get_config.assert_called_once_with("replay_automation")
-        manager._get_config.assert_not_called()
-
-
-# =============================================================================
-# DEBUG-once marker state accessor / reset hook
-# =============================================================================
-
-
-class TestCBDispatchStateContract:
-    """``get_cb_replay_dispatch_state`` / ``reset_cb_replay_dispatch_state``
-    expose and clear the module-global DEBUG-once marker.
-    """
-
-    def test_reset_clears_the_runtime_config_marker(self):
-        # Given: an absent-manager read flips the DEBUG-once marker.
-        with patch.object(
-            ProviderRegistry.runtime_config_manager, "safe_get", return_value=None
-        ):
-            _get_replay_automation_config()
-        assert get_cb_replay_dispatch_state()["runtime_config_absent_logged"] is True
-
-        # When
-        reset_cb_replay_dispatch_state()
-
-        # Then: the marker is back to the pristine False state.
-        assert get_cb_replay_dispatch_state() == {
-            "runtime_config_absent_logged": False,
-        }

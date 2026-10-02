@@ -14,6 +14,11 @@ from baldur.interfaces.resilience_policy import PolicyRejectedException
 # Raised by the Redis adapter's cluster read; read by the aggregate consumer.
 UNREACHED_DEFAULT_STORE_REASON = "unreached_default_store"
 
+# The layered repository's cluster read refused because this process
+# quarantined its link to the shared store. The store itself may answer:
+# ``get_store_cluster_states()`` reads it past the quarantine.
+L2_QUARANTINED_REASON = "l2_quarantined"
+
 
 class CircuitBreakerOpenError(PolicyRejectedException, CircuitBreakerError):
     """Raised when a request is rejected because the Circuit Breaker is OPEN.

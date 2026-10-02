@@ -13,6 +13,7 @@ EventBus handler priority:
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import structlog
@@ -42,15 +43,78 @@ def on_circuit_breaker_closed_integrity_gate(event: Any) -> None:
         4. The downstream _on_circuit_breaker_closed checks this flag
     """
     service_name = event.data.get("service_name", "unknown")
-    start = time.time()
+    verdict = _evaluate_integrity(service_name)
 
-    # Load Fail-Open/Secure mode from settings
+    event.data[INTEGRITY_GATE_KEY] = verdict.gate_result
+    event.data[INTEGRITY_FAILED_KEY] = verdict.blocked
+
+    if verdict.violation is not None:
+        logger.critical(
+            "integrity_gate.integrity_violation_replay_blocked",
+            service_name=service_name,
+            errors=verdict.violation.get("errors", []),
+        )
+        _send_integrity_violation_alert(
+            service_name, verdict.violation, verdict.duration_ms
+        )
+
+    if verdict.result is not None:
+        _update_health_score(verdict.result, verdict.duration_ms)
+
+
+def replay_integrity_verdict(service_name: str) -> bool:
+    """May an automatic replay of this service's parked work proceed?
+
+    The integrity gate's own verification and its fail-open / fail-secure
+    policy, asked by a replay lane that has no CLOSED event to read the gate's
+    flag from: the recovery trial before every trial, and the recovery chain
+    at the start of every pass. Unlike the event handler it neither writes an
+    event nor alerts nor moves the integrity health score — the alert belongs
+    to the recovery the gate saw first.
+
+    Never raises.
+
+    Returns:
+        True when replay may proceed; False when the gate blocks it.
+    """
+    try:
+        return not _evaluate_integrity(service_name).blocked
+    except Exception as e:  # defensive: the evaluation catches its own faults
+        logger.warning(
+            "integrity_gate.verdict_evaluation_failed",
+            service_name=service_name,
+            error=e,
+        )
+        return _fail_open_policy()
+
+
+@dataclass(frozen=True)
+class _IntegrityVerdict:
+    """One evaluation of the gate: whether it blocks, and what it saw."""
+
+    blocked: bool
+    gate_result: dict[str, Any]
+    duration_ms: float
+    # The verification result when one was computed (None when it raised).
+    result: dict[str, Any] | None = None
+    # The verification result when it found a broken chain.
+    violation: dict[str, Any] | None = None
+
+
+def _fail_open_policy() -> bool:
+    """The configured fail behaviour: True = fail-open (proceed without a verdict)."""
     try:
         from baldur.settings.audit_integrity import get_audit_integrity_settings
 
-        fail_open = get_audit_integrity_settings().integrity_gate_fail_open
+        return bool(get_audit_integrity_settings().integrity_gate_fail_open)
     except Exception:
-        fail_open = True  # Safe default when settings loading fails
+        return True  # Safe default when settings loading fails
+
+
+def _evaluate_integrity(service_name: str) -> _IntegrityVerdict:
+    """Verify the recovery window and apply the fail-open / fail-secure policy."""
+    start = time.time()
+    fail_open = _fail_open_policy()
 
     logger.info(
         "integrity_gate.checking_wal_integrity_before",
@@ -59,48 +123,9 @@ def on_circuit_breaker_closed_integrity_gate(event: Any) -> None:
     )
 
     try:
-        result = _verify_recovery_window_integrity(service_name, event)
-        duration_ms = (time.time() - start) * 1000
-
-        event.data[INTEGRITY_GATE_KEY] = {
-            "valid": result["valid"],
-            "checked": result.get("checked", 0),
-            "duration_ms": duration_ms,
-            "strategy": result.get("strategy", "full_chain"),
-        }
-
-        if result["valid"] is None:
-            # No verdict was reachable. This gate is an optional integration,
-            # whose standard fail behaviour is fail-open; an operator who set
-            # fail-secure gets the blocking half instead.
-            event.data[INTEGRITY_FAILED_KEY] = not fail_open
-            logger.warning(
-                "integrity_gate.verdict_unavailable",
-                service_name=service_name,
-                checked=result.get("checked", 0),
-                strategy=result.get("strategy"),
-                fail_open=fail_open,
-            )
-        elif not result["valid"]:
-            event.data[INTEGRITY_FAILED_KEY] = True
-            logger.critical(
-                "integrity_gate.integrity_violation_replay_blocked",
-                service_name=service_name,
-                errors=result.get("errors", []),
-            )
-            _send_integrity_violation_alert(service_name, result, duration_ms)
-        else:
-            event.data[INTEGRITY_FAILED_KEY] = False
-            logger.info(
-                "integrity_gate.integrity_ok_entries_ms",
-                service_name=service_name,
-                checked=result.get("checked", 0),
-                duration_ms=duration_ms,
-            )
-
-        _update_health_score(result, duration_ms)
-
+        result = _verify_recovery_window_integrity(service_name)
     except Exception as e:
+        duration_ms = (time.time() - start) * 1000
         # Branch on the Fail-Open/Secure setting
         if fail_open:
             logger.warning(
@@ -108,20 +133,69 @@ def on_circuit_breaker_closed_integrity_gate(event: Any) -> None:
                 service_name=service_name,
                 error=e,
             )
-            event.data[INTEGRITY_FAILED_KEY] = False
         else:
             logger.critical(
                 "integrity_gate.gate_check_failed_fail",
                 service_name=service_name,
                 error=e,
             )
-            event.data[INTEGRITY_FAILED_KEY] = True
+        return _IntegrityVerdict(
+            blocked=not fail_open,
+            gate_result={
+                "valid": None,
+                "error": str(e),
+                "policy": "fail_open" if fail_open else "fail_secure",
+            },
+            duration_ms=duration_ms,
+        )
 
-        event.data[INTEGRITY_GATE_KEY] = {
-            "valid": None,
-            "error": str(e),
-            "policy": "fail_open" if fail_open else "fail_secure",
-        }
+    duration_ms = (time.time() - start) * 1000
+    gate_result = {
+        "valid": result["valid"],
+        "checked": result.get("checked", 0),
+        "duration_ms": duration_ms,
+        "strategy": result.get("strategy", "full_chain"),
+    }
+
+    if result["valid"] is None:
+        # No verdict was reachable. This gate is an optional integration,
+        # whose standard fail behaviour is fail-open; an operator who set
+        # fail-secure gets the blocking half instead.
+        logger.warning(
+            "integrity_gate.verdict_unavailable",
+            service_name=service_name,
+            checked=result.get("checked", 0),
+            strategy=result.get("strategy"),
+            fail_open=fail_open,
+        )
+        return _IntegrityVerdict(
+            blocked=not fail_open,
+            gate_result=gate_result,
+            duration_ms=duration_ms,
+            result=result,
+        )
+
+    if not result["valid"]:
+        return _IntegrityVerdict(
+            blocked=True,
+            gate_result=gate_result,
+            duration_ms=duration_ms,
+            result=result,
+            violation=result,
+        )
+
+    logger.info(
+        "integrity_gate.integrity_ok_entries_ms",
+        service_name=service_name,
+        checked=result.get("checked", 0),
+        duration_ms=duration_ms,
+    )
+    return _IntegrityVerdict(
+        blocked=False,
+        gate_result=gate_result,
+        duration_ms=duration_ms,
+        result=result,
+    )
 
 
 # =============================================================================
@@ -129,10 +203,7 @@ def on_circuit_breaker_closed_integrity_gate(event: Any) -> None:
 # =============================================================================
 
 
-def _verify_recovery_window_integrity(
-    service_name: str,
-    event: Any,
-) -> dict[str, Any]:
+def _verify_recovery_window_integrity(service_name: str) -> dict[str, Any]:
     """
     Verify the hash chain of WAL data accumulated while the circuit was Open.
 

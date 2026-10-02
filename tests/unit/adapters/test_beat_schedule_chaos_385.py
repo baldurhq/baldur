@@ -66,10 +66,6 @@ class TestRegisterAllTasksChaosSchedulerBehavior:
                 "baldur.tasks.compliance_tasks.register_compliance_tasks_with_celery",
                 autospec=True,
             ),
-            patch(
-                "baldur.tasks.traffic_aware_replay.register_traffic_aware_tasks_with_celery",
-                autospec=True,
-            ),
             # 599 D10 - private lanes are imported inside the function;
             # patch them so the mock app never reaches the real class wrapping.
             patch(

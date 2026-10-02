@@ -1,12 +1,12 @@
 """
-PostRecoveryIntegrityGate 단위 테스트.
+PostRecoveryIntegrityGate unit tests.
 
-테스트 대상:
-    - on_circuit_breaker_closed_integrity_gate: CB 복구 시 WAL 무결성 게이트
-    - _verify_recovery_window_integrity: WAL 해시체인 검증
-    - _get_unsynced_wal_entries: WAL 미동기화 엔트리 조회
-    - _update_health_score: 건강도 갱신 분기
-    - Fail-Open / Fail-Secure 정책 분기
+Under test:
+    - on_circuit_breaker_closed_integrity_gate: WAL integrity gate on CB recovery
+    - _verify_recovery_window_integrity: WAL hash-chain verification
+    - _get_unsynced_wal_entries: unsynced WAL entry lookup
+    - _update_health_score: health score update branches
+    - Fail-Open / Fail-Secure policy branches
 """
 
 import sys
@@ -26,7 +26,7 @@ from baldur.services.event_bus.integrity_gate import (
 )
 
 # ---------------------------------------------------------------------------
-# 패치 경로 상수 — integrity_gate.py 내 로컬 import 대상 모듈 기준
+# Patch path constants — the modules integrity_gate.py imports locally
 # ---------------------------------------------------------------------------
 _PATCH_SETTINGS = "baldur.settings.audit_integrity.get_audit_integrity_settings"
 _PATCH_VERIFY = (
@@ -53,43 +53,43 @@ _PATCH_HEALTH_SCORE = "baldur.audit.integrity.get_integrity_health_score"
 def _make_event(
     service_name: str = "test_service", data: dict | None = None
 ) -> MagicMock:
-    """테스트용 이벤트 객체 생성."""
+    """Build an event object for the test."""
     event = MagicMock()
     event.data = data if data is not None else {"service_name": service_name}
     return event
 
 
 def _make_wal_entry(data: dict) -> MagicMock:
-    """WALEntry를 모사하는 mock 객체."""
+    """A mock standing in for a WALEntry."""
     entry = MagicMock()
     entry.data = data
     return entry
 
 
 # =============================================================================
-# 계약(Contract) 검증
+# Contract
 # =============================================================================
 
 
 class TestIntegrityGateContract:
-    """integrity_gate 설계 계약값 검증."""
+    """integrity_gate design contract values."""
 
     def test_integrity_gate_key_value(self):
-        """INTEGRITY_GATE_KEY 상수는 'integrity_gate_result'이다."""
+        """The INTEGRITY_GATE_KEY constant is 'integrity_gate_result'."""
         assert INTEGRITY_GATE_KEY == "integrity_gate_result"
 
     def test_integrity_failed_key_value(self):
-        """INTEGRITY_FAILED_KEY 상수는 'integrity_failed'이다."""
+        """The INTEGRITY_FAILED_KEY constant is 'integrity_failed'."""
         assert INTEGRITY_FAILED_KEY == "integrity_failed"
 
 
 # =============================================================================
-# on_circuit_breaker_closed_integrity_gate 동작 검증
+# on_circuit_breaker_closed_integrity_gate behavior
 # =============================================================================
 
 
 class TestIntegrityGateHandlerBehavior:
-    """CB 복구 시 무결성 게이트 핸들러 동작 검증."""
+    """The integrity gate handler on CB recovery."""
 
     @patch(_PATCH_HEALTH_UPDATE)
     @patch(_PATCH_VERIFY)
@@ -97,7 +97,7 @@ class TestIntegrityGateHandlerBehavior:
     def test_valid_chain_sets_integrity_failed_false(
         self, mock_settings, mock_verify, mock_health
     ):
-        """정상 체인이면 integrity_failed=False를 설정한다."""
+        """A valid chain sets integrity_failed=False."""
         mock_settings.return_value.integrity_gate_fail_open = True
         mock_verify.return_value = {
             "valid": True,
@@ -119,7 +119,7 @@ class TestIntegrityGateHandlerBehavior:
     def test_broken_chain_sets_integrity_failed_true(
         self, mock_settings, mock_verify, mock_health, mock_alert
     ):
-        """무결성 위반 시 integrity_failed=True를 설정한다."""
+        """An integrity violation sets integrity_failed=True."""
         mock_settings.return_value.integrity_gate_fail_open = True
         mock_verify.return_value = {
             "valid": False,
@@ -141,7 +141,7 @@ class TestIntegrityGateHandlerBehavior:
     def test_broken_chain_invokes_alert(
         self, mock_settings, mock_verify, mock_health, mock_alert
     ):
-        """무결성 위반 시 _send_integrity_violation_alert가 호출된다."""
+        """An integrity violation calls _send_integrity_violation_alert."""
         mock_settings.return_value.integrity_gate_fail_open = True
         mock_verify.return_value = {
             "valid": False,
@@ -158,7 +158,7 @@ class TestIntegrityGateHandlerBehavior:
     @patch(_PATCH_VERIFY)
     @patch(_PATCH_SETTINGS)
     def test_exception_fail_open_allows_replay(self, mock_settings, mock_verify):
-        """예외 + fail_open=True이면 integrity_failed=False (리플레이 허용)."""
+        """An exception with fail_open=True sets integrity_failed=False (replay allowed)."""
         mock_settings.return_value.integrity_gate_fail_open = True
         mock_verify.side_effect = RuntimeError("Redis down")
         event = _make_event()
@@ -171,7 +171,7 @@ class TestIntegrityGateHandlerBehavior:
     @patch(_PATCH_VERIFY)
     @patch(_PATCH_SETTINGS)
     def test_exception_fail_secure_blocks_replay(self, mock_settings, mock_verify):
-        """예외 + fail_open=False이면 integrity_failed=True (리플레이 차단)."""
+        """An exception with fail_open=False sets integrity_failed=True (replay blocked)."""
         mock_settings.return_value.integrity_gate_fail_open = False
         mock_verify.side_effect = RuntimeError("Redis down")
         event = _make_event()
@@ -187,7 +187,7 @@ class TestIntegrityGateHandlerBehavior:
     def test_gate_result_contains_duration_and_strategy(
         self, mock_settings, mock_verify, mock_health
     ):
-        """게이트 결과에 duration_ms와 strategy가 포함된다."""
+        """The gate result carries duration_ms and strategy."""
         mock_settings.return_value.integrity_gate_fail_open = True
         mock_verify.return_value = {
             "valid": True,
@@ -206,7 +206,7 @@ class TestIntegrityGateHandlerBehavior:
 
     @patch(_PATCH_VERIFY)
     def test_settings_load_failure_defaults_to_fail_open(self, mock_verify):
-        """설정 로드 실패 시 fail_open=True가 기본 적용된다."""
+        """A settings load failure applies fail_open=True by default."""
         mock_verify.return_value = {
             "valid": True,
             "checked": 0,
@@ -218,26 +218,24 @@ class TestIntegrityGateHandlerBehavior:
         with patch(_PATCH_SETTINGS, side_effect=RuntimeError("Settings unavailable")):
             on_circuit_breaker_closed_integrity_gate(event)
 
-        # settings 로드 에러 시에도 게이트가 동작해야 함
+        # The gate must still run when settings fail to load
         assert INTEGRITY_GATE_KEY in event.data or INTEGRITY_FAILED_KEY in event.data
 
 
 # =============================================================================
-# _verify_recovery_window_integrity 동작 검증
+# _verify_recovery_window_integrity behavior
 # =============================================================================
 
 
 class TestVerifyRecoveryWindowBehavior:
-    """WAL 해시체인 검증 함수 동작 검증."""
+    """The WAL hash-chain verification function."""
 
     @patch(_PATCH_GET_ENTRIES)
     @patch(_PATCH_VERIFIER_CLS)
     def test_empty_wal_returns_valid(self, mock_verifier_cls, mock_get_entries):
-        """WAL 엔트리가 없으면 valid=True, strategy=no_entries를 반환한다."""
+        """No WAL entries returns valid=True, strategy=no_entries."""
         mock_get_entries.return_value = []
-        event = _make_event()
-
-        result = _verify_recovery_window_integrity("test_service", event)
+        result = _verify_recovery_window_integrity("test_service")
 
         assert result["valid"] is True
         assert result["checked"] == 0
@@ -248,7 +246,7 @@ class TestVerifyRecoveryWindowBehavior:
     def test_valid_chain_returns_strategy_wal_chain_verify(
         self, mock_verifier_cls, mock_get_entries
     ):
-        """정상 체인에서 strategy='wal_chain_verify'를 반환한다."""
+        """A valid chain returns strategy='wal_chain_verify'."""
         mock_get_entries.return_value = [
             {"seq": 1, "integrity": {"hash": "h1"}},
             {"seq": 2, "integrity": {"hash": "h2"}},
@@ -256,9 +254,7 @@ class TestVerifyRecoveryWindowBehavior:
         verifier_instance = MagicMock()
         verifier_instance.verify_chain.return_value = (True, None)
         mock_verifier_cls.return_value = verifier_instance
-        event = _make_event()
-
-        result = _verify_recovery_window_integrity("test_service", event)
+        result = _verify_recovery_window_integrity("test_service")
 
         assert result["valid"] is True
         assert result["strategy"] == "wal_chain_verify"
@@ -269,7 +265,7 @@ class TestVerifyRecoveryWindowBehavior:
     def test_broken_chain_invokes_find_tampering(
         self, mock_verifier_cls, mock_get_entries
     ):
-        """검증 실패 시 find_tampering()이 호출된다."""
+        """A failed verification calls find_tampering()."""
         mock_get_entries.return_value = [{"seq": 1, "integrity": {"hash": "h1"}}]
         verifier_instance = MagicMock()
         verifier_instance.verify_chain.return_value = (False, "hash mismatch")
@@ -277,9 +273,7 @@ class TestVerifyRecoveryWindowBehavior:
             {"message": "tampered at seq 1"}
         ]
         mock_verifier_cls.return_value = verifier_instance
-        event = _make_event()
-
-        result = _verify_recovery_window_integrity("test_service", event)
+        result = _verify_recovery_window_integrity("test_service")
 
         assert result["valid"] is False
         verifier_instance.find_tampering.assert_called_once()
@@ -287,12 +281,12 @@ class TestVerifyRecoveryWindowBehavior:
 
 
 # =============================================================================
-# _get_unsynced_wal_entries 동작 검증
+# _get_unsynced_wal_entries behavior
 # =============================================================================
 
 
 class TestGetUnsyncedWalEntriesBehavior:
-    """WAL 미동기화 엔트리 조회 동작 검증."""
+    """The unsynced WAL entry lookup."""
 
     @pytest.fixture(autouse=True)
     def _require_pro(self):
@@ -300,7 +294,7 @@ class TestGetUnsyncedWalEntriesBehavior:
 
     @patch(_PATCH_GET_WAL)
     def test_wal_none_returns_empty_list(self, mock_get_wal):
-        """WAL이 None이면 빈 목록을 반환한다."""
+        """A None WAL returns an empty list."""
         mock_get_wal.return_value = None
 
         result = _get_unsynced_wal_entries("test_service")
@@ -309,7 +303,7 @@ class TestGetUnsyncedWalEntriesBehavior:
 
     @patch(_PATCH_GET_WAL)
     def test_uses_recover_unprocessed_method(self, mock_get_wal):
-        """wal.recover_unprocessed(last_processed_seq=0)를 호출한다."""
+        """Calls wal.recover_unprocessed(last_processed_seq=0)."""
         mock_wal = MagicMock()
         mock_wal.recover_unprocessed.return_value = [
             _make_wal_entry({"event_type": "TEST", "seq": 1}),
@@ -324,7 +318,7 @@ class TestGetUnsyncedWalEntriesBehavior:
 
     @patch(_PATCH_GET_WAL)
     def test_exception_returns_empty_list(self, mock_get_wal):
-        """예외 발생 시 빈 목록을 반환한다."""
+        """An exception returns an empty list."""
         mock_get_wal.side_effect = RuntimeError("WAL unavailable")
 
         result = _get_unsynced_wal_entries("test_service")
@@ -380,16 +374,16 @@ class TestWalUnavailableWithoutPro:
 
 
 # =============================================================================
-# _update_health_score 동작 검증
+# _update_health_score behavior
 # =============================================================================
 
 
 class TestUpdateHealthScoreBehavior:
-    """IntegrityHealthScore 업데이트 동작 검증."""
+    """IntegrityHealthScore updates."""
 
     @patch(_PATCH_HEALTH_SCORE)
     def test_valid_result_calls_record_recovery(self, mock_get_health):
-        """검증 성공 시 record_recovery()가 호출된다."""
+        """A successful verification calls record_recovery()."""
         mock_health = MagicMock()
         mock_get_health.return_value = mock_health
         result = {"valid": True, "checked": 10}
@@ -405,7 +399,7 @@ class TestUpdateHealthScoreBehavior:
 
     @patch(_PATCH_HEALTH_SCORE)
     def test_invalid_result_calls_record_chain_break(self, mock_get_health):
-        """검증 실패 시 record_chain_break()가 호출된다."""
+        """A failed verification calls record_chain_break()."""
         mock_health = MagicMock()
         mock_get_health.return_value = mock_health
         result = {"valid": False, "checked": 5}
@@ -417,8 +411,8 @@ class TestUpdateHealthScoreBehavior:
 
     @patch(_PATCH_HEALTH_SCORE)
     def test_exception_does_not_propagate(self, mock_get_health):
-        """health score 업데이트 예외가 호출자에게 전파되지 않는다."""
+        """A health score update exception does not reach the caller."""
         mock_get_health.side_effect = RuntimeError("Health unavailable")
 
-        # 예외가 전파되지 않아야 함
+        # The exception must not propagate
         _update_health_score({"valid": True, "checked": 0}, duration_ms=0.0)

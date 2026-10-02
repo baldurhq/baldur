@@ -312,6 +312,7 @@ class TestReplayResolutionRecordingBehavior:
         """
         repository.try_acquire_for_replay.return_value = None
         repository.get_by_id.return_value = _entry(status="resolved")
+        _register(ReplayResult.succeeded(DLQ_ID, "OK"))
 
         result = service._execute_replay(DLQ_ID)
 
@@ -322,6 +323,7 @@ class TestReplayResolutionRecordingBehavior:
         """A blocked entry stays PENDING, so the gauge must keep counting it."""
         repository.try_acquire_for_replay.return_value = None
         repository.get_by_id.return_value = _entry(status="pending", retry_count=9)
+        _register(ReplayResult.succeeded(DLQ_ID, "OK"))
 
         result = service._execute_replay(DLQ_ID)
 
@@ -340,7 +342,7 @@ class TestReplayResolutionRecordingBehavior:
 
     def test_truncate_gate_block_records_nothing(self, service, repository, recorded):
         """A gate-blocked entry stays PENDING and was never replayed."""
-        repository.try_acquire_for_replay.return_value = _entry(
+        repository.get_by_id.return_value = _entry(
             request_data={"_truncated": True, "original_size": 9000}
         )
         _register(ReplayResult.succeeded(DLQ_ID, "OK"))
@@ -447,15 +449,19 @@ class TestReplayResolutionRecordingBehavior:
         # Given
         entries = [_entry(id=f"dlq-{i}") for i in range(2)]
         repository.find_replayable.return_value = entries
-        repository.find_replayable_page.return_value = ReplayablePage(entries=entries)
+        repository.find_replayable_page.side_effect = lambda **kw: (
+            ReplayablePage(entries=entries)
+            if kw["failure_type"] == "PG_TIMEOUT"
+            else ReplayablePage()
+        )
         repository.try_acquire_for_replay.side_effect = entries
         _register(ReplayResult.succeeded(DLQ_ID, "OK"))
 
-        # When
+        # When — a mapped type selects under the mapped service's own domain
         result = service.replay_on_circuit_close(
-            service_name="payment_api",
+            service_name=DOMAIN,
             max_items=2,
-            service_failure_type_map={"payment_api": ["PG_TIMEOUT"]},
+            service_failure_type_map={DOMAIN: ["PG_TIMEOUT"]},
         )
 
         # Then

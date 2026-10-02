@@ -265,87 +265,6 @@ def _send_postmortem_notification(
         )
 
 
-# Module-global DEBUG-once marker for the OSS-normal state surfaced by the
-# on-recovery dispatch path. The PRO RuntimeConfigManager being absent is the
-# OSS-normal state — logged at DEBUG at most once per process, never as a
-# per-close WARNING. Reset via reset_cb_replay_dispatch_state() for test
-# isolation (get_*/reset_* convention).
-_runtime_config_absent_logged = False
-
-
-def get_cb_replay_dispatch_state() -> dict[str, bool]:
-    """Return the current on-recovery dispatch DEBUG-once marker state (read accessor)."""
-    return {
-        "runtime_config_absent_logged": _runtime_config_absent_logged,
-    }
-
-
-def reset_cb_replay_dispatch_state() -> None:
-    """Reset the on-recovery dispatch DEBUG-once marker (test isolation)."""
-    global _runtime_config_absent_logged
-    _runtime_config_absent_logged = False
-
-
-def _get_replay_automation_config() -> dict | None:
-    """Resolve the PRO ``replay_automation`` RuntimeConfig block, or None.
-
-    Mirrors the replay-service reader pattern: absent (no PRO
-    RuntimeConfigManager) is the OSS-normal state — DEBUG at most once per
-    process; a read failure is genuinely abnormal — WARNING every occurrence.
-    Uses the public ``get_config`` accessor, never the private getter.
-    """
-    global _runtime_config_absent_logged
-    from baldur.factory.registry import ProviderRegistry
-
-    try:
-        manager = ProviderRegistry.runtime_config_manager.safe_get()
-        if manager is None:
-            if not _runtime_config_absent_logged:
-                logger.debug("event_handler.runtime_config_absent")
-                _runtime_config_absent_logged = True
-            return None
-        return manager.get_config("replay_automation")
-    except Exception as e:
-        logger.warning(
-            "event_handler.runtime_config_read_failed",
-            error=e,
-        )
-        return None
-
-
-def _record_dispatch_outcome(
-    outcome: str, *, service_name: str, error: str | None = None
-) -> None:
-    """Hand one dispatch evaluation to the arming ledger (fail-open).
-
-    The dispatch path no longer writes the armed gauge: the arming probe is its
-    only writer, so the gauge is reproducible from one source. What this path
-    observed reaches the operator surfaces as ``last_dispatch`` instead.
-    """
-    try:
-        from baldur.services.replay_service.arming import record_dispatch_outcome
-
-        record_dispatch_outcome(outcome, service_name=service_name, error=error)
-    except Exception:
-        pass
-
-
-def _nothing_parked(service_name: str) -> bool:
-    """Does the store answer that nothing is parked under this name? (fail-loud)
-
-    Lanes are not consulted: with no worker nothing runs a lane, and this
-    process's replay handler registry is not a worker's. Any failure — the
-    import, the read, a count that cannot be attributed — answers False, which
-    keeps the warning.
-    """
-    try:
-        from baldur.services.replay_service import get_replay_service
-
-        return get_replay_service().parked_count_for_recovery(service_name) == 0
-    except Exception:
-        return False
-
-
 def _on_circuit_breaker_closed(event: BaldurEvent):
     """
     Trigger automatic Replay on CB recovery (on-recovery replay).
@@ -355,20 +274,11 @@ def _on_circuit_breaker_closed(event: BaldurEvent):
     event.data[INTEGRITY_FAILED_KEY] flag.
     Replay is blocked when the flag is True.
 
-    Armed-aware skip semantics (so the advertised auto-replay guarantee is
-    never silently inert):
-    - On-recovery replay disabled in RuntimeConfig/settings: INFO, no dispatch.
-    - Armed (enabled) but the Celery task is not importable: the guarantee is
-      undeliverable — WARNING ``replay_dispatch_blocked`` naming the
-      remediation, instead of a silent DEBUG skip. A recovery with nothing
-      parked under its name logs ``replay_dispatch_skipped`` at DEBUG instead:
-      no worker had anything to do. Either way the dispatch counter records
-      ``celery_missing``.
-
-    Config precedence: RuntimeConfig (present) → static
-    ``ReplayAutomationSettings`` (fallback, env-honoring). Each evaluation
-    updates the dispatch counter; an attempt also updates the ledger the
-    arming surface reports as ``last_dispatch``.
+    Dispatch goes through the one recovery dispatch path
+    (``dispatch_recovery_sweep``), which reads the on-recovery switch and the
+    pass budgets and records the outcome in the arming ledger. A CLOSED event
+    an operator's close-with-replay emitted (``trigger == "manual"``) queues an
+    operator-requested chain: the operator's own pin does not stop it.
     """
     service_name = event.data.get("service_name", "unknown")
 
@@ -398,85 +308,18 @@ def _on_circuit_breaker_closed(event: BaldurEvent):
         )
         return
 
-    # Config precedence: RuntimeConfig (present) → static settings (fallback).
-    # Behavior-consistent by construction — the manager's own defaults derive
-    # from a fresh ReplayAutomationSettings(), so both paths share one
-    # env-honoring default source (no hardcoded literals).
-    from baldur.settings.replay_automation import get_replay_automation_settings
+    from baldur.interfaces.repositories import ResolutionTrigger
+    from baldur.services.replay_service.recovery import dispatch_recovery_sweep
 
-    settings = get_replay_automation_settings()
-    config = _get_replay_automation_config() or {}
-    on_recovery_enabled = config.get(
-        "on_recovery_enabled", settings.on_recovery_enabled
+    dispatch_recovery_sweep(
+        service_name,
+        trigger=ResolutionTrigger.AUTO_REPLAY_CIRCUIT_CLOSE,
+        escalate_failures=True,
+        operator_requested=(
+            event.data.get("trigger") == "manual"
+            and event.data.get("trigger_replay") is True
+        ),
     )
-
-    if not on_recovery_enabled:
-        logger.info(
-            "event_handler.circuit_breaker_closed_track",
-            service_name=service_name,
-        )
-        _record_dispatch_outcome("skipped_disabled", service_name=service_name)
-        return
-
-    max_items = config.get("on_recovery_max_items", settings.on_recovery_max_items)
-    # Resolved here, next to its sibling, because this is the one resolution
-    # point: continuations carry the bound they were dispatched with, so a
-    # chain runs to the budget it started with and a console edit takes effect
-    # at the next recovery rather than mid-drain.
-    max_continuations = config.get(
-        "on_recovery_max_continuations", settings.on_recovery_max_continuations
-    )
-
-    # Trigger the Celery task
-    try:
-        from baldur.adapters.celery.tasks import (
-            conditional_replay_on_circuit_close,
-        )
-
-        conditional_replay_on_circuit_close.delay(
-            service_name=service_name,
-            max_items=max_items,
-            max_continuations=max_continuations,
-        )
-        logger.info(
-            "event_handler.circuit_breaker_closed_triggered",
-            service_name=service_name,
-            max_items=max_items,
-            max_continuations=max_continuations,
-        )
-        _record_dispatch_outcome("dispatched", service_name=service_name)
-    except ImportError:
-        # Armed (enabled) but the Celery task is unavailable — the guarantee
-        # is undeliverable for whatever this recovery left parked. WARNING
-        # with remediation rather than a silent DEBUG skip, unless nothing is
-        # parked under the name: then no worker had anything to do.
-        if _nothing_parked(service_name):
-            logger.debug(
-                "event_handler.replay_dispatch_skipped",
-                service_name=service_name,
-                reason="celery_missing",
-                nothing_parked=True,
-            )
-        else:
-            logger.warning(
-                "event_handler.replay_dispatch_blocked",
-                service_name=service_name,
-                reason="celery_missing",
-                queue="dlq_processing",
-                worker_command="celery -A <app> worker -Q dlq_processing",
-                remediation=(
-                    "Run a Celery worker consuming the 'dlq_processing' queue, or "
-                    "drain the DLQ manually via the console Replay action."
-                ),
-            )
-        _record_dispatch_outcome("celery_missing", service_name=service_name)
-    except Exception as e:
-        logger.exception(
-            "event_handler.trigger_track_replay_failed",
-            service_name=service_name,
-            error=e,
-        )
-        _record_dispatch_outcome("error", service_name=service_name, error=str(e))
 
 
 def _on_circuit_breaker_closed_postmortem(event: BaldurEvent):

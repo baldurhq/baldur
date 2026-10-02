@@ -16,9 +16,9 @@ to a phantom queue):
    subsumes the earlier phantom-``dlq`` regression: ``dlq`` is in none of those
    sets, so a re-introduced ``dlq`` route — the original broken-lane bug — fails
    here, alongside any other undeclared-queue typo.
-3. **Traffic-aware routing** — the ``traffic-aware-replay`` entry routes to the
-   canonical ``dlq_processing`` queue, so enabling it with a ``dlq_processing``
-   worker actually drains the DLQ.
+3. **Recovery tick routing** — the ``recover-parked-jobs`` entry routes to the
+   canonical ``dlq_processing`` queue, so a ``dlq_processing`` worker actually
+   runs the recovery trials.
 
 PRO/Dormant-lane tasks that fail to resolve (the private wheel is absent, e.g.
 the published mirror) are skipped rather than failed — the entry is absent
@@ -68,7 +68,7 @@ _ARG_ENTRIES = [
 # resolve against this broker-less app and raise on connect.
 _SHARED_APP = Celery("test_678_beat_schedule_guard", set_as_current=False)
 
-# Class-based tasks (e.g. ``TrafficAwareReplayTask``) carry a custom ``name``
+# Class-based tasks carry a custom ``name``
 # that is NOT their import path and are not in the shared registry. Map
 # name -> class by scanning each schedule module for Task-shaped classes; a
 # PRO/Dormant module that fails to import is simply absent (entry then skipped).
@@ -172,10 +172,10 @@ class TestBeatQueueDefinedness:
         )
 
 
-class TestTrafficAwareRouting:
-    """The traffic-aware entry targets the canonical ``dlq_processing`` queue."""
+class TestRecoveryTickRouting:
+    """The recovery tick targets the canonical ``dlq_processing`` queue."""
 
-    def test_traffic_aware_routes_to_dlq_processing(self):
-        entry = _SCHEDULE.get("traffic-aware-replay")
-        assert entry is not None, "traffic-aware-replay entry missing from schedule"
+    def test_recovery_tick_routes_to_dlq_processing(self):
+        entry = _SCHEDULE.get("recover-parked-jobs")
+        assert entry is not None, "recover-parked-jobs entry missing from schedule"
         assert entry.get("options", {}).get("queue") == "dlq_processing"

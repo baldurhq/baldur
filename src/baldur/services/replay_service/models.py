@@ -26,6 +26,13 @@ class ReplayResult:
     error: str | None = None
     data: dict[str, Any] | None = None
     skipped: bool = False
+    # Set when the replay handler was called (it returned or raised): the
+    # dependency may have been reached. False on every exit that never called
+    # it — a gate refusal, a lost acquisition, a duplicate or in-progress key.
+    handler_ran: bool = False
+    # Set when the handler's work may still be running (a timeout gave up
+    # waiting for it): the entry is left REPLAYING instead of completed.
+    work_may_continue: bool = False
 
     @classmethod
     def succeeded(
@@ -109,6 +116,10 @@ class BatchReplayResult:
     # whose first replay is cut completes nothing and leaves every cursor
     # where it was, so this is the only sign that it got anywhere.
     deadline_cut_dlq_id: str | None = None
+    # True when the pass ended because a replay's own breaker refused the call
+    # before the job began (its entry is the ``deadline_cut_dlq_id``): the
+    # chain queues its next pass after a pause instead of at once.
+    ended_by_breaker_refusal: bool = False
     # Domain-priority-based replay info
     priority_used: bool = False
     domains_processed: list[str] | None = None

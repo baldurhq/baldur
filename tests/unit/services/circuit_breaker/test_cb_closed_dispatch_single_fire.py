@@ -165,6 +165,9 @@ class TestCBClosedDispatchSingleFireBehavior:
             service_name="payment-api",
             max_items=50,
             max_continuations=100,
+            trigger="auto_replay_circuit_close",
+            escalate_failures=True,
+            operator_requested=False,
         )
 
     @pytest.mark.parametrize("trigger", ["auto", "manual"])
@@ -192,6 +195,9 @@ class TestCBClosedDispatchSingleFireBehavior:
             service_name="orders-api",
             max_items=17,
             max_continuations=100,
+            trigger="auto_replay_circuit_close",
+            escalate_failures=True,
+            operator_requested=False,
         )
 
 
@@ -344,10 +350,15 @@ class TestCBClosedTriggerReplayGateBehavior:
             with task_patcher:
                 _on_circuit_breaker_closed(event)
 
+        # An operator's close-with-replay (trigger "manual") queues a chain
+        # the operator's own pin does not hold.
         delay_mock.assert_called_once_with(
             service_name="payment-api",
             max_items=50,
             max_continuations=100,
+            trigger="auto_replay_circuit_close",
+            escalate_failures=True,
+            operator_requested=trigger == "manual",
         )
 
     @pytest.mark.parametrize("trigger", ["auto", "manual", "manual_reset"])
@@ -398,6 +409,9 @@ class TestCBClosedTriggerReplayGateBehavior:
             service_name="payment-api",
             max_items=50,
             max_continuations=100,
+            trigger="auto_replay_circuit_close",
+            escalate_failures=True,
+            operator_requested=False,
         )
 
 

@@ -92,6 +92,10 @@ class AbstractFailedOperation(models.Model if DJANGO_AVAILABLE else object):  # 
             "auto_replay_circuit_close",
             "Auto Replay (Circuit Close)",
         )
+        AUTO_REPLAY_RECOVERY = (
+            "auto_replay_recovery",
+            "Auto Replay (Recovery Trial)",
+        )
         SCHEDULED_BATCH = "scheduled_batch", "Scheduled Batch Replay"
         TRAFFIC_AWARE = "traffic_aware", "Traffic-Aware Replay"
         THROTTLE_REPLAY = "throttle_replay", "Throttle-Aware Replay"

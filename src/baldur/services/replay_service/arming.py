@@ -12,13 +12,14 @@ folds to True only when every link on it came back ``"ok"``; any ``"missing"``
 folds to False, and an unrefuted ``"unknown"`` folds to None — indeterminate,
 not armed.
 
-Two sweeps can drain the DLQ on recovery and they no longer share a
+Three lanes can drain the DLQ on recovery and they do not share a
 prerequisite set, so each is folded as its own lane and the headline verdict is
 the any-lane fold::
 
-    shared:        disabled -> celery_missing -> worker_missing -> handler_missing
-    mapped:        shared + map_unconfigured
-    open_circuit:  shared + open_circuit_capture_disabled
+    shared:          disabled -> celery_missing -> worker_missing -> handler_missing
+    mapped:          shared + map_unconfigured
+    open_circuit:    shared + open_circuit_capture_disabled
+    recovery_trial:  shared + recovery_trial_disabled
 
 ``disabled`` / ``celery_missing`` are hard prerequisites: once one is missing
 the downstream links are not evaluated. The remaining links are independent
@@ -82,14 +83,20 @@ _SHARED_LINK_ORDER = (
 _LANE_LINKS = {
     "open_circuit": "open_circuit_capture_disabled",
     "mapped": "map_unconfigured",
+    "recovery_trial": "recovery_trial_disabled",
 }
 
 # Lane report order (the open-circuit lane is the shipped-default sweep).
-_LANE_ORDER = ("open_circuit", "mapped")
+_LANE_ORDER = ("open_circuit", "mapped", "recovery_trial")
 
-# Global link order — shared links first, since they block both lanes, then the
+# Global link order — shared links first, since they block every lane, then the
 # lane links. Drives the headline ``missing_link`` and the ``missing_links`` array.
-_LINK_ORDER = (*_SHARED_LINK_ORDER, "map_unconfigured", "open_circuit_capture_disabled")
+_LINK_ORDER = (
+    *_SHARED_LINK_ORDER,
+    "map_unconfigured",
+    "open_circuit_capture_disabled",
+    "recovery_trial_disabled",
+)
 
 # Name of the daemon thread that owns the broker round-trip.
 _PROBE_THREAD_NAME = "replay_arming_probe"
@@ -294,6 +301,13 @@ def _open_circuit_capture_enabled() -> bool:
     from baldur.settings.dlq import get_dlq_settings
 
     return bool(get_dlq_settings().open_circuit_capture_enabled)
+
+
+def _recovery_trial_enabled() -> bool:
+    """Whether the periodic recovery trial is switched on."""
+    from baldur.settings.replay_automation import get_replay_automation_settings
+
+    return bool(get_replay_automation_settings().recovery_trial_enabled)
 
 
 def _broker_connect_timeout_seconds() -> float:
@@ -736,10 +750,10 @@ def _evaluate() -> ArmingStatus:
         return _finalize(links)
     links["celery_missing"] = _OK
 
-    # 3. worker_missing — broker I/O (cached), shared by both lanes.
+    # 3. worker_missing — broker I/O (cached), shared by every lane.
     links["worker_missing"] = _cached_worker_state()
 
-    # 4. handler_missing — non-I/O, shared by both lanes.
+    # 4. handler_missing — non-I/O, shared by every lane.
     links["handler_missing"] = _OK if _has_registered_handler() else _MISSING
 
     # 5. map_unconfigured — the mapped sweep's own prerequisite. Retry-exhaustion
@@ -754,6 +768,11 @@ def _evaluate() -> ArmingStatus:
     links["open_circuit_capture_disabled"] = (
         _OK if _open_circuit_capture_enabled() else _MISSING
     )
+
+    # 7. recovery_trial_disabled — the recovery trial's own prerequisite: its
+    #    switch. It needs no map and no breaker, so the shared links decide
+    #    the rest.
+    links["recovery_trial_disabled"] = _OK if _recovery_trial_enabled() else _MISSING
 
     return _finalize(links)
 

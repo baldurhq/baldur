@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import functools
 import inspect
 import threading
 import types
@@ -77,6 +76,10 @@ _ASYNC_REPLAY_THREAD_NAME = "baldur-async-replay"
 # Bound on the length of an error message carried into a replay result.
 _ERROR_PREVIEW_CHARS = 200
 
+# Decision an idempotency guard reports for a key whose record is completed
+# (``IdempotencyDuplicateError.decision``, the gate decision's member name).
+_SKIP = "SKIP"
+
 
 class FunctionReplayHandler(ReplayHandler):
     """Replays a ``replay=True`` job by calling its function with the stored arguments.
@@ -126,18 +129,46 @@ class FunctionReplayHandler(ReplayHandler):
         return arguments is not None, reason
 
     def replay(self, failed_op: FailedOperationData) -> ReplayResult:
+        """Re-run the job, reporting whether its body began.
+
+        The result's ``data`` carries ``job_started`` (the job function's body
+        began) and ``rejected_by_breaker`` (the job's own breaker refused the
+        call before the body began), read off the job itself rather than
+        inferred from what it raised. A replay whose body never began did not
+        call the dependency, so the replay service gives its attempt back.
+
+        A job whose own idempotency key already completed (an earlier run
+        succeeded, and its worker died before the entry was completed) reports
+        success without running again.
+        """
         dlq_id = str(failed_op.id)
         arguments, reason = self._stored_arguments(failed_op)
         if arguments is None:
             return ReplayResult.failed(dlq_id, reason)
+        start = _JobStart()
         try:
-            self._run(arguments)
+            self._run(arguments, start)
         except Exception as error:
-            return ReplayResult.failed(
-                dlq_id,
-                f"{type(error).__name__}: {str(error)[:_ERROR_PREVIEW_CHARS]}",
+            if not start.began and _is_completed_key(error):
+                return ReplayResult.succeeded(
+                    dlq_id,
+                    message=f"{self._name} already done under its idempotency key",
+                    data=_start_flags(began=False, refused=False),
+                )
+            return ReplayResult(
+                success=False,
+                dlq_id=dlq_id,
+                error=f"{type(error).__name__}: {str(error)[:_ERROR_PREVIEW_CHARS]}",
+                data=_start_flags(
+                    began=start.began,
+                    refused=not start.began and _is_open_circuit_refusal(error),
+                ),
             )
-        return ReplayResult.succeeded(dlq_id, message=f"re-ran {self._name}")
+        return ReplayResult.succeeded(
+            dlq_id,
+            message=f"re-ran {self._name}",
+            data=_start_flags(began=True, refused=False),
+        )
 
     def _stored_arguments(
         self, failed_op: FailedOperationData
@@ -165,7 +196,7 @@ class FunctionReplayHandler(ReplayHandler):
             arguments[param_name] = value
         return arguments, ""
 
-    def _run(self, arguments: dict[str, Any]) -> Any:
+    def _run(self, arguments: dict[str, Any], start: _JobStart) -> Any:
         from baldur.protect_facade import (
             _build_context_from_callsite,
             aprotect,
@@ -175,16 +206,54 @@ class FunctionReplayHandler(ReplayHandler):
         context = _build_context_from_callsite(
             self._signature, (), arguments, None, self._annotated_primitive
         )
-        call = functools.partial(self._func, **arguments)
         options: dict[str, Any] = {
             **self._protect_options,
             "dlq": False,
             "fallback": None,
             "context": context,
         }
+        func = self._func
         if not self._is_async:
+
+            def call() -> Any:
+                start.began = True
+                return func(**arguments)
+
             return protect(self._name, call, **options)
-        return _run_coroutine(lambda: aprotect(self._name, call, **options))
+
+        async def call_async() -> Any:
+            start.began = True
+            return await func(**arguments)
+
+        return _run_coroutine(lambda: aprotect(self._name, call_async, **options))
+
+
+class _JobStart:
+    """Notes that the job function's body began (set by the call protect runs)."""
+
+    __slots__ = ("began",)
+
+    def __init__(self) -> None:
+        self.began = False
+
+
+def _start_flags(*, began: bool, refused: bool) -> dict[str, bool]:
+    """The ``data`` a replay result carries about how far the job got."""
+    return {"job_started": began, "rejected_by_breaker": refused}
+
+
+def _is_open_circuit_refusal(error: BaseException) -> bool:
+    """The job's breaker refused the call (only meaningful before the body began)."""
+    from baldur.services.circuit_breaker.exceptions import CircuitBreakerOpenError
+
+    return isinstance(error, CircuitBreakerOpenError)
+
+
+def _is_completed_key(error: BaseException) -> bool:
+    """The job's own idempotency key reads completed: an earlier run succeeded."""
+    from baldur.core.exceptions import IdempotencyDuplicateError
+
+    return isinstance(error, IdempotencyDuplicateError) and error.decision == _SKIP
 
 
 def _run_coroutine(make_coroutine: Callable[[], Any]) -> Any:

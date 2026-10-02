@@ -45,6 +45,15 @@ class ReplayHandler(ABC):
         """
         Execute replay for a single failed operation.
 
+        A failed result may say how far the work got, in its ``data``:
+        ``job_started`` (False when the work never began) and
+        ``rejected_by_breaker`` (True when the work's own circuit breaker
+        refused the call before it began). A replay whose work never began
+        did not reach the dependency, so its replay attempt is given back and
+        the entry waits for the next replay. A result without these flags is
+        treated as work that began — the attempt stays spent, whatever was
+        raised.
+
         Args:
             failed_op: The FailedOperationData to replay
 
@@ -57,6 +66,10 @@ class ReplayHandler(ABC):
     def can_replay(self, failed_op: FailedOperationData) -> tuple[bool, str]:
         """
         Check if the operation can be replayed.
+
+        Asked before the entry is taken by every replay the replay service
+        runs, automatic or not: a refused entry is not replayed and keeps
+        its replay attempts. Raising counts as a refusal.
 
         Args:
             failed_op: The FailedOperationData to check
@@ -179,6 +192,20 @@ def has_replay_handler(domain: str) -> bool:
     first instead.
     """
     return _registry_key(domain) in _replay_handlers
+
+
+def registered_replay_domains() -> list[str]:
+    """Stored domains with a registered (non-default) replay handler, sorted.
+
+    A handler filed under a raw name — one with no domain identity of its own —
+    is left out: no entry is stored under that raw name, so nothing there is
+    for an automatic lane to find.
+    """
+    return sorted(
+        key
+        for key in list(_replay_handlers)
+        if key != FALLBACK_DOMAIN and resolve_stored_domain(key) == key
+    )
 
 
 def get_replay_handler(domain: str) -> ReplayHandler:

@@ -8,15 +8,16 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from baldur.interfaces.repositories import (
+    STALE_RELEASE_AT_CAP_NOTE,
     FailedOperationData,
     FailedOperationStatus,
 )
-from baldur.utils.time import utc_now
+from baldur.utils.time import ensure_aware, utc_now
 
 if TYPE_CHECKING:
     from baldur.adapters.redis.dlq import RedisDLQRepository
@@ -24,6 +25,14 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 __all__ = ["RedisDLQLifecycle"]
+
+# WATCH conflict retries per compare-and-set write, so a hot key under
+# contention cannot spin forever (the acquisition's own bound).
+_WATCH_MAX_ATTEMPTS = 5
+
+# ``max_retries`` an entry blob without the field is read with — the
+# entry model's own default.
+_DEFAULT_MAX_RETRIES = 2
 
 
 class RedisDLQLifecycle:
@@ -206,8 +215,7 @@ class RedisDLQLifecycle:
 
         # WATCH conflict retry — bounded so a hot key under contention
         # cannot spin forever; falls through to None on exhaustion.
-        max_attempts = 5
-        for _ in range(max_attempts):
+        for _ in range(_WATCH_MAX_ATTEMPTS):
             try:
                 with raw_client.pipeline(transaction=True) as pipe:
                     pipe.watch(full_entry_key)
@@ -449,13 +457,96 @@ class RedisDLQLifecycle:
             metadata=error_details,
         )
 
+    def return_replay_attempt(self, id: str, acquired_retry_count: int) -> bool:
+        """Give back an attempt this replay's acquisition took (fenced on its count).
+
+        WATCH / MULTI / EXEC on the entry key, in the acquisition's shape: the
+        blob must still read REPLAYING at ``acquired_retry_count``. Only
+        ``retry_count`` changes — status (so no index moves) and ``updated_at``
+        (the stale release's age) are left as they are. Degraded mode uses a
+        read-modify-write, like the acquisition's fallback.
+        """
+        if not self._repo._ensure_redis_available():
+            return self._return_attempt_python(id, acquired_retry_count)
+        raw_client = self._repo._raw_redis_client
+        if raw_client is None:
+            return self._return_attempt_python(id, acquired_retry_count)
+
+        full_entry_key = self._repo._backend._get_full_key(self._repo._make_key(id))
+        for _ in range(_WATCH_MAX_ATTEMPTS):
+            try:
+                with raw_client.pipeline(transaction=True) as pipe:
+                    pipe.watch(full_entry_key)
+                    data = self._repo._decode_entry(pipe.get(full_entry_key))
+                    if not self._holds_attempt(data, acquired_retry_count):
+                        pipe.unwatch()
+                        return False
+                    data["retry_count"] = acquired_retry_count - 1
+                    pipe.multi()
+                    pipe.set(full_entry_key, self._repo._encode_entry(data))
+                    if pipe.execute() is None:
+                        continue
+                    return True
+            except Exception as exc:
+                if self._is_watch_conflict(exc):
+                    continue
+                if self._is_connection_fault(exc):
+                    logger.warning(
+                        "dlq.replay_attempt_return_degraded",
+                        entry_id=id,
+                        error=str(exc),
+                    )
+                    return self._return_attempt_python(id, acquired_retry_count)
+                raise
+        logger.debug("dlq.replay_attempt_return_watch_exhausted", entry_id=id)
+        return False
+
+    def _return_attempt_python(self, id: str, acquired_retry_count: int) -> bool:
+        """Degraded-mode give-back: read, check the fence, write the blob back."""
+        data = self._repo._decode_entry(self._repo._load_blob(id))
+        if not self._holds_attempt(data, acquired_retry_count):
+            return False
+        data["retry_count"] = acquired_retry_count - 1
+        self._repo._store_blob(id, self._repo._encode_entry(data))
+        return True
+
+    @staticmethod
+    def _holds_attempt(data: dict, acquired_retry_count: int) -> bool:
+        """The blob is still REPLAYING at the count this replay acquired."""
+        if not data or data.get("status") != FailedOperationStatus.REPLAYING.value:
+            return False
+        try:
+            return int(data.get("retry_count", 0)) == int(acquired_retry_count)
+        except (ValueError, TypeError):
+            return False
+
+    @staticmethod
+    def _is_watch_conflict(exc: Exception) -> bool:
+        try:
+            import redis as redis_lib
+        except ImportError:
+            return False
+        return isinstance(exc, redis_lib.WatchError)
+
+    @staticmethod
+    def _is_connection_fault(exc: Exception) -> bool:
+        try:
+            import redis as redis_lib
+        except ImportError:
+            return False
+        return isinstance(exc, (redis_lib.ConnectionError, redis_lib.TimeoutError))
+
     def release_stale_replaying(self, older_than_minutes: int = 30) -> int:
         """Release DLQ entries stuck in REPLAYING state.
 
-        Returns the count of entries actually released — i.e. entries for
-        which the underlying ``_update`` write succeeded. Failed writes are
-        excluded so the count reflects real state changes, not attempts.
-        Mirrors the ``bulk_update_status`` accounting pattern below.
+        Each candidate moves compare-and-set: inside a WATCH on its entry key
+        the blob must still read REPLAYING and older than the cutoff, so a
+        replay that acquired the entry between the candidate scan and the
+        write keeps it. Below its stored cap an entry goes back to PENDING; at
+        the cap (interrupted on its last allowed attempt) to REQUIRES_REVIEW.
+        The per-status and per-domain indexes move in the same MULTI.
+
+        Returns the count of entries actually moved, either destination.
         """
         replaying = self._repo.query.by_status(
             FailedOperationStatus.REPLAYING.value, limit=1000
@@ -468,15 +559,145 @@ class RedisDLQLifecycle:
             if (
                 entry.updated_at
                 and entry.updated_at < cutoff
-                and self._repo._update(
-                    entry_id=entry.id,
-                    status=FailedOperationStatus.PENDING.value,
-                    metadata={"released_from_stale": True},
-                )
+                and self._release_one_stale(entry.id, cutoff)
             ):
                 released += 1
 
         return released
+
+    def _release_one_stale(self, id: str, cutoff: datetime) -> bool:
+        """Move one stale REPLAYING entry out of REPLAYING, compare-and-set."""
+        if not self._repo._ensure_redis_available():
+            return self._release_one_stale_python(id, cutoff)
+        raw_client = self._repo._raw_redis_client
+        if raw_client is None:
+            return self._release_one_stale_python(id, cutoff)
+
+        backend = self._repo._backend
+        full_entry_key = backend._get_full_key(self._repo._make_key(id))
+        for _ in range(_WATCH_MAX_ATTEMPTS):
+            try:
+                with raw_client.pipeline(transaction=True) as pipe:
+                    pipe.watch(full_entry_key)
+                    data = self._repo._decode_entry(pipe.get(full_entry_key))
+                    if not self._is_stale_replaying(data, cutoff):
+                        pipe.unwatch()
+                        return False
+
+                    destination = self._mark_stale_released(data)
+                    pipe.multi()
+                    self._queue_stale_index_moves(pipe, id, data, destination)
+                    pipe.set(full_entry_key, self._repo._encode_entry(data))
+                    if pipe.execute() is None:
+                        continue
+                    return True
+            except Exception as exc:
+                if self._is_watch_conflict(exc):
+                    continue
+                if self._is_connection_fault(exc):
+                    logger.warning(
+                        "dlq.stale_release_degraded",
+                        entry_id=id,
+                        error=str(exc),
+                    )
+                    return self._release_one_stale_python(id, cutoff)
+                raise
+        logger.debug("dlq.stale_release_watch_exhausted", entry_id=id)
+        return False
+
+    def _mark_stale_released(self, data: dict[str, Any]) -> str:
+        """Rewrite a stale REPLAYING blob in place; return its destination."""
+        destination = self._stale_release_destination(data)
+        data["status"] = destination
+        data["updated_at"] = utc_now().isoformat()
+        metadata = data.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata["released_from_stale"] = True
+        data["metadata"] = metadata
+        if destination == FailedOperationStatus.REQUIRES_REVIEW.value:
+            data["resolution_note"] = STALE_RELEASE_AT_CAP_NOTE
+        return destination
+
+    def _queue_stale_index_moves(
+        self, pipe: Any, id: str, data: dict[str, Any], destination: str
+    ) -> None:
+        """Queue the per-status and per-domain index moves out of REPLAYING."""
+        backend = self._repo._backend
+        replaying = FailedOperationStatus.REPLAYING.value
+        score = self._created_at_score(data)
+        pipe.zrem(backend._get_full_key(self._repo._status_key(replaying)), str(id))
+        pipe.zadd(self._full_source_status_key(destination), {str(id): score})
+        domain = data.get("domain", "")
+        if domain:
+            pipe.zrem(
+                backend._get_full_key(self._repo._status_domain_key(replaying, domain)),
+                str(id),
+            )
+            pipe.zadd(
+                backend._get_full_key(
+                    self._repo._status_domain_key(destination, domain)
+                ),
+                {str(id): score},
+            )
+
+    def _release_one_stale_python(self, id: str, cutoff: datetime) -> bool:
+        """Degraded-mode release: today's read-modify-write through ``_update``."""
+        data = self._repo._decode_entry(self._repo._load_blob(id))
+        if not self._is_stale_replaying(data, cutoff):
+            return False
+        destination = self._stale_release_destination(data)
+        return self._repo._update(
+            entry_id=id,
+            status=destination,
+            metadata={"released_from_stale": True},
+            resolution_note=(
+                STALE_RELEASE_AT_CAP_NOTE
+                if destination == FailedOperationStatus.REQUIRES_REVIEW.value
+                else None
+            ),
+        )
+
+    @staticmethod
+    def _is_stale_replaying(data: dict, cutoff: datetime) -> bool:
+        """The blob reads REPLAYING and was last written before the cutoff."""
+        if not data or data.get("status") != FailedOperationStatus.REPLAYING.value:
+            return False
+        raw = data.get("updated_at")
+        if not raw:
+            return False
+        try:
+            return ensure_aware(datetime.fromisoformat(raw)) < cutoff
+        except (ValueError, TypeError):
+            return False
+
+    @staticmethod
+    def _stale_release_destination(data: dict) -> str:
+        """PENDING below the entry's stored cap, REQUIRES_REVIEW at it."""
+        try:
+            retry_count = int(data.get("retry_count", 0))
+        except (ValueError, TypeError):
+            retry_count = 0
+        try:
+            max_retries = int(data.get("max_retries", _DEFAULT_MAX_RETRIES))
+        except (ValueError, TypeError):
+            max_retries = _DEFAULT_MAX_RETRIES
+        if retry_count >= max_retries:
+            return FailedOperationStatus.REQUIRES_REVIEW.value
+        return FailedOperationStatus.PENDING.value
+
+    @staticmethod
+    def _created_at_score(data: dict) -> float:
+        """Index score: the entry's created_at epoch, as every index writer uses."""
+        created_raw = data.get("created_at")
+        try:
+            return (
+                datetime.fromisoformat(created_raw).timestamp()
+                if created_raw
+                else time.time()
+            )
+        except (ValueError, TypeError):
+            return time.time()
 
     def bulk_update_status(self, ids: list[str], status: str) -> int:
         """Bulk update status for multiple operations."""

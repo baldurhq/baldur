@@ -25,6 +25,8 @@ directly to avoid singleton coupling with other test modules.
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -110,6 +112,17 @@ def make_cb_closed_event():
     return _make
 
 
+# Ceiling on the wait for a handler the bus let run past its budget.
+_HANDLER_WAIT_SECONDS = 10.0
+
+
+def _wait_for(condition: Callable[[], bool]) -> None:
+    """Poll until ``condition`` holds or the ceiling passes."""
+    deadline = time.monotonic() + _HANDLER_WAIT_SECONDS
+    while not condition() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
 class TestCBClosedRoutesToCanonicalBody:
     """End-to-end: a CIRCUIT_BREAKER_CLOSED publish into a real
     EventBus reaches the canonical ``dlq_tasks`` body, not the deleted
@@ -149,9 +162,12 @@ class TestCBClosedRoutesToCanonicalBody:
         runtime_manager.get_config.return_value = _config
         runtime_manager._get_config.return_value = _config
 
-        # Replace .delay() with a side-effect that synchronously
+        # Replace the task with a stand-in whose .delay() synchronously
         # invokes the canonical task body. This forces the body to
-        # execute in-process so we can verify its behavior.
+        # execute in-process so we can verify its behavior. The module
+        # attribute is replaced rather than the proxy's .delay: a
+        # shared_task proxy resolves through the thread's current Celery
+        # app, and the bus runs the handler on its own thread.
         from baldur.adapters.celery.tasks import conditional_replay_on_circuit_close
 
         invoked_body_kwargs = {}
@@ -159,6 +175,9 @@ class TestCBClosedRoutesToCanonicalBody:
         def run_body_inline(**kwargs):
             invoked_body_kwargs.update(kwargs)
             return conditional_replay_on_circuit_close.run(**kwargs)
+
+        task_stand_in = MagicMock(spec=["delay"])
+        task_stand_in.delay.side_effect = run_body_inline
 
         # Mock the replay service so the canonical body's
         # `service.replay_on_circuit_close(...)` call is observable.
@@ -178,10 +197,9 @@ class TestCBClosedRoutesToCanonicalBody:
             "baldur_pro.services.runtime_config.get_runtime_config_manager",
             return_value=runtime_manager,
         ):
-            with patch.object(
-                conditional_replay_on_circuit_close,
-                "delay",
-                side_effect=run_body_inline,
+            with patch(
+                "baldur.adapters.celery.tasks.conditional_replay_on_circuit_close",
+                task_stand_in,
             ):
                 with (
                     patch(
@@ -196,10 +214,21 @@ class TestCBClosedRoutesToCanonicalBody:
                     # this one is about the routing.
                     patch(
                         "baldur.celery_tasks.dlq_tasks._affirm_circuit_closed",
-                        return_value=(True, None),
+                        return_value=(None, None),
+                    ),
+                    # Same reasoning for the pass-start integrity verdict.
+                    patch(
+                        "baldur.services.event_bus.integrity_gate.replay_integrity_verdict",
+                        return_value=True,
                     ),
                 ):
                     fresh_event_bus.publish(event)
+                    # The bus stops waiting for a handler past its budget and
+                    # lets it run on; wait for the body inside the patches, so
+                    # a loaded host cannot run it after they are undone.
+                    _wait_for(
+                        lambda: mock_replay_service.replay_on_circuit_close.called
+                    )
 
         # Then — the canonical body was reached (placeholder did not
         # call get_replay_service) with the expected kwargs.
@@ -207,6 +236,9 @@ class TestCBClosedRoutesToCanonicalBody:
             "service_name": "payment-api",
             "max_items": 11,
             "max_continuations": 7,
+            "trigger": "auto_replay_circuit_close",
+            "escalate_failures": True,
+            "operator_requested": False,
         }
         replay_kwargs = mock_replay_service.replay_on_circuit_close.call_args.kwargs
         assert replay_kwargs["service_name"] == "payment-api"

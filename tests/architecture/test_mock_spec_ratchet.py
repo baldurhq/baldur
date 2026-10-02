@@ -182,7 +182,9 @@ _MOCK_CREATION_BUDGETS: dict[str, int] = {
     # redundant spec-less attribute mock went (the fixture's mock supplies it).
     # durable outbox removal: -6 — the writer-wrapper suite was deleted with
     # the never-read-back disk-durable mode it covered.
-    "oss": 4304,
+    # traffic-aware replay removal: -4 — its two suites were deleted with the
+    # lane they covered.
+    "oss": 4300,
     "pro": 1800,
     "dormant": 401,
 }
@@ -198,7 +200,8 @@ _DECORATOR_PATCH_BUDGETS: dict[str, int] = {
     # security-violation outcome records: -6 — the cache-step test went with the
     # step, and the handler's logger patches in both safety-event suites take
     # the structlog BoundLogger interface as their spec.
-    "oss": 655,
+    # traffic-aware replay removal: -9 — the same deleted suites.
+    "oss": 646,
     "pro": 434,
     "dormant": 144,
 }

@@ -23,8 +23,8 @@ class ReplayAutomationSettings(BaseSettings):
 
     Replay triggers:
     - On-recovery: event-driven auto-replay on circuit-breaker recovery.
-    - Traffic-aware: replay gated on traffic normalization (implemented;
-      disabled by default).
+    - Recovery trial: periodic, one parked job per job name replayed as a
+      trial; its success replays the rest.
 
     Scheduled batch replay has no automatic scheduler — operator/manual batch
     replay runs via the task-level trigger. Adaptive mode dynamically sizes
@@ -55,15 +55,17 @@ class ReplayAutomationSettings(BaseSettings):
     )
 
     # =========================================================================
-    # Traffic-Aware Replay (implemented; disabled by default)
+    # Recovery Trial (periodic: one parked job per job name, as a trial)
     # =========================================================================
-    traffic_aware_enabled: bool = Field(
-        default=False,
-        description="Enable traffic-aware replay (default: disabled)",
-    )
-    traffic_aware_max_items: LargeCount = Field(
-        default=30,
-        description="Maximum replay items on traffic normalization",
+    recovery_trial_enabled: bool = Field(
+        default=True,
+        description=(
+            "Replay one parked job per job name periodically as a trial, so a "
+            "job whose dependency answers again comes back without waiting for "
+            "its breaker to close (or with no breaker at all). A trial that "
+            "finds the dependency still failing costs the job none of its "
+            "replay attempts. Also needs on_recovery_enabled."
+        ),
     )
 
     # =========================================================================
@@ -127,7 +129,7 @@ class ReplayAutomationSettings(BaseSettings):
             '{"payment_api": ["TIMEOUT", "CONNECTION_ERROR"]}. '
             "One of three on-recovery lanes; needed only for failure types the "
             "recovered domain's replay handler does not declare. A mapped type "
-            "is selected in every domain."
+            "is selected only under the mapped service's own domain."
         ),
     )
 

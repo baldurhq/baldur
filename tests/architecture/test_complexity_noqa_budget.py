@@ -103,7 +103,10 @@ _ROOT_BUDGETS: dict[str, int] = {
     # on-recovery drain: +1 — conditional_replay_on_circuit_close gained
     # C901/PLR0911 when the single-batch replay became a chain of passes with a
     # per-pass exit reason.
-    "baldur": 109,
+    # recovery trial: -1 — the traffic-aware replay task went with its
+    # check_traffic_health C901 noqa; the trial runner's tick, candidate walk
+    # and dispatch are split into steps instead of carrying new noqas.
+    "baldur": 108,
     # 666: -1 — _update_config_with_meta refactored into _versioned_write +
     # _merge_changes + _post_write helpers, dropping its complexity noqa.
     "baldur_pro": 32,

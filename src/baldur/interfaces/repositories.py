@@ -81,6 +81,7 @@ class ResolutionTrigger(str, Enum):
 
     MANUAL_REPLAY = "manual_replay"
     AUTO_REPLAY_CIRCUIT_CLOSE = "auto_replay_circuit_close"
+    AUTO_REPLAY_RECOVERY = "auto_replay_recovery"
     SCHEDULED_BATCH = "scheduled_batch"
     TRAFFIC_AWARE = "traffic_aware"
     THROTTLE_REPLAY = "throttle_replay"
@@ -212,6 +213,11 @@ class FailedOperationData:
 # cursor, not this bound, is what guarantees a caller eventually reaches every
 # matching entry. Deliberately below the per-domain entry ceiling.
 REPLAY_SELECTION_MAX_SCAN = 10_000
+
+# ``resolution_note`` of an entry the stale release sent to review: it was held
+# in REPLAYING past the cutoff on the attempt that reached its stored cap, and
+# back in PENDING no replay could take it again.
+STALE_RELEASE_AT_CAP_NOTE = "interrupted on its last allowed attempt"
 
 # Separator between the two halves of an encoded selection cursor.
 _CURSOR_SEPARATOR = "|"
@@ -927,6 +933,37 @@ class FailedOperationRepository(ABC):
         """
         ...
 
+    def return_replay_attempt(self, id: str, acquired_retry_count: int) -> bool:
+        """Give back the replay attempt an acquisition took, if it is still held.
+
+        Atomically, and only while the entry is REPLAYING **and** its
+        ``retry_count`` equals ``acquired_retry_count`` (the count this
+        replay's own acquisition returned), set ``retry_count`` to
+        ``acquired_retry_count - 1``. Status and every other field are left as
+        they are — ``updated_at`` included, so a stale release that ages
+        entries by it is not reset.
+
+        The count is the holder's fence: every acquisition raises it, so a
+        replay that was overtaken by another acquisition finds a different
+        count and gives nothing back.
+
+        Not abstract: a repository that does not override it raises
+        ``NotImplementedError``, and callers treat that as "the attempt stays
+        spent".
+
+        Args:
+            id: The DLQ entry ID.
+            acquired_retry_count: ``retry_count`` as this replay's acquisition
+                returned it.
+
+        Returns:
+            True when the attempt was given back; False when the entry is
+            missing, no longer REPLAYING, or held at another count.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support return_replay_attempt"
+        )
+
     @abstractmethod
     def release_stale_replaying(
         self,
@@ -936,13 +973,18 @@ class FailedOperationRepository(ABC):
         Release DLQ entries stuck in REPLAYING state.
 
         Entries can get stuck if the replay process crashes after acquiring
-        but before completing. This method reverts them to PENDING for retry.
+        but before completing. An entry held longer than the cutoff goes back
+        to PENDING for another replay — or, when its ``retry_count`` has
+        reached its own stored ``max_retries`` (it was interrupted on its last
+        allowed attempt), to REQUIRES_REVIEW, the state ``complete_replay``
+        converges an at-cap failure to. A PENDING entry at its cap could never
+        be acquired again.
 
         Args:
             older_than_minutes: Consider entries older than this as stale
 
         Returns:
-            Number of entries released
+            Number of entries moved out of REPLAYING (both destinations)
         """
         ...
 

@@ -309,7 +309,7 @@ class TestSLOSettingsIntegration:
             target=0.999,
         )
 
-        # fast_burn_rate와 slow_burn_rate가 settings에서 온 값인지 확인
+        # fast_burn_rate and slow_burn_rate come from settings
         assert slo.fast_burn_rate == settings.default_fast_burn_rate
         assert slo.slow_burn_rate == settings.default_slow_burn_rate
 
@@ -339,7 +339,7 @@ class TestSelfAuditSettingsIntegration:
 
         logger = self_audit()
 
-        # Settings에서 가져온 값이 적용되었는지 확인
+        # The value taken from Settings is applied
         assert logger._max_recent_events == 100
 
     def test_is_healthy_uses_settings(self):
@@ -348,8 +348,8 @@ class TestSelfAuditSettingsIntegration:
 
         logger = self_audit()
 
-        # 기본 max_failure_rate가 0.1인지 확인
-        # 실패 없이 시작하므로 healthy여야 함
+        # The default max_failure_rate is 0.1
+        # Starts with no failures, so it must be healthy
         assert logger.is_healthy() is True
 
 
@@ -378,7 +378,7 @@ class TestCascadeLoadSheddingSettingsIntegration:
 
         shedding = CascadeLoadShedding()
 
-        # Settings에서 가져온 값이 적용되었는지 확인
+        # The value taken from Settings is applied
         assert shedding._rate_window_seconds == 1.0
 
     def test_env_override_affects_instance(self):
@@ -420,9 +420,9 @@ class TestDriftDetectionTaskSettingsIntegration:
         """Test SLADriftDetector._get_analysis_window_hours() uses Settings."""
         from baldur.tasks.drift_detection import SLADriftDetector
 
-        # 정적 메서드 직접 테스트
+        # Test the static method directly
         hours = SLADriftDetector._get_analysis_window_hours()
-        assert hours == 24  # 기본값
+        assert hours == 24  # default
 
     def test_env_override_analysis_window(self):
         """Test environment variable override for analysis_window_hours."""
@@ -466,8 +466,8 @@ class TestIntelligenceTasksSettingsIntegration:
         task = CheckSLADriftTask()
         policy = task.notification_policy
 
-        # default_cooldown_seconds가 Settings에서 온 값인지 확인
-        assert policy.cooldown_seconds == 3600  # 기본값
+        # default_cooldown_seconds comes from Settings
+        assert policy.cooldown_seconds == 3600  # default
 
     def test_analyze_forensic_pending_task_notification_policy(self):
         """Test AnalyzeForensicPendingTask uses Settings for notification_policy."""
@@ -476,8 +476,8 @@ class TestIntelligenceTasksSettingsIntegration:
         task = AnalyzeForensicPendingTask()
         policy = task.notification_policy
 
-        # execution_threshold가 Settings에서 온 값인지 확인
-        assert policy.threshold == 10  # 기본값
+        # execution_threshold comes from Settings
+        assert policy.threshold == 10  # default
 
     # AnalyzeCrossStageInsightsTask policy coverage moved with the task to
     # tests/dormant/unit/test_learning_insight_task.py (599 D10/D14).
@@ -489,14 +489,14 @@ class TestIntelligenceTasksSettingsIntegration:
         task = CheckRecoveryTransitionsTask()
         policy = task.notification_policy
 
-        # recovery_check_cooldown_seconds가 Settings에서 온 값인지 확인
-        assert policy.cooldown_seconds == 120  # 기본값
+        # recovery_check_cooldown_seconds comes from Settings
+        assert policy.cooldown_seconds == 120  # default
 
     def test_get_intelligence_settings_fallback(self):
         """Test _get_intelligence_settings returns fallback on import error."""
         from baldur.tasks.intelligence_tasks import CheckSLADriftTask
 
-        # 정적 메서드 직접 테스트 (정상 동작 확인)
+        # Test the static method directly (normal operation)
         settings = CheckSLADriftTask._get_intelligence_settings()
         assert settings.default_cooldown_seconds == 3600
         assert settings.batch_size == 100
@@ -520,45 +520,8 @@ class TestIntelligenceTasksSettingsIntegration:
             assert policy.cooldown_seconds == 7200
 
 
-class TestTrafficAwareReplaySettingsIntegration:
-    """Test tasks/traffic_aware_replay.py Settings integration."""
-
-    def setup_method(self):
-        """Reset settings before each test."""
-        from baldur.settings.intelligence_task import (
-            reset_intelligence_task_settings,
-        )
-
-        reset_intelligence_task_settings()
-
-    def teardown_method(self):
-        """Reset settings after each test."""
-        from baldur.settings.intelligence_task import (
-            reset_intelligence_task_settings,
-        )
-
-        reset_intelligence_task_settings()
-
-    def test_traffic_aware_replay_notification_policy(self):
-        """Test TrafficAwareReplayTask uses Settings for notification_policy."""
-        from baldur.tasks.traffic_aware_replay import TrafficAwareReplayTask
-
-        task = TrafficAwareReplayTask()
-        policy = task.notification_policy
-
-        # cooldown_seconds가 기본값인지 확인
-        assert policy.cooldown_seconds == 300  # 5분
-
-    def test_get_cooldown_seconds_default(self):
-        """Test _get_cooldown_seconds returns default value."""
-        from baldur.tasks.traffic_aware_replay import TrafficAwareReplayTask
-
-        cooldown = TrafficAwareReplayTask._get_cooldown_seconds()
-        assert cooldown == 300  # 기본값 5분
-
-
 # =============================================================================
-# NOTE: API View Settings 통합 테스트는 전역 tests 폴더로 이동됨
-# 위치: tests/baldur/api/test_api_view_settings_integration.py
-# 이유: Django REST Framework 컨텍스트 필요
+# NOTE: the API view Settings integration tests moved to the global tests folder
+# Location: tests/baldur/api/test_api_view_settings_integration.py
+# Reason: they need a Django REST Framework context
 # =============================================================================

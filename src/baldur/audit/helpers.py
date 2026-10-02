@@ -352,11 +352,6 @@ def log_governance_task_audit(*args: Any, **kwargs: Any) -> int | None:
     return _safe_delegate("log_governance_task_audit", *args, **kwargs)
 
 
-def log_traffic_aware_replay_audit(*args: Any, **kwargs: Any) -> int | None:
-    """PRO: log_traffic_aware_replay_audit(domain=None, status='completed', ...)."""
-    return _safe_delegate("log_traffic_aware_replay_audit", *args, **kwargs)
-
-
 def log_drift_detection_audit(*args: Any, **kwargs: Any) -> int | None:
     """PRO: log_drift_detection_audit(check_type='sla_drift', status='completed', ...)."""
     return _safe_delegate("log_drift_detection_audit", *args, **kwargs)
@@ -442,7 +437,6 @@ __all__ = [
     "log_storage_failure_audit",
     "log_storage_recovery_audit",
     "log_system_control_audit",
-    "log_traffic_aware_replay_audit",
     "log_xtest_cleanup_audit",
     "log_xtest_injection_audit",
     "log_xtest_operation_audit",

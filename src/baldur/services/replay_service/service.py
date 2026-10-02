@@ -81,26 +81,37 @@ _REMEDIATION_DOMAIN_NOT_ADDRESSABLE = (
 )
 
 
-# 497 D4: Block reason emitted when the per-service inflight DistributedLock
-# rejects a duplicate `replay_on_circuit_close` sweep. It flows through the
-# same 4-channel block surface (log / event / metric / audit) as the no-lane
-# reasons above.
-REASON_CIRCUIT_CLOSE_INFLIGHT = "circuit_close_inflight"
-
 # Block reasons a *chain* of on-recovery passes reports when it stops with work
-# still reachable. Both are task-level: the service already emits its own
-# blocked-family signal for the governance and inflight stops, so re-emitting
-# either from the chain would double-count the metric.
+# still reachable. All are task-level: the service already emits its own
+# blocked-family signal for the governance stop, so re-emitting it from the
+# chain would double-count the metric.
 REASON_CONTINUATION_BOUND_REACHED = "continuation_bound_reached"
 REASON_CIRCUIT_REOPENED = "circuit_reopened"
 REASON_PASS_ERRORED = "pass_errored"
 REASON_PASS_MADE_NO_PROGRESS = "pass_made_no_progress"
+REASON_INTEGRITY_BLOCKED = "integrity_blocked"
+
+# A chain stopped because an operator holds a breaker projecting onto its
+# domain. Not a fault and not a blocked replay: the operator's own action was
+# audited where the pin was set, so this stop logs at INFO and nothing else.
+REASON_OPERATOR_HOLD = "operator_hold"
+
+# Outcomes of taking one domain's recovery inflight lock without blocking.
+RECOVERY_LOCK_ACQUIRED = "acquired"
+RECOVERY_LOCK_HELD = "held"
+RECOVERY_LOCK_UNAVAILABLE = "unavailable"
+
+# The ``trigger`` field of a recovery sweep's events, by the provenance the
+# sweep stamps on what it replays.
+_SWEEP_EVENT_TRIGGERS: dict[str, str] = {
+    ResolutionTrigger.AUTO_REPLAY_CIRCUIT_CLOSE.value: "circuit_close",
+    ResolutionTrigger.AUTO_REPLAY_RECOVERY.value: "recovery_trial",
+}
 
 
-# One selection lane: ``(failure type, domain, capture source)``. Operator
-# lanes select by type alone; the open-circuit lane is scoped to the closing
-# service's domain and to policy-chain captures; a lane a replay handler
-# declares is scoped to its own domain only.
+# One selection lane: ``(failure type, domain, capture source)``. Every
+# automatic lane is scoped to one stored domain; the open-circuit lane is
+# additionally scoped to policy-chain captures.
 _Lane = tuple[str, str | None, str | None]
 
 
@@ -119,22 +130,127 @@ class _LaneSelection:
     capped: bool = False
 
 
-@dataclass(frozen=True)
-class _RecoveryLanes:
-    """Where a recovery of one name may select from, by lane source."""
+def recovery_lanes(domain: str, failure_type_map: dict[str, list[str]]) -> list[_Lane]:
+    """Every lane an automatic recovery of one stored domain selects through.
 
-    mapped_failure_types: list[str]
-    open_circuit_domain: str | None
-    declared_lanes: list[_Lane]
+    The one place an automatic lane set is built, so the sweep, its idle check
+    and the recovery trial select one set. Every lane is scoped to ``domain``:
 
-    @property
-    def is_empty(self) -> bool:
-        """No lane: a pass for this name cannot replay anything."""
-        return (
-            not self.mapped_failure_types
-            and self.open_circuit_domain is None
-            and not self.declared_lanes
+    - the failure types an operator mapped to a service name whose stored
+      domain is ``domain`` (a mapped type no longer reaches other domains);
+    - the types the domain's replay handler declares and the map does not;
+    - the open-circuit lane (policy-chain captures only), unless the
+      open-circuit type is mapped — that mapped lane then covers it.
+
+    Empty when ``domain`` is the unclassifiable bucket or has no registered
+    replay handler: every automatic lane needs a handler that can run, and a
+    default handler always fails.
+
+    Args:
+        domain: A stored domain (``resolve_stored_domain`` output).
+        failure_type_map: Service name → failure types an operator mapped.
+    """
+    if domain == FALLBACK_DOMAIN or not has_replay_handler(domain):
+        return []
+
+    # Order-preserving dedup at the operator-controlled boundary: a map may
+    # name one type twice, which would dilute the quota split with repeated
+    # queries against the same pool.
+    mapped: list[str] = []
+    for service_name, failure_types in (failure_type_map or {}).items():
+        if not isinstance(failure_types, (list, tuple)):
+            continue
+        if resolve_stored_domain(str(service_name)) != domain:
+            continue
+        for failure_type in failure_types:
+            if isinstance(failure_type, str) and failure_type not in mapped:
+                mapped.append(failure_type)
+    lanes: list[_Lane] = [(failure_type, domain, None) for failure_type in mapped]
+
+    # A handler that knows how to re-run its domain's work names which parked
+    # failures replay automatically; no map entry is needed.
+    try:
+        declared = tuple(get_replay_handler(domain).auto_replay_failure_types)
+    except Exception as exc:
+        logger.warning(
+            "replay_service.declared_failure_types_unreadable",
+            healing_domain=domain,
+            error=str(exc),
         )
+        declared = ()
+    lanes.extend(
+        (failure_type, domain, None)
+        for failure_type in dict.fromkeys(declared)
+        if isinstance(failure_type, str)
+        and failure_type not in mapped
+        and failure_type != OPEN_CIRCUIT_FAILURE_TYPE
+    )
+
+    # Open-circuit captures need no map entry: the circuit that closed is the
+    # one that rejected them. Only a policy-chain capture's domain names the
+    # rejecting breaker, so the lane is restricted to that source.
+    if OPEN_CIRCUIT_FAILURE_TYPE not in mapped:
+        lanes.append((OPEN_CIRCUIT_FAILURE_TYPE, domain, POLICY_CHAIN_CAPTURE_SOURCE))
+    return lanes
+
+
+# Skip reasons of a replay that never ran its job. The handler refused the
+# entry before it was taken; or the handler ran but the job's body never began
+# because its own breaker refused the call, or for another reason (its own
+# idempotency key held or unverifiable). The last two give their attempt back.
+REASON_HANDLER_REFUSED = "handler_refused"
+REASON_BREAKER_REFUSED = "breaker_refused"
+REASON_JOB_NOT_STARTED = "job_not_started"
+
+# Entry metadata key counting the recovery trials that ran the job and failed.
+RECOVERY_TRIALS_METADATA_KEY = "recovery_trials"
+
+
+def _handler_refusal(handler: Any, entry: FailedOperationData) -> str | None:
+    """Why the handler refuses this entry, or None when it may be replayed.
+
+    ``can_replay`` is customer code: a raise is a refusal. It returns a
+    ``(bool, reason)`` tuple, so the verdict is unpacked, never truth-tested.
+    """
+    try:
+        allowed, reason = handler.can_replay(entry)
+    except Exception as exc:
+        return f"can_replay raised {type(exc).__name__}: {str(exc)[:200]}"
+    if allowed:
+        return None
+    return str(reason or "refused")
+
+
+def _job_start_flags(result: ReplayResult) -> tuple[bool, bool]:
+    """``(the job's body began, its own breaker refused the call)`` from a result.
+
+    Read off the flags a handler reports in its result's ``data``
+    (``job_started``, ``rejected_by_breaker``). A handler that reports neither
+    counts as having begun — a failure there is charged as before.
+    """
+    data = result.data if isinstance(result.data, dict) else {}
+    refused = data.get("rejected_by_breaker") is True
+    began = data.get("job_started")
+    if not isinstance(began, bool):
+        began = not refused
+    return began, refused and not began
+
+
+def _skip_reason(result: ReplayResult) -> str | None:
+    """The reason a skipped replay result carries, or None for any other result."""
+    if not result.skipped or not isinstance(result.data, dict):
+        return None
+    reason = result.data.get("skip_reason")
+    return reason if isinstance(reason, str) else None
+
+
+def _recovery_trial_count(entry: FailedOperationData) -> dict[str, int]:
+    """Metadata merge counting one more recovery trial that ran and failed."""
+    metadata = entry.metadata if isinstance(entry.metadata, dict) else {}
+    previous = metadata.get(RECOVERY_TRIALS_METADATA_KEY, 0)
+    if not isinstance(previous, int) or isinstance(previous, bool):
+        previous = 0
+    return {RECOVERY_TRIALS_METADATA_KEY: previous + 1}
 
 
 def _resolution_type_for(trigger: ResolutionTrigger | str) -> str:
@@ -193,15 +309,31 @@ def _record_item_resolved(
         )
 
 
-def _replay_inflight_lock_name(service_name: str) -> str:
-    """Build the per-service inflight lock name for circuit-close replay.
+def _replay_inflight_lock_name(subject: str) -> str:
+    """Build the inflight lock name for one recovery of one domain.
 
-    The name shape is fixed (`replay:inflight:circuit_close:<svc>`) so that
+    The name shape is fixed (`replay:inflight:circuit_close:<subject>`) so that
     any worker / pod sharing the same cache backend resolves to the same
-    `DistributedLock` for the same service — owner-fenced acquire/release
+    `DistributedLock` for the same recovery — owner-fenced acquire/release
     in `cache.get_lock()` makes the suppression cross-process safe.
     """
-    return f"replay:inflight:circuit_close:{service_name}"
+    return f"replay:inflight:circuit_close:{subject}"
+
+
+def recovery_lock_subject(service_name: str) -> str:
+    """What a recovery of this breaker name is locked by: its stored domain.
+
+    Raw names projecting onto one stored domain select one lane set, so they
+    share one lock. A name without a domain of its own keeps its raw name: the
+    unclassifiable bucket pools unrelated names.
+    """
+    domain = resolve_stored_domain(service_name)
+    return service_name if domain == FALLBACK_DOMAIN else domain
+
+
+def sweep_event_trigger(trigger: ResolutionTrigger | str) -> str:
+    """The ``trigger`` field a recovery sweep's events carry for this provenance."""
+    return _SWEEP_EVENT_TRIGGERS.get(_resolution_type_for(trigger), "circuit_close")
 
 
 # =============================================================================
@@ -398,12 +530,24 @@ class ReplayService(EventEmitterMixin):
         replay_type: str = "single",
         trigger: ResolutionTrigger | str = ResolutionTrigger.MANUAL_REPLAY,
         actor_id: str | None = None,
+        *,
+        entry: FailedOperationData | None = None,
+        trial: bool = False,
     ) -> ReplayResult:
-        """Core replay logic: acquire -> handler -> complete -> audit -> event.
+        """Core replay logic: gates -> acquire -> handler -> complete -> audit -> event.
 
         Handlers MUST ensure idempotency. Partial failure rollback is the
         handler's responsibility; for multi-step compensation, consider a
         dedicated compensation flow instead.
+
+        The truncate gate and the handler's own ``can_replay`` are asked
+        before the entry is taken: a refused entry stays PENDING with no
+        attempt spent. A replay whose job body never began (its own breaker
+        refused the call, or its own idempotency guard did not let it start)
+        gives its attempt back and returns a skipped result. A trial
+        (``trial=True``, the recovery trial) also gives back the attempt of a
+        replay whose job ran and failed. A failed replay whose handler's work
+        may still be running is left REPLAYING for the stale release.
 
         Args:
             dlq_id: DLQ entry to replay.
@@ -414,11 +558,63 @@ class ReplayService(EventEmitterMixin):
             actor_id: Acting principal for the audit trail. When omitted,
                 falls back to the ambient ``ActorContext`` (``system`` for
                 background/Celery paths).
+            entry: The entry as the selecting lane read it; read here when
+                omitted. Only the gates read it — the replay runs on the entry
+                the acquisition returns.
+            trial: Run as a recovery trial: a replay whose job ran and failed
+                costs the entry none of its replay attempts.
         """
 
         from baldur.metrics.event_handlers import ReplayEventHandler
         from baldur.metrics.registry import register_domain
         from baldur.services.event_bus import EventType
+
+        snapshot = entry if entry is not None else self.repository.get_by_id(dlq_id)
+        if snapshot is None:
+            logger.debug(
+                "replay_service.acquisition_skipped",
+                dlq_id=dlq_id,
+                reason="not_found",
+            )
+            return ReplayResult.failed(dlq_id, "DLQ entry not found")
+
+        # #502 D7: replay safety gate — block when request_data was
+        # truncated by the write-side forensic size cap. Asked before the
+        # entry is taken, so a truncated entry stays PENDING with no attempt
+        # spent instead of sitting in REPLAYING until the stale release.
+        gate_allowed, gate_reason = _truncate_gate(snapshot)
+        if not gate_allowed:
+            # DEBUG level on the truncate gate is intentional (per #502 D7)
+            # and unchanged. No explicit audit on this gate.
+            self._emit_replay_blocked(
+                log_event="dlq.replay_blocked_truncated",
+                log_fields={
+                    "dlq_id": dlq_id,
+                    "domain": snapshot.domain,
+                    "reason": gate_reason,
+                },
+                event_data={
+                    "dlq_id": dlq_id,
+                    "domain": snapshot.domain,
+                    "block_reason": gate_reason,
+                },
+                metric_subject=snapshot.domain,
+                metric_reason=gate_reason,
+                log_level="debug",
+            )
+            return ReplayResult.skipped_result(dlq_id, reason=gate_reason)
+
+        handler = get_replay_handler(snapshot.domain)
+        refusal = _handler_refusal(handler, snapshot)
+        if refusal is not None:
+            # Nothing was attempted: no event, metric or audit of a replay.
+            logger.debug(
+                "replay_service.replay_refused_by_handler",
+                dlq_id=dlq_id,
+                healing_domain=snapshot.domain,
+                reason=refusal,
+            )
+            return ReplayResult.skipped_result(dlq_id, reason=REASON_HANDLER_REFUSED)
 
         config_max = self.config["max_replay_attempts"]
         failed_op_data = self.repository.try_acquire_for_replay(dlq_id, config_max)
@@ -469,6 +665,8 @@ class ReplayService(EventEmitterMixin):
             )
             return ReplayResult.failed(dlq_id, "max_replays_exceeded")
 
+        acquired_count = failed_op_data.retry_count
+
         # Idempotency gate check (fail-open)
         idem_key = None
         gate_retry_count = 0
@@ -512,42 +710,20 @@ class ReplayService(EventEmitterMixin):
                     dlq_id=dlq_id,
                     idempotency_key=idem_key.cache_key,
                 )
+                if trial:
+                    # The job never ran: a trial costs nothing. The entry stays
+                    # REPLAYING, as this exit leaves it on every lane.
+                    self._give_back_attempt(dlq_id, acquired_count)
                 return ReplayResult.skipped_result(dlq_id, reason="in_progress")
         except Exception:
             pass  # Fail-open: gate failure → proceed with replay
-
-        # #502 D7: replay safety gate — block when request_data was
-        # truncated by the write-side forensic size cap. Gate runs before
-        # the handler so customer ReplayHandler implementations stay clean.
-        gate_allowed, gate_reason = _truncate_gate(failed_op_data)
-        if not gate_allowed:
-            # DEBUG level on the truncate gate is intentional (per #502 D7)
-            # and unchanged. No explicit audit on this gate.
-            self._emit_replay_blocked(
-                log_event="dlq.replay_blocked_truncated",
-                log_fields={
-                    "dlq_id": dlq_id,
-                    "domain": failed_op_data.domain,
-                    "reason": gate_reason,
-                },
-                event_data={
-                    "dlq_id": dlq_id,
-                    "domain": failed_op_data.domain,
-                    "block_reason": gate_reason,
-                },
-                metric_subject=failed_op_data.domain,
-                metric_reason=gate_reason,
-                log_level="debug",
-            )
-            # Entry stays PENDING — do not enter complete_replay so the
-            # acquired retry_count stays in place for operator visibility.
-            return ReplayResult.skipped_result(dlq_id, reason=gate_reason)
 
         # 679 D4/D5: read the origin trace captured at DLQ store time. Linkage
         # is additive — the ambient trigger trace is untouched. Missing-origin
         # entries (pre-679, no-trace capture, non-dict / marker-without-keys
         # metadata, or an entry without a metadata attribute at all) yield
         # all-None and skip linkage silently.
+        from baldur.core.abandoned_work import close_work_scope, open_work_scope
         from baldur.observability import span_with_link
 
         origin = extract_origin_trace(getattr(failed_op_data, "metadata", None))
@@ -555,8 +731,6 @@ class ReplayService(EventEmitterMixin):
         origin_log_fields: dict[str, Any] = (
             {"origin_trace_id": origin_trace_id} if origin_trace_id else {}
         )
-
-        handler = get_replay_handler(failed_op_data.domain)
 
         # Declaration site, read-side twin of ``store_failure``: the stored
         # domain was declared when the entry was captured, but the registry is
@@ -569,6 +743,12 @@ class ReplayService(EventEmitterMixin):
         ReplayEventHandler.on_replay_started(failed_op_data.domain, replay_type)
         start_time = time.monotonic()
 
+        # The handler runs inside a work scope: a timeout site whose cancel
+        # failed records the still-running work into it, and a scope still
+        # holding at close means the job may still be running.
+        result: ReplayResult | None = None
+        raised: Exception | None = None
+        scope, token = open_work_scope(None)
         try:
             # Wrap the handler execution in a `dlq.replay` span linked to the
             # origin SpanContext (no-op when OTEL is off or the full ids are
@@ -584,99 +764,64 @@ class ReplayService(EventEmitterMixin):
             ):
                 result = handler.replay(failed_op_data)
         except Exception as e:
-            duration = time.monotonic() - start_time
-            ReplayEventHandler.on_replay_completed(
-                failed_op_data.domain, False, duration
-            )
-
-            logger.exception(
-                "replay_service.handler_exception_dlq",
-                dlq_id=dlq_id,
-                error=e,
-                **origin_log_fields,
-            )
-            self.repository.complete_replay(
-                id=dlq_id,
-                success=False,
-                note=f"Handler crash: {type(e).__name__}: {str(e)[:200]}",
-                error_details={
-                    "type": type(e).__name__,
-                    "message": str(e)[:500],
-                    "occurred_at": utc_now().isoformat(),
-                    "escalated_to": "requires_review",
-                },
-            )
-
-            # Event: DLQ_REPLAY_FAILED (handler crash — distinct from COMPLETED)
-            failed_event_data: dict[str, Any] = {
-                "dlq_id": dlq_id,
-                "domain": failed_op_data.domain,
-                "replay_attempt": failed_op_data.retry_count,
-                "error_type": type(e).__name__,
-                "error_message": str(e)[:200],
-            }
-            if origin_trace_id:
-                failed_event_data["origin_trace_id"] = origin_trace_id
-            self._emit_event(
-                EventType.DLQ_REPLAY_FAILED,
-                data=failed_event_data,
-            )
-
-            # Mark idempotency gate as failed
-            if idem_key:
-                try:
-                    from baldur.core.idempotency_gate import get_idempotency_gate
-
-                    get_idempotency_gate().mark_failed(
-                        idem_key.cache_key,
-                        error=str(e),
-                        retry_count=gate_retry_count,
-                    )
-                except Exception:
-                    pass  # Fail-open
-
-            return ReplayResult.failed(dlq_id, f"internal_error: {type(e).__name__}")
+            raised = e
+        finally:
+            work_may_continue = close_work_scope(scope, token) is None
 
         duration = time.monotonic() - start_time
+
+        if raised is not None:
+            return self._finish_crashed_replay(
+                failed_op_data,
+                raised,
+                duration=duration,
+                idem_key=idem_key,
+                gate_retry_count=gate_retry_count,
+                acquired_count=acquired_count,
+                trial=trial,
+                work_may_continue=work_may_continue,
+                origin_trace_id=origin_trace_id,
+            )
+
+        assert result is not None  # set whenever the handler did not raise
         ReplayEventHandler.on_replay_completed(
             failed_op_data.domain, result.success, duration
         )
 
-        finalized = self.repository.complete_replay(
-            id=dlq_id,
-            success=result.success,
-            resolution_type=_resolution_type_for(trigger) if result.success else "",
-            note=result.message
-            if result.success
-            else (result.error or "Replay failed"),
-        )
+        body_began, refused_by_own_breaker = _job_start_flags(result)
+        if result.success:
+            finalized = self.repository.complete_replay(
+                id=dlq_id,
+                success=True,
+                resolution_type=_resolution_type_for(trigger),
+                note=result.message,
+            )
 
-        # Gated on the write landing: complete_replay reports False when the
-        # entry vanished between acquisition and completion (TTL expiry, a
-        # concurrent purge, eviction), which transitioned nothing and so must
-        # not decrement the pending gauge or count as a resolution.
-        if result.success and finalized:
-            _record_item_resolved(failed_op_data, _resolution_type_for(trigger))
-
-        # Mark idempotency gate completion
-        if idem_key:
-            try:
-                from baldur.core.idempotency_gate import get_idempotency_gate
-
-                gate = get_idempotency_gate()
-                if result.success:
-                    gate.mark_completed(
-                        idem_key.cache_key, retry_count=gate_retry_count
-                    )
-                else:
-                    gate.mark_failed(
-                        idem_key.cache_key,
-                        error=result.error or "replay_failed",
-                        retry_count=gate_retry_count,
-                    )
-            except Exception:
-                logger.warning(
-                    "replay_service.gate_mark_completed_failed", dlq_id=dlq_id
+            # Gated on the write landing: complete_replay reports False when
+            # the entry vanished between acquisition and completion (TTL
+            # expiry, a concurrent purge, eviction), which transitioned nothing
+            # and so must not decrement the pending gauge or count as a
+            # resolution.
+            if finalized:
+                _record_item_resolved(failed_op_data, _resolution_type_for(trigger))
+            self._mark_replay_key(idem_key, gate_retry_count, dlq_id, result)
+        else:
+            # Key, give-back, completion — in that order: the attempt number
+            # becomes reusable only once its key reads failed.
+            self._mark_replay_key(idem_key, gate_retry_count, dlq_id, result)
+            still_ours = True
+            if trial or not body_began:
+                still_ours = self._give_back_attempt(dlq_id, acquired_count)
+            if still_ours and not work_may_continue:
+                self.repository.complete_replay(
+                    id=dlq_id,
+                    success=False,
+                    note=result.error or "Replay failed",
+                    error_details=(
+                        _recovery_trial_count(failed_op_data)
+                        if trial and body_began
+                        else None
+                    ),
                 )
 
         if result.success:
@@ -729,7 +874,170 @@ class ReplayService(EventEmitterMixin):
             data=completed_event_data,
         )
 
+        if not result.success and not body_began:
+            # The job never began: not a failed replay but a skipped one, its
+            # attempt given back above.
+            skipped = ReplayResult.skipped_result(
+                dlq_id,
+                reason=(
+                    REASON_BREAKER_REFUSED
+                    if refused_by_own_breaker
+                    else REASON_JOB_NOT_STARTED
+                ),
+            )
+            skipped.error = result.error
+            skipped.handler_ran = True
+            return skipped
+
+        result.handler_ran = True
+        result.work_may_continue = work_may_continue and not result.success
         return result
+
+    def _finish_crashed_replay(
+        self,
+        failed_op_data: FailedOperationData,
+        raised: Exception,
+        *,
+        duration: float,
+        idem_key: Any,
+        gate_retry_count: int,
+        acquired_count: int,
+        trial: bool,
+        work_may_continue: bool,
+        origin_trace_id: str | None,
+    ) -> ReplayResult:
+        """Settle a replay whose handler raised: key, give-back, completion, event.
+
+        A handler that raised reports no start flags, so its job counts as
+        begun: a non-trial replay is charged as before.
+        """
+        from baldur.metrics.event_handlers import ReplayEventHandler
+        from baldur.services.event_bus import EventType
+
+        dlq_id = failed_op_data.id
+        ReplayEventHandler.on_replay_completed(failed_op_data.domain, False, duration)
+
+        logger.exception(
+            "replay_service.handler_exception_dlq",
+            dlq_id=dlq_id,
+            error=raised,
+            **({"origin_trace_id": origin_trace_id} if origin_trace_id else {}),
+        )
+
+        # Key, give-back, completion — in that order: the attempt number
+        # becomes reusable only once its key reads failed.
+        if idem_key:
+            try:
+                from baldur.core.idempotency_gate import get_idempotency_gate
+
+                get_idempotency_gate().mark_failed(
+                    idem_key.cache_key,
+                    error=str(raised),
+                    retry_count=gate_retry_count,
+                )
+            except Exception:
+                pass  # Fail-open
+
+        still_ours = True
+        if trial:
+            still_ours = self._give_back_attempt(dlq_id, acquired_count)
+        if still_ours and not work_may_continue:
+            error_details: dict[str, Any] = {
+                "type": type(raised).__name__,
+                "message": str(raised)[:500],
+                "occurred_at": utc_now().isoformat(),
+                "escalated_to": "requires_review",
+            }
+            if trial:
+                error_details.update(_recovery_trial_count(failed_op_data))
+            self.repository.complete_replay(
+                id=dlq_id,
+                success=False,
+                note=f"Handler crash: {type(raised).__name__}: {str(raised)[:200]}",
+                error_details=error_details,
+            )
+
+        # Event: DLQ_REPLAY_FAILED (handler crash — distinct from COMPLETED)
+        failed_event_data: dict[str, Any] = {
+            "dlq_id": dlq_id,
+            "domain": failed_op_data.domain,
+            "replay_attempt": failed_op_data.retry_count,
+            "error_type": type(raised).__name__,
+            "error_message": str(raised)[:200],
+        }
+        if origin_trace_id:
+            failed_event_data["origin_trace_id"] = origin_trace_id
+        self._emit_event(
+            EventType.DLQ_REPLAY_FAILED,
+            data=failed_event_data,
+        )
+
+        crashed = ReplayResult.failed(
+            dlq_id, f"internal_error: {type(raised).__name__}"
+        )
+        crashed.handler_ran = True
+        crashed.work_may_continue = work_may_continue
+        return crashed
+
+    def _mark_replay_key(
+        self,
+        idem_key: Any,
+        gate_retry_count: int,
+        dlq_id: str,
+        result: ReplayResult,
+    ) -> None:
+        """Mark this attempt number's replay key completed or failed (fail-open)."""
+        if not idem_key:
+            return
+        try:
+            from baldur.core.idempotency_gate import get_idempotency_gate
+
+            gate = get_idempotency_gate()
+            if result.success:
+                gate.mark_completed(idem_key.cache_key, retry_count=gate_retry_count)
+            else:
+                gate.mark_failed(
+                    idem_key.cache_key,
+                    error=result.error or "replay_failed",
+                    retry_count=gate_retry_count,
+                )
+        except Exception:
+            logger.warning("replay_service.gate_mark_completed_failed", dlq_id=dlq_id)
+
+    def _give_back_attempt(self, dlq_id: str, acquired_count: int) -> bool:
+        """Give back the attempt this replay's acquisition took.
+
+        Returns whether this replay still holds the entry, so the caller knows
+        whether to complete it. A repository that cannot give an attempt back,
+        or a store fault, leaves the attempt spent and the completion
+        proceeding — a store fault costs an attempt, never an entry. A
+        give-back the store refuses means another replay holds the entry (the
+        stale release returned it, or another acquisition took it), so this
+        one must not complete it.
+        """
+        try:
+            returned = self.repository.return_replay_attempt(dlq_id, acquired_count)
+        except NotImplementedError:
+            logger.debug(
+                "replay_service.replay_attempt_return_unsupported",
+                dlq_id=dlq_id,
+                repository=type(self.repository).__name__,
+            )
+            return True
+        except Exception as exc:
+            logger.warning(
+                "replay_service.replay_attempt_return_failed",
+                dlq_id=dlq_id,
+                error=str(exc),
+            )
+            return True
+        if not returned:
+            logger.debug(
+                "replay_service.replay_attempt_return_skipped",
+                dlq_id=dlq_id,
+                acquired_retry_count=acquired_count,
+            )
+        return bool(returned)
 
     def _record_batch_completion(
         self,
@@ -993,6 +1301,7 @@ class ReplayService(EventEmitterMixin):
                 replay_type="batch",
                 trigger=trigger,
                 actor_id=actor_id,
+                entry=entry,
             )
             batch_result.results.append(result)
 
@@ -1142,8 +1451,8 @@ class ReplayService(EventEmitterMixin):
         """Load service→failure_types mapping: RuntimeConfig → static settings.
 
         One of the three lane sources replay_on_circuit_close() selects
-        through: a mapped type selects its entries in every domain. The other
-        two need no map entry — the open-circuit lane and the types the
+        through: a mapped type selects its entries under the mapped service's
+        own stored domain. The other two need no map entry — the open-circuit lane and the types the
         domain's own replay handler declares — so the map is needed only for
         failure types the recovered domain's handler does not declare.
         Falling back to the static settings makes
@@ -1289,27 +1598,30 @@ class ReplayService(EventEmitterMixin):
         deadline: float | None = None,
         lane_cursors: dict[str, str] | None = None,
         continuation: int = 0,
+        trigger: ResolutionTrigger | str = ResolutionTrigger.AUTO_REPLAY_CIRCUIT_CLOSE,
     ) -> BatchReplayResult:
         """
-        Replay entries when circuit breaker closes.
+        Replay entries when a service recovers.
 
-        This is triggered when an external service recovers.
-        Only replays entries related to the recovered service.
+        This is triggered when an external service recovers — by its breaker
+        closing, or by a recovery trial that found it answering again. Only
+        replays entries stored under the recovered service's own domain.
 
-        IMPORTANT: When triggered by force_close with trigger_replay=True,
-        any replay failures are escalated to REQUIRES_REVIEW status.
-        This is because operator-initiated recovery implies the operator
-        intended to resolve these items, so failures need explicit attention.
+        IMPORTANT: With ``escalate_failures`` (the CLOSED-transition lane), a
+        replay whose job ran and failed is escalated to REQUIRES_REVIEW: a
+        breaker reaching CLOSED is strong evidence of recovery, so a failure
+        there needs explicit attention. A replay whose job never began is
+        never escalated.
 
         One call is one pass. A caller that means to clear a whole backlog runs
         passes in sequence, handing each one the previous result's
-        ``lane_cursors``; the three keyword arguments all default to today's
-        single-pass behaviour.
+        ``lane_cursors``; the keyword arguments all default to a single pass.
 
         Args:
             service_name: Name of the service that recovered
             max_items: Maximum number of items to replay in THIS pass
-            escalate_failures: If True, mark failed replays as REQUIRES_REVIEW
+            escalate_failures: If True, mark replays whose job ran and failed
+                as REQUIRES_REVIEW
             service_failure_type_map: Custom mapping of service names to failure types.
                                       If None, uses RuntimeConfig fallback.
                                       Example: {"my_service": ["TIMEOUT", "CONNECTION_ERROR"]}
@@ -1321,72 +1633,42 @@ class ReplayService(EventEmitterMixin):
             continuation: How many passes preceded this one. Rotates which lane
                 leads the fill, so a deadline landing mid-list cannot starve
                 the same tail on every pass.
+            trigger: Provenance stamped on what the pass replays — the breaker
+                closing, or a recovery trial's success.
 
         Returns:
             BatchReplayResult with summary. `inflight_skipped=True` indicates
-            the per-service inflight lock rejected this call as a duplicate.
+            another recovery of the same domain already holds the inflight
+            lock, and this call joined it.
         """
-        # 497 D4: cross-process inflight lock via CacheProviderInterface.get_lock().
-        # Owner-fenced DistributedLock suppresses duplicate sweeps when
-        # CIRCUIT_BREAKER_CLOSED is emitted more than once for the same
-        # logical recovery (broker redelivery, multi-pod fan-out, or — pre-D1
-        # — the now-fixed source-level multi-fire race). Fails open if the
-        # cache is unavailable or `get_lock` is not supported so a degraded
-        # cache does not block legitimate CB-recovery replay. Owner-fenced
-        # release (Lua eval on Redis, owner_id check in-memory) prevents a
-        # slow holder from clobbering a successor's freshly-acquired lock
-        # after TTL expiry — the failure mode that a raw setnx+delete pattern
-        # would have at scale.
-        ttl_seconds = get_config().services_group.dlq.circuit_close_inflight_ttl_seconds
-        cache = self.cache
-        lock = None
+        # Cross-process inflight lock via CacheProviderInterface.get_lock(),
+        # named by the stored domain: one recovery per domain at a time, so
+        # duplicate dispatches (broker redelivery, multi-pod fan-out, a trial's
+        # sweep beside a CLOSED event's) join instead of replaying side by
+        # side. Fails open if the cache is unavailable or `get_lock` is not
+        # supported, so a degraded cache does not block legitimate recovery.
+        # Owner-fenced release prevents a slow holder from clobbering a
+        # successor's freshly-acquired lock after TTL expiry.
+        subject = recovery_lock_subject(service_name)
+        lock, lock_state, lock_error = self.try_acquire_recovery_lock(subject)
 
-        if cache is not None:
-            try:
-                lock = cache.get_lock(
-                    name=_replay_inflight_lock_name(service_name),
-                    timeout=timedelta(seconds=ttl_seconds),
-                )
-                acquired = lock.acquire(blocking=False)
-            except Exception as exc:
-                logger.warning(
-                    "replay_service.inflight_cache_unavailable",
-                    reason="lock_unavailable",
-                    error=str(exc),
-                    service_name=service_name,
-                )
-                lock = None
-                acquired = False
+        if lock_state == RECOVERY_LOCK_HELD:
+            # A second dispatch for a recovery already running is not a
+            # blocked replay: the running one drains the same lanes.
+            logger.info(
+                "replay_service.circuit_close_inflight_joined",
+                service_name=service_name,
+                healing_domain=subject,
+            )
+            return BatchReplayResult(inflight_skipped=True)
 
-            if lock is not None and not acquired:
-                self._emit_replay_blocked(
-                    log_event="replay_service.circuit_close_inflight_skipped",
-                    log_fields={
-                        "service_name": service_name,
-                        "block_reason": REASON_CIRCUIT_CLOSE_INFLIGHT,
-                    },
-                    event_data={
-                        "trigger": "circuit_close",
-                        "service_name": service_name,
-                        "block_reason": REASON_CIRCUIT_CLOSE_INFLIGHT,
-                    },
-                    metric_subject=service_name,
-                    metric_reason=REASON_CIRCUIT_CLOSE_INFLIGHT,
-                    audit={
-                        "domain": "dlq",
-                        "reason": REASON_CIRCUIT_CLOSE_INFLIGHT,
-                        "service_name": service_name,
-                        "trigger": "circuit_close",
-                        "details": {"ttl_seconds": ttl_seconds},
-                    },
-                )
-                return BatchReplayResult(inflight_skipped=True)
-
-            if not acquired:
-                # Lock construction/acquire raised — fall through to the
-                # unguarded sweep (fail-open). `lock` is None so the finally
-                # block below is a no-op.
-                lock = None
+        if lock_state == RECOVERY_LOCK_UNAVAILABLE and self.cache is not None:
+            logger.warning(
+                "replay_service.inflight_cache_unavailable",
+                reason="lock_unavailable",
+                error=lock_error,
+                service_name=service_name,
+            )
 
         try:
             return self._replay_on_circuit_close_locked(
@@ -1397,27 +1679,61 @@ class ReplayService(EventEmitterMixin):
                 deadline=deadline,
                 lane_cursors=lane_cursors,
                 continuation=continuation,
+                trigger=trigger,
             )
         finally:
-            if lock is not None:
-                try:
-                    lock.release()
-                except Exception as exc:
-                    logger.warning(
-                        "replay_service.inflight_release_failed",
-                        service_name=service_name,
-                        error=str(exc),
-                    )
+            self.release_recovery_lock(lock, service_name)
+
+    def try_acquire_recovery_lock(self, subject: str) -> tuple[Any, str, str | None]:
+        """Take the inflight lock of one domain's recovery without blocking.
+
+        Returns ``(lock, state, error)``: state is ``RECOVERY_LOCK_ACQUIRED``
+        (pass the lock to :meth:`release_recovery_lock`),
+        ``RECOVERY_LOCK_HELD`` (another recovery of the domain holds it), or
+        ``RECOVERY_LOCK_UNAVAILABLE`` (no cache, or the cache failed to build
+        or acquire the lock — the lock is None, ``error`` says why). Logs
+        nothing: the sweep proceeds unguarded on an unavailable lock and the
+        recovery trial waits a tick, and each says so its own way.
+        """
+        cache = self.cache
+        if cache is None:
+            return None, RECOVERY_LOCK_UNAVAILABLE, "no_cache_provider"
+        ttl_seconds = get_config().services_group.dlq.circuit_close_inflight_ttl_seconds
+        try:
+            lock = cache.get_lock(
+                name=_replay_inflight_lock_name(subject),
+                timeout=timedelta(seconds=ttl_seconds),
+            )
+            acquired = lock.acquire(blocking=False)
+        except Exception as exc:
+            return None, RECOVERY_LOCK_UNAVAILABLE, str(exc)
+        if not acquired:
+            return None, RECOVERY_LOCK_HELD, None
+        return lock, RECOVERY_LOCK_ACQUIRED, None
+
+    @staticmethod
+    def release_recovery_lock(lock: Any, service_name: str) -> None:
+        """Release a lock :meth:`try_acquire_recovery_lock` returned (None: no-op)."""
+        if lock is None:
+            return
+        try:
+            lock.release()
+        except Exception as exc:
+            logger.warning(
+                "replay_service.inflight_release_failed",
+                service_name=service_name,
+                error=str(exc),
+            )
 
     def recovery_is_idle(self, service_name: str) -> bool:
         """Is a recovery pass for this name certain to replay nothing?
 
-        True only when the name gets no lane — no map entry, and no replay
-        handler lane of its own — and the store answers that nothing is parked
-        under its name. A pass with no lane cannot replay anything whatever is
-        stored, so ending it early changes no replay; the count decides only
-        whether there is work that pass would leave behind, which the operator
-        must hear about.
+        True only when the name's stored domain gets no lane — it has no
+        domain of its own, or no replay handler is registered for it — and
+        the store answers that nothing is parked under its name. A pass with
+        no lane cannot replay anything whatever is stored, so ending it early
+        changes no replay; the count decides only whether there is work that
+        pass would leave behind, which the operator must hear about.
 
         A name with a lane is never idle, even with nothing parked: entries
         that become pending between a count and the selection would be missed.
@@ -1428,10 +1744,9 @@ class ReplayService(EventEmitterMixin):
         """
         try:
             failure_type_map = self._load_failure_type_map()
-            lanes = self._resolve_recovery_lanes(service_name, failure_type_map)
-            if not lanes.is_empty:
+            if recovery_lanes(resolve_stored_domain(service_name), failure_type_map):
                 return False
-            return self.parked_count_for_recovery(service_name, failure_type_map) == 0
+            return self.parked_count_for_recovery(service_name) == 0
         except Exception as exc:
             logger.debug(
                 "replay_service.recovery_idle_unavailable",
@@ -1440,19 +1755,15 @@ class ReplayService(EventEmitterMixin):
             )
             return False
 
-    def parked_count_for_recovery(
-        self,
-        service_name: str,
-        failure_type_map: dict[str, list[str]] | None = None,
-    ) -> int | None:
+    def parked_count_for_recovery(self, service_name: str) -> int | None:
         """Pending entries a recovery of this name could concern, or None.
 
         The count of pending entries stored under the name's own domain, read
-        from the shared store. None means the question cannot be answered, and
-        every caller treats None as "work may be parked":
+        from the shared store. Every lane a recovery selects through is scoped
+        to that domain, so the count bounds what it could replay. None means
+        the question cannot be answered, and every caller treats None as
+        "work may be parked":
 
-        - the name has a map entry — a mapped type selects in every domain, so
-          the name's own domain does not bound it;
         - the name has no domain of its own — the bucket it shares with every
           other rejected name cannot be attributed to it;
         - the store cannot answer from its shared view;
@@ -1460,14 +1771,7 @@ class ReplayService(EventEmitterMixin):
 
         Args:
             service_name: The breaker name that recovered.
-            failure_type_map: The service→failure_types map the caller already
-                resolved; read from runtime configuration when omitted.
         """
-        if failure_type_map is None:
-            failure_type_map = self._load_failure_type_map()
-        if failure_type_map.get(service_name):
-            return None
-
         domain = resolve_stored_domain(service_name)
         if domain == FALLBACK_DOMAIN:
             return None
@@ -1686,112 +1990,7 @@ class ReplayService(EventEmitterMixin):
                 rolled[key] = encode_replay_cursor(entry.created_at, entry.id)
         return rolled
 
-    def _resolve_recovery_lanes(
-        self, service_name: str, failure_type_map: dict[str, list[str]]
-    ) -> _RecoveryLanes:
-        """Every lane a recovery of this name selects through, by source.
-
-        The one resolution both the sweep and the idle check read, so the two
-        cannot disagree about whether a name has a lane.
-        """
-        # Order-preserving dedup at the operator-controlled boundary (D5):
-        # RuntimeConfig may be misconfigured with duplicate failure types
-        # (e.g., ["TIMEOUT", "TIMEOUT"]), which would dilute the divmod
-        # quota allocation by issuing repeated queries against the same ID pool.
-        failure_types = list(dict.fromkeys(failure_type_map.get(service_name, [])))
-
-        # Open-circuit captures need no map entry: the circuit that just closed
-        # is the one that rejected them, which is the whole eligibility test.
-        # The deployment that produces these entries — plain `dlq=True`, no
-        # RuntimeConfig at all — is exactly the one with an empty map.
-        open_circuit_domain = self._resolve_open_circuit_replay_domain(
-            service_name, failure_types
-        )
-        # Same reasoning for the types the service's own replay handler
-        # declares: the handler is the opt-in, so no map entry is needed.
-        declared_lanes = self._resolve_declared_replay_lanes(
-            service_name, failure_types
-        )
-        return _RecoveryLanes(
-            mapped_failure_types=failure_types,
-            open_circuit_domain=open_circuit_domain,
-            declared_lanes=declared_lanes,
-        )
-
-    def _resolve_open_circuit_replay_domain(
-        self, service_name: str, mapped_failure_types: list[str]
-    ) -> str | None:
-        """Domain whose open-circuit captures this sweep may replay, or None.
-
-        The join runs through the same projection the store used, so a protect
-        name the store quietly reprojected (``Payment-API`` is captured under
-        ``payment_api``) is still found here — deriving it a second time by
-        hand is what made these entries permanently unreachable before.
-
-        Returns None, and the entries stay operator-driven, when:
-
-        - the name has no domain identity of its own (it landed in the
-          unclassifiable bucket, which pools unrelated names);
-        - no replay handler is registered for it, so every selected entry would
-          burn its budget on a handler that cannot run;
-        - the operator already mapped the type, whose lane covers it — running
-          both would fetch the same entry twice in one sweep.
-        """
-        if OPEN_CIRCUIT_FAILURE_TYPE in mapped_failure_types:
-            return None
-
-        domain = resolve_stored_domain(service_name)
-        if domain == FALLBACK_DOMAIN:
-            logger.debug(
-                "replay_service.open_circuit_auto_replay_skipped",
-                service_name=service_name,
-                reason=REASON_DOMAIN_NOT_ADDRESSABLE,
-            )
-            return None
-        if not has_replay_handler(domain):
-            logger.debug(
-                "replay_service.open_circuit_auto_replay_skipped",
-                healing_domain=domain,
-                service_name=service_name,
-                reason=REASON_NO_REPLAY_HANDLER,
-            )
-            return None
-        return domain
-
-    def _resolve_declared_replay_lanes(
-        self, service_name: str, mapped_failure_types: list[str]
-    ) -> list[_Lane]:
-        """Lanes for the failure types the service's own replay handler declares.
-
-        A handler that knows how to re-run its domain's work may name which of
-        that domain's parked failures replay automatically on recovery
-        (``ReplayHandler.auto_replay_failure_types``). Each declared type gets a
-        lane scoped to the domain, unless the operator already mapped the type
-        for this service — that lane covers it, and running both would fetch the
-        same entry twice in one sweep. An unaddressable name or a domain with no
-        registered handler declares nothing.
-        """
-        domain = resolve_stored_domain(service_name)
-        if domain == FALLBACK_DOMAIN or not has_replay_handler(domain):
-            return []
-        try:
-            declared = tuple(get_replay_handler(domain).auto_replay_failure_types)
-        except Exception as exc:
-            logger.warning(
-                "replay_service.declared_failure_types_unreadable",
-                healing_domain=domain,
-                error=str(exc),
-            )
-            return []
-        return [
-            (failure_type, domain, None)
-            for failure_type in dict.fromkeys(declared)
-            if isinstance(failure_type, str)
-            and failure_type not in mapped_failure_types
-            and failure_type != OPEN_CIRCUIT_FAILURE_TYPE
-        ]
-
-    def _stop_pass_at_deadline(
+    def _stop_pass_at(
         self,
         batch_result: BatchReplayResult,
         selection: _LaneSelection,
@@ -1800,8 +1999,14 @@ class ReplayService(EventEmitterMixin):
         service_name: str,
         *,
         cut_dlq_id: str | None = None,
+        breaker_refused: bool = False,
     ) -> None:
-        """End a pass at its deadline with the unprocessed tail left selectable.
+        """End a pass early with the unprocessed tail left selectable.
+
+        Two things end a pass before its selection is replayed: its deadline,
+        and a replay its own breaker refused before the job began (the
+        breaker re-opened, or its half-open slots are taken — the replays
+        behind it would be refused the same way).
 
         Selection completed before any replay did, and acquisition happens per
         entry inside ``_execute_replay`` — so every entry from ``processed`` on
@@ -1811,11 +2016,11 @@ class ReplayService(EventEmitterMixin):
         ``total`` follows the same correction: the completion event and the
         daily report must not count entries the pass never touched.
 
-        A replay the deadline cut (``cut_dlq_id``) is part of that tail, and it
-        is recorded on the result: it used a replay attempt, so the pass moved
-        the backlog even when it completed nothing — the chain that carries the
-        sweep would otherwise read a cut first replay as a pass that got nowhere
-        and stop before the continuation that replays it.
+        The entry the stop landed on (``cut_dlq_id``) is part of that tail,
+        and it is recorded on the result: a deadline cut used one of its
+        replay attempts, and a refusal is a reason to pause — so the chain
+        that carries the sweep would otherwise read the pass as one that got
+        nowhere and stop before the continuation that replays it.
         """
         batch_result.capped = True
         batch_result.total = processed
@@ -1823,16 +2028,27 @@ class ReplayService(EventEmitterMixin):
             selection, processed, carried_cursors or {}
         )
         batch_result.deadline_cut_dlq_id = cut_dlq_id
-        logger.info(
-            "replay_service.circuit_close_deadline_reached",
-            service_name=service_name,
-            processed=processed,
-            selected=len(selection.selected),
-            **({"cut_dlq_id": cut_dlq_id} if cut_dlq_id is not None else {}),
-        )
+        batch_result.ended_by_breaker_refusal = breaker_refused
+        stop_fields: dict[str, Any] = {
+            "service_name": service_name,
+            "processed": processed,
+            "selected": len(selection.selected),
+        }
+        if cut_dlq_id is not None:
+            stop_fields["cut_dlq_id"] = cut_dlq_id
+        if breaker_refused:
+            logger.info("replay_service.circuit_close_breaker_refused", **stop_fields)
+        else:
+            logger.info("replay_service.circuit_close_deadline_reached", **stop_fields)
 
     def _execute_replay_within(
-        self, dlq_id: str, deadline: float | None
+        self,
+        dlq_id: str,
+        deadline: float | None,
+        *,
+        trigger: ResolutionTrigger | str = ResolutionTrigger.AUTO_REPLAY_CIRCUIT_CLOSE,
+        entry: FailedOperationData | None = None,
+        trial: bool = False,
     ) -> tuple[ReplayResult, bool]:
         """One conditional replay, bounded by the pass deadline when there is one.
 
@@ -1861,7 +2077,9 @@ class ReplayService(EventEmitterMixin):
             result = self._execute_replay(
                 dlq_id,
                 replay_type="conditional",
-                trigger=ResolutionTrigger.AUTO_REPLAY_CIRCUIT_CLOSE,
+                trigger=trigger,
+                entry=entry,
+                trial=trial,
             )
             return result, False
         from baldur.scaling.deadline_context import (
@@ -1874,14 +2092,14 @@ class ReplayService(EventEmitterMixin):
             result = self._execute_replay(
                 dlq_id,
                 replay_type="conditional",
-                trigger=ResolutionTrigger.AUTO_REPLAY_CIRCUIT_CLOSE,
+                trigger=trigger,
+                entry=entry,
+                trial=trial,
             )
         cut = not result.success and (stop.stopped or time.monotonic() >= deadline)
         return result, cut
 
-    def _end_recovery_with_no_lane(
-        self, service_name: str, failure_type_map: dict[str, list[str]]
-    ) -> BatchReplayResult:
+    def _end_recovery_with_no_lane(self, service_name: str) -> BatchReplayResult:
         """End a pass whose name has no lane, loudly only if work is left behind.
 
         With no lane the pass replays nothing whatever is stored. Nothing
@@ -1890,11 +2108,10 @@ class ReplayService(EventEmitterMixin):
         raises the blocked surface (WARNING log + DLQ_REPLAY_BLOCKED event +
         metric + audit) naming what is missing — a domain identity, or a replay
         handler for the domain in this worker. Mapping the failure type is not
-        the remedy: a mapped lane replays through the default handler, which
-        always fails, and escalates every entry to review.
+        the remedy: every automatic lane needs a replay handler.
         """
         domain = resolve_stored_domain(service_name)
-        parked = self.parked_count_for_recovery(service_name, failure_type_map)
+        parked = self.parked_count_for_recovery(service_name)
         if parked == 0:
             logger.debug(
                 "replay_service.circuit_close_replay_skipped",
@@ -1940,7 +2157,7 @@ class ReplayService(EventEmitterMixin):
         )
         return BatchReplayResult()
 
-    def _replay_on_circuit_close_locked(  # noqa: C901, PLR0912
+    def _replay_on_circuit_close_locked(  # noqa: C901, PLR0912, PLR0915
         self,
         service_name: str,
         max_items: int = 50,
@@ -1950,12 +2167,13 @@ class ReplayService(EventEmitterMixin):
         deadline: float | None = None,
         lane_cursors: dict[str, str] | None = None,
         continuation: int = 0,
+        trigger: ResolutionTrigger | str = ResolutionTrigger.AUTO_REPLAY_CIRCUIT_CLOSE,
     ) -> BatchReplayResult:
         """Inner sweep body for `replay_on_circuit_close`.
 
-        Extracted so the outer method can wrap this in the setnx-based
-        inflight guard via a single `try/finally` without indenting the
-        whole sweep. The lock is the only thing the guard adds.
+        Extracted so the outer method can wrap this in the inflight lock via a
+        single `try/finally` without indenting the whole sweep. The lock is
+        the only thing the guard adds.
         """
         # Explicit mapping takes precedence, RuntimeConfig as fallback
         if service_failure_type_map is not None:
@@ -1963,13 +2181,11 @@ class ReplayService(EventEmitterMixin):
         else:
             failure_type_map = self._load_failure_type_map()
 
-        recovery_lanes = self._resolve_recovery_lanes(service_name, failure_type_map)
-        if recovery_lanes.is_empty:
-            return self._end_recovery_with_no_lane(service_name, failure_type_map)
+        lanes = recovery_lanes(resolve_stored_domain(service_name), failure_type_map)
+        if not lanes:
+            return self._end_recovery_with_no_lane(service_name)
 
-        failure_types = recovery_lanes.mapped_failure_types
-        auto_domain = recovery_lanes.open_circuit_domain
-        declared_lanes = recovery_lanes.declared_lanes
+        event_trigger = sweep_event_trigger(trigger)
 
         # Batch-level governance check (replaces per-item checks)
         governance = self._get_governance().check_all_governance(
@@ -1994,7 +2210,7 @@ class ReplayService(EventEmitterMixin):
                     "service_name": service_name,
                 },
                 event_data={
-                    "trigger": "circuit_close",
+                    "trigger": event_trigger,
                     "service_name": service_name,
                     "block_reason": (
                         governance.block_reason.value
@@ -2016,16 +2232,6 @@ class ReplayService(EventEmitterMixin):
             )
 
         max_replays = self.config["max_replay_attempts"]
-        # One fill lane per selection. Operator-mapped types select by type
-        # alone (unchanged); a handler-declared lane scopes to the closing
-        # service's own domain; the open-circuit lane additionally to
-        # policy-chain captures.
-        lanes: list[_Lane] = [(ft, None, None) for ft in failure_types]
-        lanes.extend(declared_lanes)
-        if auto_domain is not None:
-            lanes.append(
-                (OPEN_CIRCUIT_FAILURE_TYPE, auto_domain, POLICY_CHAIN_CAPTURE_SOURCE)
-            )
         # Lanes are filled into one list and replayed in that order, so a
         # deadline landing mid-list always cuts from the tail — and the
         # open-circuit lane is appended last. Rotating the starting index by
@@ -2056,11 +2262,13 @@ class ReplayService(EventEmitterMixin):
 
         for processed, (_lane_key, entry) in enumerate(selection.selected):
             if deadline is not None and time.monotonic() >= deadline:
-                self._stop_pass_at_deadline(
+                self._stop_pass_at(
                     batch_result, selection, processed, lane_cursors, service_name
                 )
                 break
-            result, cut = self._execute_replay_within(entry.id, deadline)
+            result, cut = self._execute_replay_within(
+                entry.id, deadline, trigger=trigger, entry=entry
+            )
             if cut:
                 # The deadline cut this replay. It goes back to the backlog, not
                 # to review: the entry is already PENDING again (below its
@@ -2068,13 +2276,29 @@ class ReplayService(EventEmitterMixin):
                 # than a whole pass still reaches review at the cap), and it
                 # is left unprocessed so the cursor rolls back to just before
                 # it and the continuation re-selects it first in its lane.
-                self._stop_pass_at_deadline(
+                self._stop_pass_at(
                     batch_result,
                     selection,
                     processed,
                     lane_cursors,
                     service_name,
                     cut_dlq_id=entry.id,
+                )
+                break
+            if _skip_reason(result) == REASON_BREAKER_REFUSED:
+                # The job's own breaker refused the call before it began: the
+                # attempt was given back and the entry is PENDING. The replays
+                # behind it would be refused the same way, so the pass ends
+                # here, like a deadline cut, and the chain pauses before its
+                # next pass instead of spending its budget back to back.
+                self._stop_pass_at(
+                    batch_result,
+                    selection,
+                    processed,
+                    lane_cursors,
+                    service_name,
+                    cut_dlq_id=entry.id,
+                    breaker_refused=True,
                 )
                 break
             batch_result.results.append(result)
@@ -2086,11 +2310,14 @@ class ReplayService(EventEmitterMixin):
             else:
                 batch_result.failed_count += 1
 
-                # Escalate failures to REQUIRES_REVIEW (existing behavior preserved)
+                # Escalate to REQUIRES_REVIEW only a replay whose job ran: a
+                # lost acquisition, a skipped result and a job that never
+                # began never reach here or are excluded, and an entry whose
+                # work may still run is not pending.
                 # TODO: Optimize with bulk_update_status if max_items is increased
                 # significantly. Note: bulk_update_status itself currently iterates
                 # individually — Redis pipeline optimization needed there too.
-                if escalate_failures:
+                if escalate_failures and result.handler_ran:
                     current_entry = self.repository.get_by_id(entry.id)
                     if current_entry and current_entry.status == "pending":
                         self.repository.update_status(
@@ -2112,7 +2339,7 @@ class ReplayService(EventEmitterMixin):
             batch_result,
             time.monotonic() - batch_start,
             extra_event_data={
-                "trigger": "circuit_close",
+                "trigger": event_trigger,
                 "service_name": service_name,
             },
         )
@@ -2122,6 +2349,7 @@ class ReplayService(EventEmitterMixin):
         logger.info(
             "replay_service.circuit_close_replay",
             service_name=service_name,
+            trigger=event_trigger,
             batch_result=batch_result.total,
             success_count=batch_result.success_count,
             failed_count=batch_result.failed_count,

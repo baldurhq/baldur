@@ -490,6 +490,12 @@ class TestConditionalReplayErrorBudgetGate:
                 "_load_failure_type_map",
                 return_value={"test_service": ["TIMEOUT"]},
             ),
+            # A recovery with a lane reaches governance (the lane builder
+            # itself also needs the domain's replay handler).
+            patch(
+                "baldur.services.replay_service.service.recovery_lanes",
+                return_value=[("TIMEOUT", "test_service", None)],
+            ),
             patch.object(
                 ReplayService,
                 "repository",

@@ -63,7 +63,7 @@ class TestDefaultScheduledJobsContract:
     with exactly these names and intervals."""
 
     def test_default_jobs_contract(self):
-        """Exactly eleven jobs, keyed by name, with known intervals."""
+        """Exactly twelve jobs, keyed by name, with known intervals."""
         by_name = {
             name: interval for name, _mod, _attr, interval in _DEFAULT_SCHEDULED_JOBS
         }
@@ -80,6 +80,7 @@ class TestDefaultScheduledJobsContract:
             "auto_promote_eligible",
             "collect_canary_metrics",
             "panic_threshold",
+            "replay_recovery",
         }
         # Daily cadence — 24h in seconds
         assert by_name["daily_report"] == 24 * 60 * 60.0
@@ -101,6 +102,8 @@ class TestDefaultScheduledJobsContract:
         # 766 D3 — two consecutive ticks declare Level 3, so the interval is
         # also half the detection latency.
         assert by_name["panic_threshold"] == 10.0
+        # 807 D6 - the recovery tick's leader path runs at the tick's cadence.
+        assert by_name["replay_recovery"] == 60.0
 
     def test_panic_threshold_job_is_pro_and_entitlement_gated(self):
         """Automatic Level 3 escalation is a licensed PRO capability.

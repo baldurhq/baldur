@@ -28,7 +28,6 @@ UNIT_TEST_GUIDELINES.md:
 from __future__ import annotations
 
 import asyncio
-import functools
 import threading
 import time
 import uuid
@@ -301,9 +300,9 @@ class TestFunctionReplayHandlerBehavior:
         replayed_name, call = protect.call_args.args
         options = protect.call_args.kwargs
         assert replayed_name == name
-        assert isinstance(call, functools.partial)
-        assert call.func is summarize.__wrapped__
-        assert call.keywords == {"doc_id": "doc-9"}
+        # The call protect runs is the undecorated function with the stored
+        # arguments: running it bypasses the (patched) protection entirely.
+        assert call() == "doc-9"
         assert {key: options[key] for key in options if key != "context"} == {
             "retry": False,
             "circuit_breaker": False,
@@ -589,12 +588,19 @@ class TestDeclaredReplayLaneBehavior:
         _arm_recording_job(name, done)
         _park(repo, name, "doc-only-declared")
 
-        with patch.object(
-            ReplayService,
-            "_resolve_open_circuit_replay_domain",
-            autospec=True,
-            return_value=None,
-        ):
+        from baldur.models.dlq import OPEN_CIRCUIT_FAILURE_TYPE
+        from baldur.services.replay_service import service as service_module
+
+        real_lanes = service_module.recovery_lanes
+
+        def declared_only(domain, failure_type_map):
+            return [
+                lane
+                for lane in real_lanes(domain, failure_type_map)
+                if lane[0] != OPEN_CIRCUIT_FAILURE_TYPE
+            ]
+
+        with patch.object(service_module, "recovery_lanes", side_effect=declared_only):
             result = service.replay_on_circuit_close(name, service_failure_type_map={})
 
         assert done == ["doc-only-declared"]

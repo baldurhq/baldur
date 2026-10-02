@@ -101,7 +101,7 @@ entries:
   - {module: "replay_automation.py", class: "ReplayAutomationSettings", field: "adaptive_enabled", default: false, tier: "Core", env_var: "BALDUR_REPLAY_AUTOMATION_ADAPTIVE_ENABLED"}
   - {module: "replay_automation.py", class: "ReplayAutomationSettings", field: "priority_enabled", default: false, tier: "Core", env_var: "BALDUR_REPLAY_AUTOMATION_PRIORITY_ENABLED"}
   - {module: "replay_automation.py", class: "ReplayAutomationSettings", field: "on_recovery_enabled", default: true, tier: "Core", env_var: "BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_ENABLED"}
-  - {module: "replay_automation.py", class: "ReplayAutomationSettings", field: "traffic_aware_enabled", default: false, tier: "Core", env_var: "BALDUR_REPLAY_AUTOMATION_TRAFFIC_AWARE_ENABLED"}
+  - {module: "replay_automation.py", class: "ReplayAutomationSettings", field: "recovery_trial_enabled", default: true, tier: "Core", env_var: "BALDUR_REPLAY_AUTOMATION_RECOVERY_TRIAL_ENABLED"}
   - {module: "resilient_recorder.py", class: "ResilientRecorderSettings", field: "enable_background_flush", default: true, tier: "Core", env_var: "BALDUR_RESILIENT_RECORDER_ENABLE_BACKGROUND_FLUSH"}
   - {module: "resilient_recorder.py", class: "ResilientRecorderSettings", field: "enable_syslog_fallback", default: true, tier: "Core", env_var: "BALDUR_RESILIENT_RECORDER_ENABLE_SYSLOG_FALLBACK"}
   - {module: "resource_guard.py", class: "ResourceGuardSettings", field: "resource_check_enabled", default: true, tier: "Core", env_var: "BALDUR_RESOURCE_GUARD_RESOURCE_CHECK_ENABLED"}

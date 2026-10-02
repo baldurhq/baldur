@@ -111,10 +111,11 @@ class TestTruncateGateBehavior:
 
 
 class TestExecuteReplayTruncateGate:
-    """The gate runs BEFORE handler.replay and emits DLQ_REPLAY_BLOCKED on block."""
+    """The gate runs BEFORE the entry is acquired and emits DLQ_REPLAY_BLOCKED on block."""
 
     def _build_service(self, acquired_op: FailedOperationData):
         svc = ReplayService(repository=MagicMock())
+        svc.repository.get_by_id.return_value = acquired_op
         svc.repository.try_acquire_for_replay.return_value = acquired_op
         svc._event_bus = MagicMock()
         return svc
@@ -137,9 +138,11 @@ class TestExecuteReplayTruncateGate:
         ):
             result = svc._execute_replay(dlq_id=op.id)
 
-        # Customer handler never invoked.
+        # Customer handler never invoked, and the entry is never taken: it
+        # stays PENDING with no attempt spent.
         handler.replay.assert_not_called()
         handler.can_replay.assert_not_called()
+        svc.repository.try_acquire_for_replay.assert_not_called()
 
         # Result is a skip with the gate reason.
         assert isinstance(result, ReplayResult)
@@ -182,6 +185,7 @@ class TestExecuteReplayTruncateGate:
         svc = self._build_service(op)
 
         handler = MagicMock()
+        handler.can_replay.return_value = (True, "")
         handler.replay.return_value = ReplayResult.succeeded(op.id, "ok")
         with (
             patch(

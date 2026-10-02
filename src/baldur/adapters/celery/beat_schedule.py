@@ -293,12 +293,6 @@ _SCHEDULE_MODULES = [
         "learning insights lane (Dormant)",
     ),
     (
-        "traffic_aware",
-        "baldur.tasks.traffic_aware_replay",
-        "get_traffic_aware_beat_schedule",
-        "traffic-aware replay",
-    ),
-    (
         "canary_watchdog",
         "baldur.tasks.canary_watchdog",
         "get_canary_watchdog_beat_schedule",
@@ -424,7 +418,6 @@ def get_baldur_beat_schedule(
     include_cleanup: bool = True,
     include_intelligence: bool = True,
     include_compliance: bool = True,
-    include_traffic_aware: bool = True,
     include_canary_watchdog: bool = True,
     include_governance: bool = True,
     include_xtest_cleanup: bool = True,
@@ -443,7 +436,6 @@ def get_baldur_beat_schedule(
         include_cleanup: Include Cleanup Lane tasks
         include_intelligence: Include Intelligence Lane tasks
         include_compliance: Include Compliance Lane tasks
-        include_traffic_aware: Include Traffic-Aware Replay tasks
         include_canary_watchdog: Include Canary Watchdog tasks
         include_governance: Include Governance tasks (emergency mode expiry)
         include_xtest_cleanup: Include X-Test Artifact Cleanup tasks
@@ -490,7 +482,6 @@ def get_baldur_beat_schedule(
         "cleanup": include_cleanup,
         "intelligence": include_intelligence,
         "compliance": include_compliance,
-        "traffic_aware": include_traffic_aware,
         "canary_watchdog": include_canary_watchdog,
         "governance": include_governance,
         "xtest_cleanup": include_xtest_cleanup,
@@ -550,7 +541,6 @@ def configure_baldur_celery(
     include_cleanup: bool = True,
     include_intelligence: bool = True,
     include_compliance: bool = True,
-    include_traffic_aware: bool = True,
     include_canary_watchdog: bool = True,
     include_governance: bool = True,
     include_xtest_cleanup: bool = True,
@@ -599,7 +589,6 @@ def configure_baldur_celery(
         include_cleanup=include_cleanup,
         include_intelligence=include_intelligence,
         include_compliance=include_compliance,
-        include_traffic_aware=include_traffic_aware,
         include_canary_watchdog=include_canary_watchdog,
         include_governance=include_governance,
         include_xtest_cleanup=include_xtest_cleanup,
@@ -775,14 +764,10 @@ def register_all_tasks_with_celery(app) -> None:
     from baldur.tasks.intelligence_tasks import (
         register_intelligence_tasks_with_celery,
     )
-    from baldur.tasks.traffic_aware_replay import (
-        register_traffic_aware_tasks_with_celery,
-    )
 
     register_chaos_tasks(app)
     register_intelligence_tasks_with_celery(app)
     register_compliance_tasks_with_celery(app)
-    register_traffic_aware_tasks_with_celery(app)
 
     # 599 D10 — private-lane class-based task registration (saga precedent
     # for the lane shape; @shared_task modules self-register on import and

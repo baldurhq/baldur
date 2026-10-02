@@ -73,6 +73,26 @@ class SuccessHandler(ReplayHandler):
 
 
 @pytest.fixture(autouse=True)
+def _lanes_are_the_mapped_types():
+    """Reduce the sweep's lane set to the mapped types of the swept domain.
+
+    What is under test here is how a pass selects, replays and reports, not
+    which lanes a domain gets (pinned with the lane builder itself, where a
+    mapped type also needs the domain's replay handler).
+    """
+
+    def _lanes(domain, failure_type_map):
+        return [
+            (ft, domain, None) for ft in dict.fromkeys(failure_type_map.get(domain, []))
+        ]
+
+    with patch(
+        "baldur.services.replay_service.service.recovery_lanes", side_effect=_lanes
+    ):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _clear_handler_registry():
     _replay_handlers.clear()
     yield
@@ -268,6 +288,8 @@ class TestExecuteReplayTypeBehavior:
         self, mock_handler_cls, replay_service, mock_repository
     ):
         """on_replay_blocked called when max attempts exceeded."""
+        # The handler is asked before acquisition: register one that allows.
+        _register_handler(SuccessHandler())
         mock_repository.try_acquire_for_replay.return_value = None
         existing = FakeFailedOperationData(id=1, status="pending")
         mock_repository.get_by_id.return_value = existing

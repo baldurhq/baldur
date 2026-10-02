@@ -18,6 +18,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 from structlog.testing import capture_logs
 
 from baldur.adapters.cache.memory_adapter import InMemoryCacheAdapter
@@ -59,6 +60,24 @@ def _page_selector(pages: list) -> MagicMock:
         return remaining.pop(0) if remaining else _page()
 
     return MagicMock(wraps=_next)
+
+
+@pytest.fixture(autouse=True)
+def _lanes_are_the_mapped_types():
+    """Reduce the sweep's lane set to the mapped types of the swept domain.
+
+    What is under test here is how a pass counts and reports what it did, not
+    which lanes a domain gets (the replay handler and open-circuit lanes are
+    pinned with the lane builder itself).
+    """
+
+    def _lanes(domain, failure_type_map):
+        return [(ft, domain, None) for ft in failure_type_map.get(domain, [])]
+
+    with patch(
+        "baldur.services.replay_service.service.recovery_lanes", side_effect=_lanes
+    ):
+        yield
 
 
 def _capped_service() -> ReplayService:

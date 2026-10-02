@@ -164,18 +164,6 @@ class ReplayAutomationConfigSerializer(ApplyStrategyMixin):
         help_text="Maximum self-continuations of one on-recovery sweep",
     )
 
-    # Traffic-Aware Replay
-    traffic_aware_enabled = serializers.BooleanField(
-        required=False,
-        help_text="Enable traffic-aware replay",
-    )
-    traffic_aware_max_items = serializers.IntegerField(
-        required=False,
-        min_value=1,
-        max_value=200,
-        help_text="Maximum items for traffic-aware replay",
-    )
-
     # Adaptive Mode
     adaptive_enabled = serializers.BooleanField(
         required=False,

@@ -457,7 +457,6 @@ class TestAuditFlushBeatRegistrationParity:
                 include_cleanup=False,
                 include_intelligence=False,
                 include_compliance=False,
-                include_traffic_aware=False,
                 include_canary_watchdog=False,
                 include_governance=False,
                 include_xtest_cleanup=False,
@@ -466,6 +465,7 @@ class TestAuditFlushBeatRegistrationParity:
                 include_postmortem=False,
                 include_dlq_maintenance=False,
                 include_config_apply=False,
+                include_recovery=False,
                 include_legacy=False,
             )
 
@@ -499,7 +499,6 @@ class TestAuditFlushBeatRegistrationParity:
                 include_cleanup=False,
                 include_intelligence=False,
                 include_compliance=False,
-                include_traffic_aware=False,
                 include_canary_watchdog=False,
                 include_governance=False,
                 include_xtest_cleanup=False,
@@ -508,6 +507,7 @@ class TestAuditFlushBeatRegistrationParity:
                 include_postmortem=False,
                 include_dlq_maintenance=False,
                 include_config_apply=False,
+                include_recovery=False,
                 include_legacy=False,
                 # include_audit_flush=None resolves from the gate (OFF)
             )

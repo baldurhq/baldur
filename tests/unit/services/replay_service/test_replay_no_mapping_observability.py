@@ -19,7 +19,9 @@ Parametrized over the 3 upstream map shapes that converge on this branch:
 - foreign service mapped, target service absent
 - target service mapped but value is an empty list
 
-Negative control: a populated map falls through to the governance check.
+Negative control: a domain with a replay handler falls through to the
+governance check; a mapping without one does not (a mapped lane replays through
+the domain's handler).
 
 809 D4 — the branch is loud only when work is left behind: nothing parked
 under the name ends it with one DEBUG line and no blocked channel; work parked
@@ -42,11 +44,18 @@ from baldur.interfaces.repositories import FailedOperationRepository
 from baldur.services.event_bus.bus.event_bus import BaldurEventBus
 from baldur.services.event_bus.bus.event_types import EventType
 from baldur.services.replay_service import ReplayService
+from baldur.services.replay_service.handlers import (
+    ReplayHandler,
+    _replay_handlers,
+    register_replay_handler,
+)
+from baldur.services.replay_service.models import ReplayResult
 from baldur.services.replay_service.service import (
     _REMEDIATION_DOMAIN_NOT_ADDRESSABLE,
     _REMEDIATION_NO_REPLAY_HANDLER,
     REASON_DOMAIN_NOT_ADDRESSABLE,
     REASON_NO_REPLAY_HANDLER,
+    recovery_lanes,
 )
 from baldur.utils.domain_validation import FALLBACK_DOMAIN, resolve_stored_domain
 
@@ -271,19 +280,45 @@ class TestReplayNoMappingObservabilityBehavior:
 
 
 # =============================================================================
-# Negative control — populated map flows through to governance
+# Negative control — a domain with a replay handler flows through to governance
 # =============================================================================
 
 
+class _PaymentHandler(ReplayHandler):
+    """A replay handler for `payment_api`: the precondition of every lane."""
+
+    @property
+    def domain(self) -> str:
+        return "payment_api"
+
+    def can_replay(self, failed_op) -> tuple[bool, str]:
+        return True, ""
+
+    def replay(self, failed_op) -> ReplayResult:
+        return ReplayResult.succeeded(failed_op.id)
+
+
+@pytest.fixture
+def payment_handler():
+    saved = dict(_replay_handlers)
+    _replay_handlers.clear()
+    register_replay_handler(_PaymentHandler())
+    yield
+    _replay_handlers.clear()
+    _replay_handlers.update(saved)
+
+
 class TestReplayNoMappingObservabilityNegativeControlBehavior:
-    """Populated map: misconfig branch is NOT taken; control falls through."""
+    """A handler gives the domain lanes: the no-lane branch is NOT taken."""
 
     @pytest.fixture(autouse=True)
     def _require_pro(self):
         pytest.importorskip("baldur_pro")
 
-    def test_populated_map_does_not_emit_misconfig_log(self, replay_service):
-        """No `replay_service.circuit_close_replay_blocked` log when map is populated."""
+    def test_handler_domain_does_not_emit_the_no_lane_log(
+        self, replay_service, payment_handler
+    ):
+        """No `replay_service.circuit_close_replay_blocked` log with a handler."""
         with (
             patch(
                 "baldur_pro.services.governance.checks.check_all_governance",
@@ -308,8 +343,10 @@ class TestReplayNoMappingObservabilityNegativeControlBehavior:
         ]
         assert misconfig_logs == []
 
-    def test_populated_map_does_not_call_misconfig_audit_helper(self, replay_service):
-        """log_dlq_replay_blocked_audit is NOT called on the populated-map path."""
+    def test_handler_domain_does_not_call_the_blocked_audit_helper(
+        self, replay_service, payment_handler
+    ):
+        """log_dlq_replay_blocked_audit is NOT called when the domain has lanes."""
         with (
             patch(
                 "baldur_pro.services.governance.checks.check_all_governance",
@@ -328,8 +365,10 @@ class TestReplayNoMappingObservabilityNegativeControlBehavior:
 
         mock_audit.assert_not_called()
 
-    def test_populated_map_invokes_governance_check(self, replay_service):
-        """Populated map proceeds past the misconfig early-return into governance."""
+    def test_handler_domain_invokes_governance_check(
+        self, replay_service, payment_handler
+    ):
+        """A domain with lanes proceeds past the no-lane early-return into governance."""
         with (
             patch(
                 "baldur_pro.services.governance.checks.check_all_governance",
@@ -348,6 +387,24 @@ class TestReplayNoMappingObservabilityNegativeControlBehavior:
 
         mock_governance.assert_called_once()
 
+    def test_a_mapping_without_a_handler_still_takes_the_no_lane_branch(
+        self, replay_service
+    ):
+        """A mapped lane replays through the domain's handler: without one the
+        mapping gives no lane, and the parked work is reported as such."""
+        with (
+            patch(
+                "baldur.services.replay_service.service.log_dlq_replay_blocked_audit"
+            ) as mock_audit,
+        ):
+            replay_service.replay_on_circuit_close(
+                service_name="payment_api",
+                service_failure_type_map={"payment_api": ["PG_TIMEOUT"]},
+            )
+
+        mock_audit.assert_called_once()
+        assert mock_audit.call_args.kwargs["reason"] == REASON_NO_REPLAY_HANDLER
+
 
 # =============================================================================
 # Behavior — duplicate failure types (D5 dedup interaction)
@@ -355,33 +412,15 @@ class TestReplayNoMappingObservabilityNegativeControlBehavior:
 
 
 class TestReplayNoMappingDedupBehavior:
-    """Order-preserving dedup at the operator boundary still skips misconfig branch."""
+    """Order-preserving dedup at the operator boundary."""
 
-    @pytest.fixture(autouse=True)
-    def _require_pro(self):
-        pytest.importorskip("baldur_pro")
+    def test_duplicate_failure_types_give_one_lane(self, payment_handler):
+        """`["TIMEOUT", "TIMEOUT"]` dedups to one mapped lane, not two."""
+        lanes = recovery_lanes("payment_api", {"payment_api": ["TIMEOUT", "TIMEOUT"]})
 
-    def test_duplicate_failure_types_do_not_collapse_to_empty(self, replay_service):
-        """`["TIMEOUT", "TIMEOUT"]` dedups to non-empty → misconfig branch NOT taken."""
-        with (
-            patch(
-                "baldur_pro.services.governance.checks.check_all_governance",
-            ) as mock_governance,
-            patch(
-                "baldur.services.replay_service.service.log_dlq_replay_blocked_audit"
-            ) as mock_audit,
-        ):
-            mock_governance.return_value = MagicMock(
-                allowed=False, block_reason=None, block_message="stub"
-            )
-            replay_service.replay_on_circuit_close(
-                service_name="payment_api",
-                service_failure_type_map={"payment_api": ["TIMEOUT", "TIMEOUT"]},
-            )
-
-        # Misconfig audit NOT called — governance check IS called.
-        mock_audit.assert_not_called()
-        mock_governance.assert_called_once()
+        assert [lane for lane in lanes if lane[0] == "TIMEOUT"] == [
+            ("TIMEOUT", "payment_api", None)
+        ]
 
 
 # =============================================================================

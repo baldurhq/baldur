@@ -3504,6 +3504,16 @@ _DEFAULT_SCHEDULED_JOBS: tuple[tuple[str, str, str, float], ...] = (
         "_synthetic_panic_threshold_tick",
         10.0,
     ),
+    # 807 D6 - the recovery tick's leader path, for deployments that run
+    # Celery workers without beat. The job only queues the tick, off the
+    # scheduler thread; the trials run on a dlq_processing worker. Cadence is
+    # the tick's own (RECOVERY_TICK_SECONDS).
+    (
+        "replay_recovery",
+        "baldur.services",
+        "_synthetic_replay_recovery_dispatch",
+        60.0,
+    ),
 )
 
 
@@ -3665,6 +3675,8 @@ def _resolve_job_callable(module_path: str, attr: str) -> Callable[[], Any] | No
         return _build_config_apply_callable()
     if attr == "_synthetic_panic_threshold_tick":
         return _build_panic_threshold_callable()
+    if attr == "_synthetic_replay_recovery_dispatch":
+        return _build_replay_recovery_dispatch_callable()
 
     try:
         mod = importlib.import_module(module_path)
@@ -3711,6 +3723,54 @@ def _build_panic_threshold_callable() -> Callable[[], Any]:
         return get_panic_threshold_monitor().tick()
 
     _tick.__name__ = "panic_threshold_tick"
+    return _tick
+
+
+# Name of the thread that queues one recovery tick for the leader scheduler.
+_REPLAY_RECOVERY_DISPATCH_THREAD_NAME = "baldur-replay-recovery-dispatch"
+
+
+def _build_replay_recovery_dispatch_callable() -> Callable[[], Any]:
+    """Return a zero-arg callable that queues the recovery tick off-thread.
+
+    The scheduler thread is watched with a staleness threshold of seconds,
+    and the dispatch can wait on the DLQ store, the worker probe and the
+    broker. So the tick never blocks: while the previous dispatch thread is
+    alive it returns; otherwise it starts a daemon thread that runs
+    ``dispatch_recovery_tick`` and returns at once. At most one dispatch
+    thread is alive per process.
+    """
+    import contextvars
+
+    lock = fork_safe_lock()
+    holder: dict[str, threading.Thread | None] = {"thread": None}
+
+    def _dispatch() -> None:
+        try:
+            from baldur.services.replay_service.recovery import dispatch_recovery_tick
+
+            outcome = dispatch_recovery_tick()
+            logger.debug("scheduler.replay_recovery_dispatched", outcome=outcome)
+        except Exception as e:
+            logger.debug("scheduler.replay_recovery_dispatch_failed", error=e)
+
+    def _tick() -> str:
+        with lock:
+            running = holder["thread"]
+            if running is not None and running.is_alive():
+                return "dispatch_running"
+            context = contextvars.copy_context()
+            thread = threading.Thread(
+                target=context.run,
+                args=(_dispatch,),
+                name=_REPLAY_RECOVERY_DISPATCH_THREAD_NAME,
+                daemon=True,
+            )
+            holder["thread"] = thread
+        thread.start()
+        return "dispatch_started"
+
+    _tick.__name__ = "replay_recovery_dispatch_tick"
     return _tick
 
 

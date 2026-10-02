@@ -547,12 +547,22 @@ class ManualControlMixin:
         trigger_replay: bool,
         expires_at: datetime | None = None,
     ) -> CircuitBreakerResult:
-        """Handle a successful force close."""
+        """Handle a successful force close.
+
+        A close on a breaker already CLOSED emits no state change, so no
+        CLOSED event carries the operator's replay request: with
+        ``trigger_replay`` the sweep is dispatched here instead, as the
+        operator's own — the chain a force-close on an OPEN breaker would have
+        started through its CLOSED event. Without it the operator's pin would
+        hold every automatic replay of the domain while nothing drained.
+        """
         if previous_state == new_state:
             logger.info(
                 "circuit_breaker.circuit_already_closed",
                 service_name=service_name,
             )
+            if trigger_replay:
+                self._dispatch_operator_replay(service_name)
             return CircuitBreakerResult.succeeded(
                 service_name=service_name,
                 previous_state=previous_state,
@@ -596,6 +606,33 @@ class ManualControlMixin:
             message=f"Circuit breaker closed for {service_name}",
             expires_at=expires_at,
         )
+
+    @staticmethod
+    def _dispatch_operator_replay(service_name: str) -> None:
+        """Queue the recovery sweep the operator asked for (fail-open).
+
+        The close itself already succeeded; a dispatch that cannot be made is
+        reported by the dispatch path (its arming ledger and logs), never by
+        failing the operator's close.
+        """
+        try:
+            from baldur.interfaces.repositories import ResolutionTrigger
+            from baldur.services.replay_service.recovery import (
+                dispatch_recovery_sweep,
+            )
+
+            dispatch_recovery_sweep(
+                service_name,
+                trigger=ResolutionTrigger.AUTO_REPLAY_CIRCUIT_CLOSE,
+                escalate_failures=True,
+                operator_requested=True,
+            )
+        except Exception as e:
+            logger.warning(
+                "circuit_breaker.operator_replay_dispatch_failed",
+                service_name=service_name,
+                error=str(e),
+            )
 
     def _log_state_change_audit(
         self,

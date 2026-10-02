@@ -78,15 +78,15 @@ class TestDlqMaintenanceBeatScheduleContract:
         schedule = get_dlq_maintenance_beat_schedule()
         assert schedule["cleanup-resolved-dlq-entries"]["kwargs"]["days_old"] == 30
 
-    def test_pro_schedule_has_exactly_four_entries(self, mock_pro_tier):
-        """With PRO installed the lane composes all 4 tasks."""
+    def test_pro_schedule_has_exactly_five_entries(self, mock_pro_tier):
+        """With PRO installed the lane composes all 5 tasks."""
         from baldur.celery_tasks.dlq_tasks import get_dlq_maintenance_beat_schedule
 
         schedule = get_dlq_maintenance_beat_schedule()
-        assert len(schedule) == 4
+        assert len(schedule) == 5
 
-    def test_oss_schedule_contains_only_the_runnable_entry(self, mock_oss_tier):
-        """Without PRO only the OSS-runnable entry composes.
+    def test_oss_schedule_contains_only_the_runnable_entries(self, mock_oss_tier):
+        """Without PRO only the OSS-runnable entries compose.
 
         The other three resolve DLQ backing through a PRO-only registry slot, so
         scheduling them on an OSS-only install would fail on cadence forever.
@@ -94,16 +94,23 @@ class TestDlqMaintenanceBeatScheduleContract:
         from baldur.celery_tasks.dlq_tasks import get_dlq_maintenance_beat_schedule
 
         schedule = get_dlq_maintenance_beat_schedule()
-        assert set(schedule) == {"release-stale-replaying-entries"}
+        assert set(schedule) == {
+            "release-stale-replaying-entries",
+            "recover-parked-jobs",
+        }
 
     @pytest.mark.parametrize(
         ("tier_fixture", "expected_entries"),
         [
-            ("mock_oss_tier", {"release-stale-replaying-entries"}),
+            (
+                "mock_oss_tier",
+                {"release-stale-replaying-entries", "recover-parked-jobs"},
+            ),
             (
                 "mock_pro_tier",
                 {
                     "release-stale-replaying-entries",
+                    "recover-parked-jobs",
                     "evict-overflow-dlq-entries",
                     "cleanup-resolved-dlq-entries",
                     "cleanup-compressed-dlq-entries",

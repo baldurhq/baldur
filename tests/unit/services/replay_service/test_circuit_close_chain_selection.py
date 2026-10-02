@@ -40,6 +40,11 @@ from baldur.models.dlq import OPEN_CIRCUIT_FAILURE_TYPE, POLICY_CHAIN_CAPTURE_SO
 from baldur.models.governance import GovernanceCheckResult
 from baldur.services.event_bus.bus.event_bus import BaldurEventBus
 from baldur.services.replay_service import ReplayService
+from baldur.services.replay_service.handlers import (
+    ReplayHandler,
+    _replay_handlers,
+    register_replay_handler,
+)
 from baldur.services.replay_service.models import ReplayResult
 from baldur.services.replay_service.service import (
     REASON_CIRCUIT_REOPENED,
@@ -74,6 +79,30 @@ def _entry(entry_id: str, *, offset: int, domain: str = SERVICE) -> FailedOperat
         metadata={"source": POLICY_CHAIN_CAPTURE_SOURCE},
         created_at=BASE + timedelta(seconds=offset),
     )
+
+
+class _ServiceHandler(ReplayHandler):
+    """A replay handler for SERVICE: every automatic lane needs one."""
+
+    @property
+    def domain(self) -> str:
+        return SERVICE
+
+    def can_replay(self, failed_op) -> tuple[bool, str]:
+        return True, ""
+
+    def replay(self, failed_op) -> ReplayResult:
+        return ReplayResult.succeeded(failed_op.id, "done")
+
+
+@pytest.fixture(autouse=True)
+def _service_has_a_replay_handler():
+    saved = dict(_replay_handlers)
+    _replay_handlers.clear()
+    register_replay_handler(_ServiceHandler())
+    yield
+    _replay_handlers.clear()
+    _replay_handlers.update(saved)
 
 
 def _lane_pool(prefix: str, count: int, *, domain: str = SERVICE):
@@ -167,9 +196,9 @@ class TestCircuitCloseLaneFillBehavior:
         """Per-type fairness: a lane with a deep backlog must not crowd out
         the others in the first round."""
         pools = {
-            ("TYPE_A", None): _lane_pool("a", 50),
-            ("TYPE_B", None): _lane_pool("b", 50),
-            ("TYPE_C", None): _lane_pool("c", 50),
+            ("TYPE_A", SERVICE): _lane_pool("a", 50),
+            ("TYPE_B", SERVICE): _lane_pool("b", 50),
+            ("TYPE_C", SERVICE): _lane_pool("c", 50),
         }
         repo = _paging_repository(pools)
         svc = _service(repo)
@@ -180,13 +209,14 @@ class TestCircuitCloseLaneFillBehavior:
             service_failure_type_map={SERVICE: ["TYPE_A", "TYPE_B", "TYPE_C"]},
         )
 
-        # divmod(10, 3) = (3, 1): the remainder goes to the leading lane.
-        assert _limits(repo)[:3] == [4, 3, 3]
+        # Three mapped lanes plus the open-circuit lane the domain's handler
+        # brings: divmod(10, 4) = (2, 2), the remainder to the leading lanes.
+        assert _limits(repo)[:4] == [3, 3, 2, 2]
 
     def test_share_an_empty_lane_did_not_use_is_re_offered(self):
         """Fairness is about contention. A lane whose pool is empty is not
         contending, so leaving its share unspent would just park work."""
-        pools = {("TYPE_D", None): _lane_pool("d", 300)}
+        pools = {("TYPE_D", SERVICE): _lane_pool("d", 300)}
         repo = _paging_repository(pools)
         svc = _service(repo)
 
@@ -203,7 +233,7 @@ class TestCircuitCloseLaneFillBehavior:
 
     def test_re_offered_share_never_re_selects_the_entries_already_taken(self):
         """The second fill round hands the lane its own cursor back."""
-        pools = {("TYPE_D", None): _lane_pool("d", 300)}
+        pools = {("TYPE_D", SERVICE): _lane_pool("d", 300)}
         repo = _paging_repository(pools)
         svc = _service(repo)
 
@@ -222,8 +252,8 @@ class TestCircuitCloseLaneFillBehavior:
     def test_a_lane_that_returned_less_than_its_quota_is_not_re_offered(self):
         """It has nothing left; asking again is a wasted query per pass."""
         pools = {
-            ("TYPE_A", None): _lane_pool("a", 1),
-            ("TYPE_B", None): _lane_pool("b", 50),
+            ("TYPE_A", SERVICE): _lane_pool("a", 1),
+            ("TYPE_B", SERVICE): _lane_pool("b", 50),
         }
         repo = _paging_repository(pools)
         svc = _service(repo)
@@ -235,15 +265,15 @@ class TestCircuitCloseLaneFillBehavior:
         )
 
         lanes = _lanes_asked(repo)
-        assert lanes.count(("TYPE_A", None)) == 1
-        assert lanes.count(("TYPE_B", None)) == 2
+        assert lanes.count(("TYPE_A", SERVICE)) == 1
+        assert lanes.count(("TYPE_B", SERVICE)) == 2
 
     @pytest.mark.parametrize("continuation", [0, 1, 2, 3])
     def test_continuation_counter_rotates_which_lane_leads_the_fill(self, continuation):
         """A deadline landing mid-list always cuts from the tail, so a fixed
         order would starve the same lane on every pass of a chain."""
         types = ["TYPE_A", "TYPE_B", "TYPE_C", "TYPE_D"]
-        pools = {(ft, None): _lane_pool(ft.lower(), 50) for ft in types}
+        pools = {(ft, SERVICE): _lane_pool(ft.lower(), 50) for ft in types}
         repo = _paging_repository(pools)
         svc = _service(repo)
 
@@ -254,11 +284,11 @@ class TestCircuitCloseLaneFillBehavior:
             continuation=continuation,
         )
 
-        assert _lanes_asked(repo)[0] == (types[continuation % len(types)], None)
+        assert _lanes_asked(repo)[0] == (types[continuation % len(types)], SERVICE)
 
     def test_every_lane_leads_exactly_once_over_a_full_rotation(self):
         types = ["TYPE_A", "TYPE_B", "TYPE_C", "TYPE_D"]
-        pools = {(ft, None): _lane_pool(ft.lower(), 50) for ft in types}
+        pools = {(ft, SERVICE): _lane_pool(ft.lower(), 50) for ft in types}
         leaders = []
 
         for continuation in range(len(types)):
@@ -279,7 +309,7 @@ class TestCircuitCloseLaneFillBehavior:
         spend a whole pass in selection; a pass that reaches its wall clock
         inside a selection call ends by being killed rather than returning."""
         types = ["TYPE_A", "TYPE_B", "TYPE_C"]
-        pools = {(ft, None): _lane_pool(ft.lower(), 50) for ft in types}
+        pools = {(ft, SERVICE): _lane_pool(ft.lower(), 50) for ft in types}
         clock = _Clock()
         repo = _paging_repository(pools)
         svc = _service(repo)
@@ -300,7 +330,7 @@ class TestCircuitCloseLaneFillBehavior:
                 deadline=clock.now + 1.5,
             )
 
-        assert _lanes_asked(repo) == [("TYPE_A", None), ("TYPE_B", None)]
+        assert _lanes_asked(repo) == [("TYPE_A", SERVICE), ("TYPE_B", SERVICE)]
         assert result.capped is True
 
 
@@ -313,8 +343,8 @@ class TestDeadlineCursorRollbackBehavior:
     """A pass that stops mid-replay must not step over what it left PENDING."""
 
     def test_rollback_names_each_lane_s_last_processed_entry(self):
-        lane_a = _lane_key("TYPE_A", None)
-        lane_b = _lane_key("TYPE_B", None)
+        lane_a = _lane_key("TYPE_A", SERVICE)
+        lane_b = _lane_key("TYPE_B", SERVICE)
         entries = _lane_pool("a", 3) + _lane_pool("b", 3)
         selection = _LaneSelection(
             selected=[(lane_a, e) for e in entries[:3]]
@@ -335,8 +365,8 @@ class TestDeadlineCursorRollbackBehavior:
     def test_a_lane_that_processed_nothing_keeps_the_cursor_it_came_in_with(self):
         """Rolling it to the position the *selection* reached would skip the
         entries that selection never replayed."""
-        lane_a = _lane_key("TYPE_A", None)
-        lane_b = _lane_key("TYPE_B", None)
+        lane_a = _lane_key("TYPE_A", SERVICE)
+        lane_b = _lane_key("TYPE_B", SERVICE)
         entries = _lane_pool("a", 2) + _lane_pool("b", 2)
         selection = _LaneSelection(
             selected=[(lane_a, e) for e in entries[:2]]
@@ -355,7 +385,7 @@ class TestDeadlineCursorRollbackBehavior:
         has no unprocessed tail to protect. Rolling ITS cursor back makes every
         deadline-stopped pass re-cross the same prefix from the same place —
         the permanent starvation the cursor exists to end."""
-        filled = _lane_key("TYPE_A", None)
+        filled = _lane_key("TYPE_A", SERVICE)
         crossed = _lane_key(OPEN_CIRCUIT_FAILURE_TYPE, SERVICE)
         entries = _lane_pool("a", 2)
         selection = _LaneSelection(
@@ -369,19 +399,19 @@ class TestDeadlineCursorRollbackBehavior:
         assert rolled[crossed] == "9.000000|prefix-end"
 
     def test_rollback_does_not_mutate_the_carried_cursors(self):
-        carried = {_lane_key("TYPE_A", None): "carried"}
+        carried = {_lane_key("TYPE_A", SERVICE): "carried"}
         selection = _LaneSelection(
-            selected=[(_lane_key("TYPE_A", None), _entry("a", offset=1))]
+            selected=[(_lane_key("TYPE_A", SERVICE), _entry("a", offset=1))]
         )
 
         ReplayService._roll_back_lane_cursors(selection, 1, carried)
 
-        assert carried == {_lane_key("TYPE_A", None): "carried"}
+        assert carried == {_lane_key("TYPE_A", SERVICE): "carried"}
 
     def test_deadline_stop_reports_only_what_it_processed(self):
         """The completion event and the daily report must not count entries
         the pass never touched."""
-        pools = {("TYPE_A", None): _lane_pool("a", 100)}
+        pools = {("TYPE_A", SERVICE): _lane_pool("a", 100)}
         clock = _Clock()
         repo = _paging_repository(pools)
         svc = _service(repo, clock)
@@ -399,7 +429,7 @@ class TestDeadlineCursorRollbackBehavior:
         assert result.capped is True
 
     def test_next_pass_resumes_at_the_first_entry_the_deadline_left_behind(self):
-        pools = {("TYPE_A", None): _lane_pool("a", 100)}
+        pools = {("TYPE_A", SERVICE): _lane_pool("a", 100)}
         clock = _Clock()
         repo = _paging_repository(pools)
         svc = _service(repo, clock)
@@ -427,7 +457,7 @@ class TestDeadlineCursorRollbackBehavior:
     def test_a_pass_that_ran_to_completion_carries_the_selection_cursor(self):
         """Nothing was left behind, so the cursor may advance to the end of
         what the pass selected."""
-        pools = {("TYPE_A", None): _lane_pool("a", 5)}
+        pools = {("TYPE_A", SERVICE): _lane_pool("a", 5)}
         repo = _paging_repository(pools)
         svc = _service(repo)
 
@@ -437,9 +467,9 @@ class TestDeadlineCursorRollbackBehavior:
             service_failure_type_map={SERVICE: ["TYPE_A"]},
         )
 
-        lane = _lane_key("TYPE_A", None)
+        lane = _lane_key("TYPE_A", SERVICE)
         assert decode_replay_cursor(result.lane_cursors[lane]) == (
-            pools[("TYPE_A", None)][2].created_at.timestamp(),
+            pools[("TYPE_A", SERVICE)][2].created_at.timestamp(),
             "a-002",
         )
 
@@ -455,7 +485,7 @@ class TestReplayOnCircuitCloseBehavior:
     def test_operator_mapped_lanes_select_every_capture_source(self):
         """An operator mapped the type deliberately; narrowing it to one
         capture layer would silently drop entries they asked for."""
-        pools = {("TYPE_A", None): _lane_pool("a", 3)}
+        pools = {("TYPE_A", SERVICE): _lane_pool("a", 3)}
         repo = _paging_repository(pools)
         svc = _service(repo)
 
@@ -473,9 +503,6 @@ class TestReplayOnCircuitCloseBehavior:
         pools = {(OPEN_CIRCUIT_FAILURE_TYPE, SERVICE): _lane_pool("oc", 3)}
         repo = _paging_repository(pools)
         svc = _service(repo)
-        svc._resolve_open_circuit_replay_domain = MagicMock(
-            wraps=lambda *_a, **_kw: SERVICE
-        )
 
         svc.replay_on_circuit_close(
             service_name=SERVICE, max_items=10, service_failure_type_map={SERVICE: []}
@@ -487,8 +514,8 @@ class TestReplayOnCircuitCloseBehavior:
 
     def test_result_carries_a_cursor_per_lane_keyed_by_type_and_domain(self):
         pools = {
-            ("TYPE_A", None): _lane_pool("a", 5),
-            ("TYPE_B", None): _lane_pool("b", 5),
+            ("TYPE_A", SERVICE): _lane_pool("a", 5),
+            ("TYPE_B", SERVICE): _lane_pool("b", 5),
         }
         repo = _paging_repository(pools)
         svc = _service(repo)
@@ -499,16 +526,19 @@ class TestReplayOnCircuitCloseBehavior:
             service_failure_type_map={SERVICE: ["TYPE_A", "TYPE_B"]},
         )
 
-        assert set(result.lane_cursors) == {"TYPE_A|", "TYPE_B|"}
+        assert set(result.lane_cursors) == {
+            f"TYPE_A|{SERVICE}",
+            f"TYPE_B|{SERVICE}",
+        }
 
     def test_a_lane_that_stopped_on_its_scan_bound_is_named_in_the_result(self):
         """An empty page means neither "drained" nor "give up" on its own, so
         the successor needs the lane named."""
         pools = {
-            ("TYPE_A", None): [],
-            ("TYPE_B", None): _lane_pool("b", 2),
+            ("TYPE_A", SERVICE): [],
+            ("TYPE_B", SERVICE): _lane_pool("b", 2),
         }
-        repo = _paging_repository(pools, exhausted_lanes={("TYPE_A", None)})
+        repo = _paging_repository(pools, exhausted_lanes={("TYPE_A", SERVICE)})
         svc = _service(repo)
 
         result = svc.replay_on_circuit_close(
@@ -517,11 +547,11 @@ class TestReplayOnCircuitCloseBehavior:
             service_failure_type_map={SERVICE: ["TYPE_A", "TYPE_B"]},
         )
 
-        assert result.scan_exhausted_lanes == ["TYPE_A|"]
+        assert result.scan_exhausted_lanes == [f"TYPE_A|{SERVICE}"]
         assert result.scan_exhausted is True
 
     def test_no_lane_on_its_bound_reports_an_unexhausted_sweep(self):
-        pools = {("TYPE_A", None): _lane_pool("a", 2)}
+        pools = {("TYPE_A", SERVICE): _lane_pool("a", 2)}
         repo = _paging_repository(pools)
         svc = _service(repo)
 
@@ -535,7 +565,7 @@ class TestReplayOnCircuitCloseBehavior:
         assert result.scan_exhausted is False
 
     def test_a_pass_handed_cursors_resumes_instead_of_re_walking(self):
-        pools = {("TYPE_A", None): _lane_pool("a", 10)}
+        pools = {("TYPE_A", SERVICE): _lane_pool("a", 10)}
         repo = _paging_repository(pools)
         svc = _service(repo)
 
@@ -559,7 +589,7 @@ class TestReplayOnCircuitCloseBehavior:
     def test_completion_event_carries_capped_from_the_sweep(self):
         """``capped`` has to mean the same thing on both emitting lanes, or a
         consumer cannot read it at all."""
-        pools = {("TYPE_A", None): _lane_pool("a", 10)}
+        pools = {("TYPE_A", SERVICE): _lane_pool("a", 10)}
         repo = _paging_repository(pools)
         svc = _service(repo)
         svc._emit_event = MagicMock(wraps=lambda *_a, **_kw: None)

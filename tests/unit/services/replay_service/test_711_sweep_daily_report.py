@@ -48,6 +48,25 @@ from baldur.utils.time import utc_now
 SERVICE_NAME = "payment_api"
 FAILURE_TYPE_MAP = {SERVICE_NAME: ["TIMEOUT"]}
 
+
+@pytest.fixture(autouse=True)
+def _lanes_are_the_mapped_types():
+    """Reduce the sweep's lane set to the mapped types of the swept domain.
+
+    What is under test here is how a pass counts and reports what it did, not
+    which lanes a domain gets (the replay handler and open-circuit lanes are
+    pinned with the lane builder itself).
+    """
+
+    def _lanes(domain, failure_type_map):
+        return [(ft, domain, None) for ft in failure_type_map.get(domain, [])]
+
+    with patch(
+        "baldur.services.replay_service.service.recovery_lanes", side_effect=_lanes
+    ):
+        yield
+
+
 # =============================================================================
 # Helpers
 # =============================================================================

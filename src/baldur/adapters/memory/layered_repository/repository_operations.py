@@ -24,6 +24,7 @@ from baldur.interfaces.repositories import (
     pinned_trip_attempt,
 )
 from baldur.services.circuit_breaker.exceptions import (
+    L2_QUARANTINED_REASON,
     CircuitBreakerStateUnavailableError,
 )
 
@@ -1241,8 +1242,30 @@ class RepositoryOperationsMixin:
         if self._l2 is None:
             raise CircuitBreakerStateUnavailableError(operation, "l2_absent")
         if not self._l2_healthy:
-            raise CircuitBreakerStateUnavailableError(operation, "l2_quarantined")
+            raise CircuitBreakerStateUnavailableError(operation, L2_QUARANTINED_REASON)
 
+        return self._read_l2_cluster_states(operation)
+
+    def get_store_cluster_states(self) -> list[CircuitBreakerStateData]:
+        """Read every state from L2 past this process's quarantine, or raise.
+
+        The same L2 read as ``get_cluster_states()`` — its executor, its
+        timeout, its refusal to substitute L1 — without the quarantine gate.
+        A quarantine has no automatic exit, so a consumer whose decision must
+        follow the shared store (an operator's pin, a breaker another process
+        opened) reads the store itself when this process stopped trusting its
+        link. Like the cluster read it touches no health bookkeeping: it
+        neither clears nor extends the quarantine.
+        """
+        operation = "get_store_cluster_states"
+
+        if self._l2 is None:
+            raise CircuitBreakerStateUnavailableError(operation, "l2_absent")
+        return self._read_l2_cluster_states(operation)
+
+    def _read_l2_cluster_states(self, operation: str) -> list[CircuitBreakerStateData]:
+        """The bounded L2 cluster read both cluster reads share."""
+        assert self._l2 is not None  # both callers checked
         try:
             future = self._get_executor().submit(self._l2.get_cluster_states)
             return future.result(timeout=self._get_timeout_seconds())

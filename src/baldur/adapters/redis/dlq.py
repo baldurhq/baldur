@@ -968,6 +968,9 @@ class RedisDLQRepository(
             id, success, resolution_type, note, resolved_by_id, error_details
         )
 
+    def return_replay_attempt(self, id: str, acquired_retry_count: int) -> bool:
+        return self.lifecycle.return_replay_attempt(id, acquired_retry_count)
+
     def release_stale_replaying(self, older_than_minutes: int = 30) -> int:
         return self.lifecycle.release_stale_replaying(older_than_minutes)
 

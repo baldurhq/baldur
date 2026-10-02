@@ -84,8 +84,9 @@ def _links(
     worker="ok",
     handler=True,
     capture=True,
+    trial=True,
 ):
-    """Patch all five link seams, defaulting to a fully-armed configuration.
+    """Patch all six link seams, defaulting to a fully-armed configuration.
 
     Overriding a single kwarg isolates exactly one missing link so the
     first-missing-wins ordering can be asserted.
@@ -97,6 +98,7 @@ def _links(
         patch(f"{_MOD}._cached_worker_state", return_value=worker),
         patch(f"{_MOD}._has_registered_handler", return_value=handler),
         patch(f"{_MOD}._open_circuit_capture_enabled", return_value=capture),
+        patch(f"{_MOD}._recovery_trial_enabled", return_value=trial),
     ):
         yield
 
@@ -191,6 +193,7 @@ class TestArmingStatusBehavior:
             "handler_missing": "ok",
             "map_unconfigured": "ok",
             "open_circuit_capture_disabled": "ok",
+            "recovery_trial_disabled": "ok",
         }
         assert all(lane.armed is True for lane in status.lanes.values())
 
@@ -200,8 +203,8 @@ class TestArmingStatusBehavior:
 
         assert status.missing_link == "disabled"
         assert "celery_missing" not in status.links
-        # A hard prerequisite blocks every sweep, not just one of them.
-        assert [lane.armed for lane in status.lanes.values()] == [False, False]
+        # A hard prerequisite blocks every lane, not just one of them.
+        assert [lane.armed for lane in status.lanes.values()] == [False] * 3
 
     def test_celery_missing_short_circuits_before_worker(self):
         with _links(celery=False):
@@ -209,8 +212,8 @@ class TestArmingStatusBehavior:
 
         assert status.missing_link == "celery_missing"
         assert "worker_missing" not in status.links
-        # The other hard prerequisite, blocking both sweeps the same way.
-        assert [lane.armed for lane in status.lanes.values()] == [False, False]
+        # The other hard prerequisite, blocking every lane the same way.
+        assert [lane.armed for lane in status.lanes.values()] == [False] * 3
 
     def test_worker_missing_is_the_headline_when_only_worker_absent(self):
         with _links(worker="missing"):
@@ -236,10 +239,11 @@ class TestArmingStatusBehavior:
         assert status.missing_link is None
         assert status.missing_links == []
 
-    def test_both_lane_links_missing_disarms_with_map_as_headline(self):
+    def test_every_lane_link_missing_disarms_with_map_as_headline(self):
         with _links(
             config={"on_recovery_enabled": True, "service_failure_type_map": {}},
             capture=False,
+            trial=False,
         ):
             status = arming._evaluate()
 
@@ -248,7 +252,20 @@ class TestArmingStatusBehavior:
         assert status.missing_links == [
             "map_unconfigured",
             "open_circuit_capture_disabled",
+            "recovery_trial_disabled",
         ]
+
+    def test_the_recovery_trial_alone_keeps_the_surface_armed(self):
+        # No map and capture off: the trial needs neither, so it is a lane of
+        # its own that keeps the surface armed.
+        with _links(
+            config={"on_recovery_enabled": True, "service_failure_type_map": {}},
+            capture=False,
+        ):
+            status = arming._evaluate()
+
+        assert status.armed is True
+        assert status.lanes["recovery_trial"].armed is True
 
     def test_handler_missing_when_no_registered_handler(self):
         with _links(handler=False):

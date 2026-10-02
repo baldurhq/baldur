@@ -242,6 +242,7 @@ class TestReplayTriggerThreadingBehavior:
             replay_type="batch",
             trigger=ResolutionTrigger.TRAFFIC_AWARE,
             actor_id="scheduler",
+            entry=entry,
         )
 
 

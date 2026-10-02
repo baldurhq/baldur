@@ -2,10 +2,10 @@
 
 D3 consolidated the 4-channel replay-block surface (structlog log +
 ``DLQ_REPLAY_BLOCKED`` event + ``on_replay_blocked`` metric + optional audit)
-that was copy-pasted across 7 block sites into ``_emit_replay_blocked``.
+that was copy-pasted across the block sites into ``_emit_replay_blocked``.
 ``TestReplayBlockedChannels`` verifies the helper dispatches all four channels
 per the per-site contract (event name, level, payload, metric args, audit
-on/off) for the full 7-site matrix.
+on/off) for the full site matrix.
 
 D4 (#496) added the previously-missing audit channel to the
 ``max_replay_attempts_exceeded`` branch. ``TestReplayMaxAttemptsAudit`` drives
@@ -15,7 +15,9 @@ that branch end-to-end and asserts the audit record carries the documented
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -44,10 +46,11 @@ class _FakeFailedOp:
     id: int
     domain: str = "payment"
     status: str = "pending"
+    request_data: dict[str, Any] = field(default_factory=dict)
 
 
 # =============================================================================
-# D3 — _emit_replay_blocked 7-site channel matrix
+# D3 — _emit_replay_blocked per-site channel matrix
 # =============================================================================
 
 # (site_id, log_event, log_level, audit_present) — one row per production
@@ -57,12 +60,6 @@ _BLOCK_SITES = [
     ("truncate_gate", "dlq.replay_blocked_truncated", "debug", False),
     ("replay_single_governance", "replay_service.blocked", "warning", False),
     ("replay_batch_governance", "replay_service.blocked", "warning", False),
-    (
-        "circuit_close_inflight",
-        "replay_service.circuit_close_inflight_skipped",
-        "warning",
-        True,
-    ),
     (
         "circuit_close_no_lane",
         "replay_service.circuit_close_replay_blocked",
@@ -154,7 +151,7 @@ class TestReplayMaxAttemptsAudit:
     """The max-attempts block records a blocked-family audit entry (#496)."""
 
     @pytest.fixture
-    def max_attempts_service(self) -> ReplayService:
+    def max_attempts_service(self) -> Iterator[ReplayService]:
         """ReplayService whose repository forces the max-attempts branch.
 
         ``try_acquire_for_replay`` returns None (acquisition refused) while a
@@ -166,7 +163,15 @@ class TestReplayMaxAttemptsAudit:
         repo.get_by_id.return_value = _FakeFailedOp(id=42, domain="payment")
         svc = ReplayService(repository=repo)
         svc._event_bus = MagicMock()
-        return svc
+        # The handler's can_replay is asked before acquisition; an allowing
+        # handler lets the replay reach the refused acquisition.
+        handler = MagicMock()
+        handler.can_replay.return_value = (True, "")
+        with patch(
+            "baldur.services.replay_service.service.get_replay_handler",
+            return_value=handler,
+        ):
+            yield svc
 
     def test_max_attempts_block_records_audit_with_reason_and_dlq_id(
         self, max_attempts_service

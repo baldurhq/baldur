@@ -59,6 +59,21 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Its `block_reason` `service_failure_type_map_unconfigured` → `no_replay_handler_registered`.
 - A breaker name with no domain of its own reports `block_reason` `domain_not_addressable`.
 - That signal carries `pending` and `remediation`; its `config_path` field is gone.
+- A mapped failure type replays only under the mapped service's own domain, with its handler.
+- Every `ReplayService` replay asks the handler's `can_replay` before taking the entry.
+- A refused or truncated entry stays pending with no replay attempt spent.
+- A replay whose job never began (its breaker refused it, its key blocked it) keeps its attempt.
+- An on-recovery sweep sends to review only a replay whose job ran.
+- A pass a replay's own breaker refused ends there; the next pass is queued 30 s later.
+- A second dispatch for a running recovery logs INFO instead of a blocked-replay event.
+- One recovery runs per stored domain: raw names projecting onto it share its lock.
+- An operator's manual pin holds automatic replay of its domain until it lapses.
+- Every recovery pass asks the integrity gate; a block stops the chain with `integrity_blocked`.
+- An entry interrupted on its last allowed attempt goes to review instead of staying pending.
+- A stale-release timeout of 5-9 minutes behaves as 10.
+- A chain rescans from the start at most once.
+- Django `ResolutionType` gains a choice: a concrete model's `makemigrations` adds an `AlterField`.
+- `get_baldur_beat_schedule()` and `configure_baldur_celery()` drop `include_traffic_aware`.
 
 ### Added
 
@@ -74,10 +89,17 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `BALDUR_DLQ_REPLAY_REQUEST_DATA_MAX_BYTES` (256 KiB): stored arguments of a replayable job.
 - `python -m baldur.scripts.demo_llm_outage`: a rate limit and an outage against the openai SDK.
 - `FailedOperationRepository.get_cluster_pending_count_by_domain()`: never a process-local count.
+- A recovery trial re-runs one parked job per job name about once a minute; success sweeps the rest.
+- A recovery trial that finds its dependency still failing costs the job no replay attempt.
+- `BALDUR_REPLAY_AUTOMATION_RECOVERY_TRIAL_ENABLED` (on by default) switches the recovery trial.
+- Resolution type `auto_replay_recovery` for a job a recovery trial or its sweep replayed.
+- `FailedOperationRepository.return_replay_attempt()`: give back an attempt a replay took.
+- The arming surface reports a `recovery_trial` lane, with link `recovery_trial_disabled`.
 
 ### Removed
 
 - `KillSwitchGuard` (resilience policies and retry handler); presets no longer add one.
+- Traffic-aware replay, with its `BALDUR_REPLAY_AUTOMATION_TRAFFIC_AWARE_*` variables.
 - `ThrottleGovernanceGuard` no longer refuses calls while the kill switch is pulled.
 
 ### Security
@@ -114,6 +136,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - An `@idempotent` call let through on a cache error no longer marks a key another call holds.
 - A breaker with nothing parked (default `baldur.llm.wrap` names) recovers with no replay warning.
 - Without Celery, only a recovery that leaves work parked warns to run a replay worker.
+- `force_close(trigger_replay=True)` on a breaker already closed now replays its backlog.
+- A parked job comes back after an outage too short to open its breaker, or with no breaker.
 
 ## [1.16.0] - 2026-09-28
 

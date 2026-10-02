@@ -55,7 +55,10 @@ from baldur.celery_tasks.circuit_breaker_tasks import (
     send_cb_close_notification,
     send_cb_open_notification,
 )
-from baldur.celery_tasks.dlq_tasks import conditional_replay_on_circuit_close
+from baldur.celery_tasks.dlq_tasks import (
+    conditional_replay_on_circuit_close,
+    recover_parked_jobs,
+)
 
 # ============================================================
 # Cell Evacuation Tasks
@@ -121,6 +124,7 @@ __all__ = [
     "link_audit_to_dlq",
     # Circuit Breaker
     "conditional_replay_on_circuit_close",
+    "recover_parked_jobs",
     "check_circuit_breaker_recovery",
     "force_open_circuit_breaker",
     "force_close_circuit_breaker",

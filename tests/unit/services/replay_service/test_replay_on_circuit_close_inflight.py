@@ -13,7 +13,8 @@ Covers:
 - TestReplayOnCircuitCloseInflightBehavior: DistributedLock-based inflight
   guard — Barrier concurrency, stale-TTL recovery (handled inside
   DistributedLock), cleanup on success/exception, fail-open when cache is
-  None or `get_lock` raises, cross-instance share.
+  None or `get_lock` raises, cross-instance share, one lock per stored domain,
+  and a second dispatch that joins quietly (no blocked-replay signal).
 """
 
 from __future__ import annotations
@@ -32,8 +33,8 @@ from baldur.services.event_bus.bus.event_types import EventType
 from baldur.services.replay_service import ReplayService
 from baldur.services.replay_service.models import BatchReplayResult
 from baldur.services.replay_service.service import (
-    REASON_CIRCUIT_CLOSE_INFLIGHT,
     _replay_inflight_lock_name,
+    recovery_lock_subject,
 )
 from baldur.settings.dlq import DLQSettings
 
@@ -401,10 +402,12 @@ class TestReplayOnCircuitCloseInflightBehavior:
         assert len(matching) == 1
         assert matching[0]["log_level"] == "warning"
 
-    def test_blocked_call_emits_dlq_replay_blocked_with_inflight_reason(self):
+    def test_joined_call_is_quiet_no_blocked_replay_signal(self):
+        """A second dispatch for a running recovery is not a blocked replay:
+        one INFO line, no DLQ_REPLAY_BLOCKED event, metric or audit."""
         cache = InMemoryCacheAdapter()
         svc = _make_service(cache=cache)
-        # Pre-acquire the lock so the next call hits the blocked branch.
+        # Pre-acquire the lock so the next call joins the running recovery.
         holder = cache.get_lock(_replay_inflight_lock_name("svc"))
         assert holder.acquire(blocking=False) is True
 
@@ -414,35 +417,59 @@ class TestReplayOnCircuitCloseInflightBehavior:
                 patch(
                     "baldur.services.replay_service.service.log_dlq_replay_blocked_audit"
                 ) as mock_audit,
+                patch(
+                    "baldur.metrics.event_handlers.ReplayEventHandler.on_replay_blocked"
+                ) as mock_metric,
+                capture_logs() as cap_logs,
             ):
                 result = svc.replay_on_circuit_close(
                     service_name="svc",
                     service_failure_type_map={"svc": ["TYPE_A"]},
                 )
 
-            # Then: inflight_skipped=True, full 4-channel block surface emitted.
             assert result.inflight_skipped is True
-
-            # Event channel.
             blocked_emits = [
                 c
                 for c in svc._event_bus.emit.call_args_list
                 if c[0][0] == EventType.DLQ_REPLAY_BLOCKED
             ]
-            assert len(blocked_emits) == 1
-            data = blocked_emits[0][1]["data"]
-            assert data["trigger"] == "circuit_close"
-            assert data["service_name"] == "svc"
-            assert data["block_reason"] == REASON_CIRCUIT_CLOSE_INFLIGHT
-
-            # Audit channel.
-            mock_audit.assert_called_once()
-            audit_kwargs = mock_audit.call_args.kwargs
-            assert audit_kwargs["reason"] == REASON_CIRCUIT_CLOSE_INFLIGHT
-            assert audit_kwargs["service_name"] == "svc"
-            assert audit_kwargs["trigger"] == "circuit_close"
+            assert blocked_emits == []
+            mock_audit.assert_not_called()
+            mock_metric.assert_not_called()
+            joined = [
+                e
+                for e in cap_logs
+                if e.get("event") == "replay_service.circuit_close_inflight_joined"
+            ]
+            assert len(joined) == 1
+            assert joined[0]["log_level"] == "info"
+            assert joined[0]["healing_domain"] == "svc"
+            assert [e for e in cap_logs if e.get("log_level") == "warning"] == []
         finally:
             holder.release()
+
+    def test_names_projecting_onto_one_domain_share_the_lock(self):
+        """Raw spellings of one stored domain select one lane set, so a
+        recovery under one spelling holds the others off."""
+        cache = InMemoryCacheAdapter()
+        svc = _make_service(cache=cache)
+        holder = cache.get_lock(
+            _replay_inflight_lock_name(recovery_lock_subject("payment_api"))
+        )
+        assert holder.acquire(blocking=False) is True
+
+        try:
+            with _passthrough_governance():
+                result = svc.replay_on_circuit_close(service_name="Payment-API")
+
+            assert result.inflight_skipped is True
+        finally:
+            holder.release()
+
+    def test_name_without_a_domain_is_locked_by_its_raw_name(self):
+        """The unclassifiable bucket pools unrelated names; it is no lock."""
+        assert recovery_lock_subject("3ds-gateway") == "3ds-gateway"
+        assert recovery_lock_subject("Payment-API") == "payment_api"
 
     def test_cross_instance_lock_shared_via_cache(self):
         # Given: two ReplayService instances sharing the same InMemoryCache.

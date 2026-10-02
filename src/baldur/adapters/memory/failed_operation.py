@@ -14,6 +14,7 @@ from baldur.adapters.memory.base import _now
 from baldur.core.process_utils import fork_safe_rlock
 from baldur.dlq.helpers import compress_entries
 from baldur.interfaces.repositories import (
+    STALE_RELEASE_AT_CAP_NOTE,
     DLQCompressedEntry,
     DLQCompressedStatus,
     FailedOperationData,
@@ -730,11 +731,32 @@ class InMemoryFailedOperationRepository(FailedOperationRepository):
 
             return True
 
+    def return_replay_attempt(self, id: str, acquired_retry_count: int) -> bool:
+        """Give back an attempt this replay's acquisition took (fenced on its count)."""
+        with self._lock:
+            entry = self._storage.get(id)
+            if (
+                entry is None
+                or entry.status != FailedOperationStatus.REPLAYING.value
+                or entry.retry_count != acquired_retry_count
+            ):
+                return False
+            self._storage[id] = self._copy_with_updates(
+                entry,
+                retry_count=acquired_retry_count - 1,
+                updated_at=entry.updated_at,
+            )
+            return True
+
     def release_stale_replaying(
         self,
         older_than_minutes: int = 30,
     ) -> int:
-        """Release DLQ entries stuck in REPLAYING state."""
+        """Release DLQ entries stuck in REPLAYING state.
+
+        Below its stored cap an entry goes back to PENDING; at the cap — it was
+        interrupted on its last allowed attempt — it goes to REQUIRES_REVIEW.
+        """
         cutoff = _now() - timedelta(minutes=older_than_minutes)
         released = 0
 
@@ -746,13 +768,21 @@ class InMemoryFailedOperationRepository(FailedOperationRepository):
                     and entry.last_retry_at < cutoff
                 ):
                     old_status = entry.status
-                    new_status = FailedOperationStatus.PENDING.value
-                    updated = self._copy_with_updates(
-                        entry,
-                        status=new_status,
-                    )
+                    if entry.retry_count >= entry.max_retries:
+                        updated = self._copy_with_updates(
+                            entry,
+                            status=FailedOperationStatus.REQUIRES_REVIEW.value,
+                            resolution_note=STALE_RELEASE_AT_CAP_NOTE,
+                        )
+                    else:
+                        updated = self._copy_with_updates(
+                            entry,
+                            status=FailedOperationStatus.PENDING.value,
+                        )
                     self._storage[id] = updated
-                    self._update_index_status(id, old_status, new_status, entry.domain)
+                    self._update_index_status(
+                        id, old_status, updated.status, entry.domain
+                    )
                     released += 1
 
         return released

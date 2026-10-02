@@ -248,7 +248,6 @@ optional_imports:
   - {file: "src/baldur/tasks/compliance_tasks.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/tasks/config_apply.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/tasks/intelligence_tasks.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
-  - {file: "src/baldur/tasks/traffic_aware_replay.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
 
 no_print:
   - {file: src/baldur/adapters/alert/stdout_adapter.py, symbol: StdoutAlertAdapter.resolve, count: 2, reason: pre-existing print() - pending migration to structlog, ticket: '506'}
@@ -341,7 +340,7 @@ dormant_import_boundary_count: 7
 # reclaimed. Give a new entry an ISO `YYYY-MM-DD` target_remove_by instead of
 # raising this number. Per-repo value: the two baselines are independently
 # scrubbed copies with no auto-sync (G41/G67 precedent).
-dateless_baseline_budget: 247
+dateless_baseline_budget: 246
 
 # G19 — tests/ may not module-level-import baldur_pro / baldur_dormant
 # without a `pytest.importorskip("baldur_pro")` (or "baldur_dormant") call

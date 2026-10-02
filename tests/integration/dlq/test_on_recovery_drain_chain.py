@@ -35,6 +35,7 @@ from baldur.adapters.sql.failed_operation import SQLFailedOperationRepository
 from baldur.celery_tasks.dlq_tasks import conditional_replay_on_circuit_close
 from baldur.interfaces.governance import GovernanceChecker
 from baldur.interfaces.repositories import (
+    CircuitBreakerStateData,
     FailedOperationData,
     FailedOperationStatus,
 )
@@ -157,9 +158,10 @@ def _drive_chain(service, *, max_items, max_continuations=50, circuit_state="clo
     proxy.delay.side_effect = lambda **kwargs: queued.append(kwargs)
 
     circuits = MagicMock(spec=CircuitBreakerService)
-    circuits.repository = MagicMock(spec=[])
-    circuits.get_all_states.return_value = [
-        {"service_name": CIRCUIT_NAME, "state": circuit_state}
+    # The pass-start affirmation reads the shared store's fleet read.
+    circuits.repository = MagicMock(spec=["get_cluster_states"])
+    circuits.repository.get_cluster_states.return_value = [
+        CircuitBreakerStateData(service_name=CIRCUIT_NAME, state=circuit_state)
     ]
 
     passes: list[dict] = []

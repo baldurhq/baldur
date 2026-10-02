@@ -43,6 +43,8 @@ from baldur.services.replay_service.handlers import (
     register_replay_handler,
 )
 from baldur.services.replay_service.models import ReplayResult
+from baldur.services.replay_service.service import recovery_lanes
+from baldur.utils.domain_validation import resolve_stored_domain
 
 OPEN_CIRCUIT = "CIRCUIT_BREAKER_OPEN"
 POLICY_CHAIN = "policy_chain"
@@ -199,60 +201,60 @@ class TestReplayHandlerRegistryBehavior:
 
 
 class TestOpenCircuitReplayDomainBehavior:
-    """``_resolve_open_circuit_replay_domain`` decides whether the lane runs."""
+    """``recovery_lanes`` decides whether the open-circuit lane runs."""
 
-    def test_registered_domain_resolves_to_itself(self, registered_handlers):
+    @staticmethod
+    def _open_circuit_lanes(domain: str, failure_type_map: dict) -> list:
+        return [
+            lane
+            for lane in recovery_lanes(domain, failure_type_map)
+            if lane[0] == OPEN_CIRCUIT
+        ]
+
+    def test_registered_domain_gets_the_lane(self, registered_handlers):
         registered_handlers("payment_api")
-        svc = _service()
 
-        assert svc._resolve_open_circuit_replay_domain("payment_api", []) == (
-            "payment_api"
-        )
+        assert self._open_circuit_lanes("payment_api", {}) == [
+            (OPEN_CIRCUIT, "payment_api", POLICY_CHAIN)
+        ]
 
     def test_reprojected_name_resolves_to_the_stored_form(self, registered_handlers):
         """The store filed the entry under the projection — so must the join."""
         registered_handlers("payment_api")
-        svc = _service()
 
-        assert svc._resolve_open_circuit_replay_domain("Payment-API", []) == (
-            "payment_api"
-        )
+        lanes = self._open_circuit_lanes(resolve_stored_domain("Payment-API"), {})
 
-    def test_unregistered_domain_resolves_to_none(self, registered_handlers):
+        assert lanes == [(OPEN_CIRCUIT, "payment_api", POLICY_CHAIN)]
+
+    def test_unregistered_domain_gets_no_lane(self, registered_handlers):
         """No handler means every selected entry burns its budget on a
         guaranteed failure, so the lane must not run at all."""
-        svc = _service()
+        assert recovery_lanes("payment_api", {}) == []
 
-        assert svc._resolve_open_circuit_replay_domain("payment_api", []) is None
-
-    def test_fallback_bucket_name_resolves_to_none(self, registered_handlers):
+    def test_fallback_bucket_gets_no_lane(self, registered_handlers):
         """A name with no domain identity of its own shares one bucket with
         every other unclassifiable name — matching it is not an identity
         match, so those entries stay operator-driven."""
         registered_handlers("OTHER_DOMAIN")
-        svc = _service()
 
-        assert svc._resolve_open_circuit_replay_domain("3ds-gateway", []) is None
+        assert recovery_lanes(resolve_stored_domain("3ds-gateway"), {}) == []
 
-    def test_operator_mapped_type_resolves_to_none(self, registered_handlers):
+    def test_operator_mapped_type_replaces_the_lane(self, registered_handlers):
         """The operator's own lane already covers the type — running both
-        would fetch the same entries twice in one sweep."""
+        would fetch the same entries twice in one sweep. The mapped lane is
+        scoped to the mapped service's own domain."""
         registered_handlers("payment_api")
-        svc = _service()
 
-        assert (
-            svc._resolve_open_circuit_replay_domain("payment_api", [OPEN_CIRCUIT])
-            is None
-        )
+        assert self._open_circuit_lanes(
+            "payment_api", {"payment_api": [OPEN_CIRCUIT]}
+        ) == [(OPEN_CIRCUIT, "payment_api", None)]
 
     def test_other_mapped_types_do_not_block_the_lane(self, registered_handlers):
         registered_handlers("payment_api")
-        svc = _service()
 
-        assert (
-            svc._resolve_open_circuit_replay_domain("payment_api", ["TIMEOUT"])
-            == "payment_api"
-        )
+        assert self._open_circuit_lanes(
+            "payment_api", {"payment_api": ["TIMEOUT"]}
+        ) == [(OPEN_CIRCUIT, "payment_api", POLICY_CHAIN)]
 
 
 # =============================================================================
@@ -408,8 +410,10 @@ class TestCircuitCloseSweepBehavior:
             if call.kwargs.get("failure_type") == OPEN_CIRCUIT
         ]
         assert len(open_circuit_calls) == 1
-        # The operator's lane keeps today's unscoped, type-only selection.
-        assert open_circuit_calls[0]["domain"] is None
+        # The operator's lane selects by type within the mapped service's own
+        # domain, from every capture source.
+        assert open_circuit_calls[0]["domain"] == "payment_api"
+        assert open_circuit_calls[0]["source"] is None
 
     def test_misconfig_warning_is_suppressed_when_the_lane_applies(
         self, registered_handlers

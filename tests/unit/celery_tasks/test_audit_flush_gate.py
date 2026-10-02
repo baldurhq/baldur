@@ -112,7 +112,6 @@ class TestDrainGateEarlyExit:
                 include_cleanup=False,
                 include_intelligence=False,
                 include_compliance=False,
-                include_traffic_aware=False,
                 include_canary_watchdog=False,
                 include_governance=False,
                 include_xtest_cleanup=False,

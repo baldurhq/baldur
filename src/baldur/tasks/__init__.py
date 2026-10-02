@@ -62,14 +62,6 @@ from .notification_policy import (
     NotificationThreshold,
     NotificationTiming,
 )
-from .traffic_aware_replay import (
-    TRAFFIC_AWARE_TASKS,
-    TrafficAwareReplayTask,
-    TrafficHealthStatus,
-    check_traffic_health,
-    get_traffic_aware_beat_schedule,
-    register_traffic_aware_tasks_with_celery,
-)
 
 # daily_report types are lazy-imported via __getattr__
 
@@ -106,13 +98,6 @@ __all__ = [
     "COMPLIANCE_TASKS",
     "register_compliance_tasks_with_celery",
     "get_compliance_beat_schedule",
-    # Traffic-Aware Replay Tasks
-    "TrafficHealthStatus",
-    "check_traffic_health",
-    "TrafficAwareReplayTask",
-    "TRAFFIC_AWARE_TASKS",
-    "register_traffic_aware_tasks_with_celery",
-    "get_traffic_aware_beat_schedule",
 ]
 
 

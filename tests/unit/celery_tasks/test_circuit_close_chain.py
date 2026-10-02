@@ -5,10 +5,11 @@ decisions the service cannot make:
 
 - **whether this pass may run at all.** The sweep reads no circuit state
   anywhere, and a continuation queued while the circuit was CLOSED is picked up
-  seconds later — so the affirmation runs at the start of every pass, from a
-  refreshed shared store, through the same projection the drain selects by. A
+  seconds later — so the affirmation runs at the start of every pass, from the
+  shared store's fleet read, through the same projection the drain selects by. A
   peer circuit under a different spelling must stop the chain instead of having
-  its backlog walked into a dead dependency one entry at a time.
+  its backlog walked into a dead dependency one entry at a time, and an
+  operator's manual pin holds the chain quietly.
 - **when this pass must stop.** It has to end by RETURNING: the soft-time-limit
   exception is an ordinary Exception, the blanket handler would swallow it into
   an error dict, and the continuation — dispatched after the service call
@@ -35,16 +36,21 @@ from baldur.adapters.cache.memory_adapter import InMemoryCacheAdapter
 from baldur.celery_tasks.dlq_tasks import (
     _CIRCUIT_CLOSE_DEADLINE_MARGIN_SECONDS,
     _affirm_circuit_closed,
-    _circuit_close_pass_deadline,
+    _pass_deadline,
     _should_continue_chain,
     conditional_replay_on_circuit_close,
 )
 from baldur.core.exceptions import DLQError
 from baldur.interfaces.repositories import (
+    CircuitBreakerStateData,
     FailedOperationData,
     FailedOperationRepository,
 )
 from baldur.services.circuit_breaker import CircuitBreakerService
+from baldur.services.circuit_breaker.exceptions import (
+    UNREACHED_DEFAULT_STORE_REASON,
+    CircuitBreakerStateUnavailableError,
+)
 from baldur.services.event_bus.bus.event_bus import BaldurEventBus
 from baldur.services.event_bus.bus.event_types import EventType
 from baldur.services.replay_service import ReplayService
@@ -69,49 +75,39 @@ SERVICE = "payment_api"
 UNCLASSIFIABLE = "3ds-gateway"
 
 
+# The keyword arguments every pass of a CLOSED-event chain carries forward.
+_CHAIN_DEFAULTS = {
+    "trigger": "auto_replay_circuit_close",
+    "escalate_failures": True,
+    "operator_requested": False,
+    "rescanned": False,
+}
+
+
+def _row(service_name, state, **fields):
+    return CircuitBreakerStateData(service_name=service_name, state=state, **fields)
+
+
+def _rows(states):
+    """Breaker rows from ``{"service_name", "state"}`` shapes."""
+    return [_row(state["service_name"], state["state"]) for state in states]
+
+
 def _cb_service(states, *, calls=None, repository=None):
-    """A circuit-breaker service whose L1 view is ``states``."""
+    """A circuit-breaker service whose shared store holds ``states``."""
     cb = MagicMock(spec=CircuitBreakerService)
-    cb.repository = repository if repository is not None else MagicMock(spec=[])
-    if calls is not None:
+    if repository is None:
+        repository = MagicMock(spec=["get_cluster_states", "get_all_states"])
 
-        def _all_states():
-            calls.append("get_all_states")
-            return states
+        def _cluster_states():
+            if calls is not None:
+                calls.append("get_cluster_states")
+            return _rows(states)
 
-        cb.get_all_states.side_effect = _all_states
-    else:
-        cb.get_all_states.return_value = states
+        repository.get_cluster_states.side_effect = _cluster_states
+    cb.repository = repository
+    cb.refuses_calls.side_effect = lambda row: row.state == "open"
     return cb
-
-
-def _layered_repository(calls=None, *, sync_result=True):
-    """A repository that offers the whole-store L2 restore."""
-    repo = MagicMock(spec=["force_sync_from_l2", "get_by_service_name"])
-
-    def _sync():
-        if calls is not None:
-            calls.append("force_sync_from_l2")
-        return sync_result
-
-    repo.force_sync_from_l2.side_effect = _sync
-    repo.get_by_service_name.return_value = None
-    return repo
-
-
-def _unrefreshable_repository():
-    """A layered repository with an L2 configured whose restore failed.
-
-    ``force_sync_from_l2`` returns False for BOTH "no L2 configured" and "the
-    load failed", so the health probe is the only thing that separates them.
-    """
-    repo = MagicMock(
-        spec=["force_sync_from_l2", "get_by_service_name", "get_l2_health"]
-    )
-    repo.force_sync_from_l2.return_value = False
-    repo.get_l2_health.return_value = {"adapter_type": "redis"}
-    repo.get_by_service_name.return_value = None
-    return repo
 
 
 # =============================================================================
@@ -120,28 +116,28 @@ def _unrefreshable_repository():
 
 
 class TestCircuitAffirmationBehavior:
-    """Project every circuit forward and require all of them CLOSED."""
+    """Project every circuit forward and judge it by the chain's rule."""
 
     @pytest.mark.parametrize(
         ("states", "expected"),
         [
-            ([{"service_name": "payment_api", "state": "closed"}], (True, None)),
+            ([{"service_name": "payment_api", "state": "closed"}], (None, None)),
             (
                 [
                     {"service_name": "Payment-API", "state": "closed"},
                     {"service_name": "payment-api", "state": "open"},
                 ],
-                (False, "payment-api"),
+                (REASON_CIRCUIT_REOPENED, "payment-api"),
             ),
             (
                 [{"service_name": "payment_api", "state": "half_open"}],
-                (False, "payment_api"),
+                (REASON_CIRCUIT_REOPENED, "payment_api"),
             ),
             # Nothing projects onto the domain: an in-memory circuit store in
             # another process holds none of its rows, so stopping here would
             # stop every sweep on such a deployment before its first pass.
-            ([{"service_name": "point_api", "state": "open"}], (True, None)),
-            ([], (True, None)),
+            ([{"service_name": "point_api", "state": "open"}], (None, None)),
+            ([], (None, None)),
         ],
     )
     def test_projection_shapes(self, states, expected):
@@ -149,73 +145,53 @@ class TestCircuitAffirmationBehavior:
             "baldur.services.circuit_breaker.get_circuit_breaker_service",
             return_value=_cb_service(states),
         ):
-            assert _affirm_circuit_closed(SERVICE) == expected
+            reason, row = _affirm_circuit_closed(SERVICE)
+
+        assert (reason, row.service_name if row is not None else None) == expected
 
     def test_a_failed_read_proceeds_rather_than_inventing_a_stop(self):
         """The sweep performed no circuit read at all before this affirmation
         existed, so a failed read must reproduce the previous behaviour."""
+        repository = MagicMock(spec=["get_cluster_states"])
+        repository.get_cluster_states.side_effect = CircuitBreakerStateUnavailableError(
+            "get_cluster_states", "backend_degraded"
+        )
         with (
             patch(
                 "baldur.services.circuit_breaker.get_circuit_breaker_service",
-                side_effect=RuntimeError("store unreachable"),
+                return_value=_cb_service([], repository=repository),
             ),
             capture_logs() as logs,
         ):
-            assert _affirm_circuit_closed(SERVICE) == (True, None)
+            assert _affirm_circuit_closed(SERVICE) == (None, None)
 
         assert [e for e in logs if e["event"] == "dlq.circuit_affirmation_failed"]
 
-    def test_a_refresh_that_failed_proceeds_but_says_so(self):
-        """Proceeding is the decision (the CLOSED event is prior evidence),
-        but the pass is about to affirm against a copy the shared store has
-        moved past — swallowing that leaves it indistinguishable from a clean
-        read."""
-        with (
-            patch(
-                "baldur.services.circuit_breaker.get_circuit_breaker_service",
-                return_value=_cb_service(
-                    [{"service_name": SERVICE, "state": "closed"}],
-                    repository=_unrefreshable_repository(),
-                ),
-            ),
-            capture_logs() as logs,
-        ):
-            assert _affirm_circuit_closed(SERVICE) == (True, None)
-
-        assert [
-            e for e in logs if e["event"] == "dlq.circuit_affirmation_refresh_failed"
-        ]
-
-    def test_a_single_layer_store_is_not_reported_as_a_failed_refresh(self):
-        """False with no L2 configured is the in-memory store, where L1 IS the
-        store — warning on it would fire on every pass of the default topology."""
-        repo = MagicMock(spec=["force_sync_from_l2", "get_by_service_name"])
-        repo.force_sync_from_l2.return_value = False
-        with (
-            patch(
-                "baldur.services.circuit_breaker.get_circuit_breaker_service",
-                return_value=_cb_service(
-                    [{"service_name": SERVICE, "state": "closed"}], repository=repo
-                ),
-            ),
-            capture_logs() as logs,
-        ):
-            assert _affirm_circuit_closed(SERVICE) == (True, None)
-
-        assert not [
-            e for e in logs if e["event"] == "dlq.circuit_affirmation_refresh_failed"
-        ]
-
-    def test_the_shared_store_is_refreshed_before_it_is_read(self):
-        """A worker's L1 is whatever it hydrated at boot plus whatever it has
-        touched; a circuit a web pod re-opened would otherwise read CLOSED for
-        the whole chain."""
-        calls: list[str] = []
-        cb = _cb_service(
-            [{"service_name": SERVICE, "state": "closed"}],
-            calls=calls,
-            repository=_layered_repository(calls),
+    def test_an_unreached_default_store_reads_this_process_s_rows(self):
+        """Nobody named a shared store: this process's view is the cluster, so
+        the read is not a failure and nothing is reported."""
+        repository = MagicMock(spec=["get_cluster_states", "get_all_states"])
+        repository.get_cluster_states.side_effect = CircuitBreakerStateUnavailableError(
+            "get_cluster_states", UNREACHED_DEFAULT_STORE_REASON
         )
+        repository.get_all_states.return_value = [_row(SERVICE, "open")]
+        with (
+            patch(
+                "baldur.services.circuit_breaker.get_circuit_breaker_service",
+                return_value=_cb_service([], repository=repository),
+            ),
+            capture_logs() as logs,
+        ):
+            reason, row = _affirm_circuit_closed(SERVICE)
+
+        assert (reason, row.service_name) == (REASON_CIRCUIT_REOPENED, SERVICE)
+        assert not [e for e in logs if e["event"] == "dlq.circuit_affirmation_failed"]
+
+    def test_the_fleet_read_is_the_one_read(self):
+        """A worker's local copy is whatever it hydrated at boot plus whatever
+        it has touched; the pass reads the shared store itself."""
+        calls: list[str] = []
+        cb = _cb_service([{"service_name": SERVICE, "state": "closed"}], calls=calls)
 
         with patch(
             "baldur.services.circuit_breaker.get_circuit_breaker_service",
@@ -223,16 +199,8 @@ class TestCircuitAffirmationBehavior:
         ):
             _affirm_circuit_closed(SERVICE)
 
-        assert calls == ["force_sync_from_l2", "get_all_states"]
-
-    def test_a_store_without_a_restore_seam_is_read_as_is(self):
-        cb = _cb_service([{"service_name": SERVICE, "state": "closed"}])
-
-        with patch(
-            "baldur.services.circuit_breaker.get_circuit_breaker_service",
-            return_value=cb,
-        ):
-            assert _affirm_circuit_closed(SERVICE) == (True, None)
+        assert calls == ["get_cluster_states"]
+        cb.get_all_states.assert_not_called()
 
     def test_get_state_is_never_used(self):
         """It is get-or-create: reading it would fabricate a CLOSED row inside
@@ -250,28 +218,29 @@ class TestCircuitAffirmationBehavior:
     def test_an_unclassifiable_name_affirms_its_raw_name_alone(self):
         """The fallback bucket pools unrelated names, so "every circuit
         projecting onto it" would range over strangers."""
-        repository = _layered_repository()
-        repository.get_by_service_name.return_value = SimpleNamespace(state="open")
-        cb = _cb_service([], repository=repository)
+        cb = _cb_service(
+            [
+                {"service_name": UNCLASSIFIABLE, "state": "open"},
+                {"service_name": "other-gateway", "state": "open"},
+            ]
+        )
 
         with patch(
             "baldur.services.circuit_breaker.get_circuit_breaker_service",
             return_value=cb,
         ):
-            proceed, offending = _affirm_circuit_closed(UNCLASSIFIABLE)
+            reason, row = _affirm_circuit_closed(UNCLASSIFIABLE)
 
-        assert (proceed, offending) == (False, UNCLASSIFIABLE)
-        repository.get_by_service_name.assert_called_once_with(UNCLASSIFIABLE)
-        cb.get_all_states.assert_not_called()
+        assert (reason, row.service_name) == (REASON_CIRCUIT_REOPENED, UNCLASSIFIABLE)
 
     def test_an_unclassifiable_name_with_no_row_proceeds(self):
-        cb = _cb_service([], repository=_layered_repository())
+        cb = _cb_service([])
 
         with patch(
             "baldur.services.circuit_breaker.get_circuit_breaker_service",
             return_value=cb,
         ):
-            assert _affirm_circuit_closed(UNCLASSIFIABLE) == (True, None)
+            assert _affirm_circuit_closed(UNCLASSIFIABLE) == (None, None)
 
     def test_the_fallback_bucket_is_the_one_this_branch_keys_on(self):
         """Guards the branch against a projection change that would silently
@@ -296,7 +265,7 @@ class TestCircuitAffirmationBehavior:
 
 
 # =============================================================================
-# _circuit_close_pass_deadline
+# _pass_deadline
 # =============================================================================
 
 
@@ -311,7 +280,7 @@ class TestPassDeadlineContract:
             request=SimpleNamespace(timelimit=None), soft_time_limit=290
         )
 
-        deadline = _circuit_close_pass_deadline(task)
+        deadline = _pass_deadline(task)
 
         assert deadline == pytest.approx(time.monotonic() + 260, abs=1.0)
 
@@ -321,7 +290,7 @@ class TestPassDeadlineContract:
             request=SimpleNamespace(timelimit=(600, 120)), soft_time_limit=290
         )
 
-        deadline = _circuit_close_pass_deadline(task)
+        deadline = _pass_deadline(task)
 
         assert deadline == pytest.approx(time.monotonic() + 90, abs=1.0)
 
@@ -330,7 +299,7 @@ class TestPassDeadlineContract:
             request=SimpleNamespace(timelimit=(600, None)), soft_time_limit=290
         )
 
-        deadline = _circuit_close_pass_deadline(task)
+        deadline = _pass_deadline(task)
 
         assert deadline == pytest.approx(time.monotonic() + 260, abs=1.0)
 
@@ -339,7 +308,7 @@ class TestPassDeadlineContract:
             request=SimpleNamespace(timelimit=None), soft_time_limit=None
         )
 
-        assert _circuit_close_pass_deadline(task) is None
+        assert _pass_deadline(task) is None
 
     def test_a_soft_limit_below_the_margin_still_leaves_a_second_to_work(self):
         """A non-positive budget would make every pass return empty, and the
@@ -348,7 +317,7 @@ class TestPassDeadlineContract:
             request=SimpleNamespace(timelimit=None), soft_time_limit=5
         )
 
-        deadline = _circuit_close_pass_deadline(task)
+        deadline = _pass_deadline(task)
 
         assert deadline == pytest.approx(time.monotonic() + 1.0, abs=1.0)
 
@@ -454,6 +423,10 @@ class _Chain:
                 return_value=_cb_service(self.states),
             ),
             patch(
+                "baldur.services.event_bus.integrity_gate.replay_integrity_verdict",
+                return_value=True,
+            ),
+            patch(
                 "baldur.adapters.celery.tasks.conditional_replay_on_circuit_close",
                 self.dispatched,
             ),
@@ -481,6 +454,7 @@ class TestCircuitCloseChainBehavior:
             max_continuations=10,
             continuation=4,
             cursors={"TYPE_A|": "2.0|a-049"},
+            **_CHAIN_DEFAULTS,
         )
 
     def test_the_pass_is_handed_a_deadline_and_the_cursors_it_was_queued_with(self):
@@ -554,6 +528,7 @@ class TestCircuitCloseChainBehavior:
             max_continuations=10,
             continuation=1,
             cursors={"TYPE_A|": "1.0|a"},
+            **_CHAIN_DEFAULTS,
         )
         chain.service.emit_circuit_close_chain_stopped.assert_not_called()
 
@@ -627,6 +602,7 @@ class TestCircuitCloseChainBehavior:
             max_continuations=10,
             continuation=2,
             cursors=None,
+            **{**_CHAIN_DEFAULTS, "rescanned": True},
         )
 
     def test_a_cursorless_pass_with_nothing_reachable_ends_the_chain(self):
@@ -744,10 +720,12 @@ class TestCircuitRecoveryIdlePassBehavior:
     def test_a_pass_that_is_not_idle_runs_the_affirmation_and_the_sweep(self):
         chain = _Chain(_result(total=1))
 
-        with patch(_AFFIRM_PATH, autospec=True, return_value=(True, None)) as affirm:
+        with patch(_AFFIRM_PATH, autospec=True, return_value=(None, None)) as affirm:
             result = chain.run()
 
-        affirm.assert_called_once_with(SERVICE)
+        affirm.assert_called_once_with(
+            SERVICE, trigger="auto_replay_circuit_close", operator_requested=False
+        )
         chain.service.replay_on_circuit_close.assert_called_once()
         assert "nothing_parked" not in result
 
@@ -773,11 +751,13 @@ class TestCircuitRecoveryIdlePassBehavior:
             max_continuations=10,
             continuation=2,
             cursors=None,
+            **{**_CHAIN_DEFAULTS, "rescanned": True},
         )
 
-    def test_a_mapped_name_with_nothing_parked_runs_the_pass(self):
-        """A mapped type selects in every domain, so an empty count under the
-        name's own domain proves nothing — the pass runs as before."""
+    def test_a_mapped_name_without_a_handler_and_nothing_parked_is_idle(self):
+        """Every lane, a mapped one included, is scoped to the name's own domain
+        and needs its replay handler: with neither a handler nor anything parked
+        the pass ends before the circuit read and the sweep."""
         service = _real_service(0)
         chain = _Chain(service=service)
 
@@ -789,14 +769,13 @@ class TestCircuitRecoveryIdlePassBehavior:
                 autospec=True,
                 return_value=BatchReplayResult(),
             ) as sweep,
-            patch(_AFFIRM_PATH, autospec=True, return_value=(True, None)) as affirm,
+            patch(_AFFIRM_PATH, autospec=True, return_value=(None, None)) as affirm,
         ):
             result = chain.run()
 
-        affirm.assert_called_once_with(SERVICE)
-        sweep.assert_called_once()
-        service.repository.get_cluster_pending_count_by_domain.assert_not_called()
-        assert "nothing_parked" not in result
+        affirm.assert_not_called()
+        sweep.assert_not_called()
+        assert result["nothing_parked"] is True
 
     def test_a_count_that_raises_runs_the_pass_and_the_sweep_reports_pending_none(
         self,
@@ -808,7 +787,7 @@ class TestCircuitRecoveryIdlePassBehavior:
 
         with (
             _runtime_map({}),
-            patch(_AFFIRM_PATH, autospec=True, return_value=(True, None)) as affirm,
+            patch(_AFFIRM_PATH, autospec=True, return_value=(None, None)) as affirm,
             patch(
                 "baldur.services.replay_service.service.log_dlq_replay_blocked_audit",
                 autospec=True,
@@ -816,7 +795,9 @@ class TestCircuitRecoveryIdlePassBehavior:
         ):
             chain.run()
 
-        affirm.assert_called_once_with(SERVICE)
+        affirm.assert_called_once_with(
+            SERVICE, trigger="auto_replay_circuit_close", operator_requested=False
+        )
         blocked = [
             c.kwargs["data"]
             for c in service._event_bus.emit.call_args_list
@@ -840,7 +821,7 @@ class TestCircuitRecoveryIdlePassBehavior:
         try:
             with (
                 _runtime_map({}),
-                patch(_AFFIRM_PATH, autospec=True, return_value=(True, None)) as affirm,
+                patch(_AFFIRM_PATH, autospec=True, return_value=(None, None)) as affirm,
                 patch(
                     "baldur.services.replay_service.service.log_dlq_replay_blocked_audit",
                     autospec=True,
@@ -851,7 +832,9 @@ class TestCircuitRecoveryIdlePassBehavior:
             _replay_handlers.pop(resolve_stored_domain(SERVICE), None)
 
         # Then
-        affirm.assert_called_once_with(SERVICE)
+        affirm.assert_called_once_with(
+            SERVICE, trigger="auto_replay_circuit_close", operator_requested=False
+        )
         assert result["success"] is False
         assert "nothing_parked" not in result
         blocked = [
