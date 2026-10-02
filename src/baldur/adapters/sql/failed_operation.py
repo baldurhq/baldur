@@ -32,6 +32,7 @@ from baldur.adapters.sql.base import (
 )
 from baldur.interfaces.repositories import (
     REPLAY_SELECTION_MAX_SCAN,
+    STALE_RELEASE_AT_CAP_NOTE,
     DLQCompressedEntry,
     DLQCompressedStatus,
     FailedOperationData,
@@ -1004,44 +1005,56 @@ class SQLFailedOperationRepository(GenericSQLRepository, FailedOperationReposito
     def release_stale_replaying(self, older_than_minutes: int = 30) -> int:
         """Move REPLAYING entries older than the cutoff out of REPLAYING.
 
-        One UPDATE: below its stored cap an entry goes back to PENDING, at the
-        cap (interrupted on its last allowed attempt) to REQUIRES_REVIEW. The
-        ``WHERE`` is the compare-and-set — an entry another replay acquired
-        meanwhile carries a fresh ``last_retry_at`` and is left alone.
+        Below its stored cap an entry goes back to PENDING; at the cap
+        (interrupted on its last allowed attempt) it goes to REQUIRES_REVIEW
+        with a resolution note saying so. The note lives in the row's JSON
+        payload, which no dialect-portable UPDATE can edit in place, so each
+        at-cap row moves by its own UPDATE carrying the rewritten payload; the
+        rows below the cap move in one UPDATE. Every ``WHERE`` is the
+        compare-and-set — an entry another replay acquired meanwhile carries a
+        fresh ``last_retry_at`` and is left alone, and one whose attempt was
+        given back meanwhile is below its cap and goes to PENDING instead.
         """
-        cutoff = utc_now() - timedelta(minutes=older_than_minutes)
-        conn = self._borrow_connection()
-        cursor = conn.cursor()
-        try:
-            stmt = self._prepare(
-                f"UPDATE {_TABLE} SET status = CASE "
-                f"WHEN retry_count >= max_retries THEN %s ELSE %s END, "
-                f"updated_at = %s "
-                f"WHERE status = %s AND last_retry_at IS NOT NULL AND last_retry_at < %s"
-            )
+        cutoff = self._dt_to_db(utc_now() - timedelta(minutes=older_than_minutes))
+        now = self._dt_to_db(utc_now())
+        replaying = FailedOperationStatus.REPLAYING.value
+        stale = "status = %s AND last_retry_at IS NOT NULL AND last_retry_at < %s"
+        released = 0
+        with self._cursor() as cursor:
             cursor.execute(
-                stmt,
-                (
-                    FailedOperationStatus.REQUIRES_REVIEW.value,
-                    FailedOperationStatus.PENDING.value,
-                    self._dt_to_db(utc_now()),
-                    FailedOperationStatus.REPLAYING.value,
-                    self._dt_to_db(cutoff),
+                self._prepare(
+                    f"SELECT {_SELECT_COLS} FROM {_TABLE} "
+                    f"WHERE {stale} AND retry_count >= max_retries"
                 ),
+                (replaying, cutoff),
             )
-            released = int(cursor.rowcount or 0)
-            if self._should_commit(conn):
-                conn.commit()
-            return released
-        except Exception:
-            if self._should_commit(conn):
-                try:
-                    conn.rollback()
-                except Exception:  # noqa: BLE001
-                    pass
-            raise
-        finally:
-            cursor.close()
+            for row in cursor.fetchall():
+                entry = self._row_to_data(row)
+                entry.resolution_note = STALE_RELEASE_AT_CAP_NOTE
+                cursor.execute(
+                    self._prepare(
+                        f"UPDATE {_TABLE} SET status = %s, updated_at = %s, data = %s "
+                        f"WHERE id = %s AND {stale} AND retry_count >= max_retries"
+                    ),
+                    (
+                        FailedOperationStatus.REQUIRES_REVIEW.value,
+                        now,
+                        self._payload_from_data(entry),
+                        int(entry.id),
+                        replaying,
+                        cutoff,
+                    ),
+                )
+                released += int(cursor.rowcount or 0)
+            cursor.execute(
+                self._prepare(
+                    f"UPDATE {_TABLE} SET status = %s, updated_at = %s "
+                    f"WHERE {stale} AND retry_count < max_retries"
+                ),
+                (FailedOperationStatus.PENDING.value, now, replaying, cutoff),
+            )
+            released += int(cursor.rowcount or 0)
+        return released
 
     # ----- Cleanup ----------------------------------------------------------
 
