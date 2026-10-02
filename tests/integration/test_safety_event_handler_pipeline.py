@@ -5,8 +5,8 @@ Verifies multi-component interactions for safety-critical event handlers.
 
 Test Categories:
     A. Security Violation Emergency Pipeline:
-        - Full pipeline: security event → emergency activation → cache invalidation
-        - Failure isolation: activate_auto failure stops pipeline before cache
+        - Full pipeline: security event → emergency activation → activation record
+        - Failure isolation: activate_auto failure stops at the failure record
     B. Error Budget Three-Status Pipeline:
         - Full lifecycle: WARNING → CRITICAL → RECOVERED with audit/cache/metric
         - Unified counter: all 3 statuses share single Prometheus counter
@@ -18,10 +18,14 @@ Note: All tests use mock-based dependencies - no infra dependency.
 
 from __future__ import annotations
 
+import re
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from structlog.stdlib import BoundLogger
 
+from baldur.models.emergency import EmergencyLevel
 from baldur.services.event_bus import (
     BaldurEvent,
     EventType,
@@ -39,32 +43,29 @@ def _make_event(event_type: EventType, data: dict, source: str = "test") -> Bald
 
 
 class TestSecurityViolationEmergencyPipeline:
-    """Integration: security violation → emergency mode → governance cache."""
+    """Integration: security violation → emergency mode → activation record."""
 
     @pytest.fixture(autouse=True)
     def _require_pro(self):
         pytest.importorskip("baldur_pro")
 
-    @patch("baldur.services.event_bus.bus.default_handlers.logger")
-    def test_full_pipeline_activation_and_cache_invalidation(self, mock_logger):
+    @patch("baldur.services.event_bus.bus.default_handlers.logger", spec=BoundLogger)
+    def test_full_pipeline_activation_record(self, mock_logger):
         """
         Purpose: Verify complete pipeline from security event to emergency activation
-        and governance cache invalidation.
+        and the record of the activation it committed.
 
-        Expected: activate_auto called with LEVEL_2, cache invalidated, success logged.
+        Expected: activate_auto called with LEVEL_2 under a per-call reason; the
+        committed state carries that reason, so the activated record is logged.
         """
-        from baldur_pro.services.emergency_mode.enums import EmergencyLevel
-
-        with (
-            patch(
-                "baldur_pro.services.emergency_mode.get_emergency_manager",
-            ) as mock_get_mgr,
-            patch(
-                "baldur_pro.services.governance.checks.invalidate_governance_cache",
-            ) as mock_cache,
-        ):
-            # Given: emergency manager configured
+        with patch(
+            "baldur_pro.services.emergency_mode.get_emergency_manager",
+        ) as mock_get_mgr:
+            # Given: a manager that commits — the returned state echoes the call
             mock_manager = MagicMock()
+            mock_manager.activate_auto.side_effect = lambda level, reason: (
+                SimpleNamespace(level=level, activation_reason=reason)
+            )
             mock_get_mgr.return_value = mock_manager
 
             event = _make_event(
@@ -80,38 +81,42 @@ class TestSecurityViolationEmergencyPipeline:
             # When
             _on_security_violation_critical(event)
 
-            # Then: emergency activation
-            mock_manager.activate_auto.assert_called_once_with(
-                level=EmergencyLevel.LEVEL_2,
-                reason="Security violation: injection_attempt (incident #777)",
-            )
-            # Then: governance cache invalidated
-            mock_cache.assert_called_once()
-            # Then: success logged
-            success_calls = [
-                c
-                for c in mock_logger.warning.call_args_list
-                if c.args[0] == "event_bus.security_violation_emergency_activated"
-            ]
-            assert len(success_calls) == 1
-            assert success_calls[0].kwargs["violation_type"] == "injection_attempt"
-            assert success_calls[0].kwargs["incident_id"] == 777
+        # Then: emergency activation
+        mock_manager.activate_auto.assert_called_once()
+        kwargs = mock_manager.activate_auto.call_args.kwargs
+        assert kwargs["level"] is EmergencyLevel.LEVEL_2
+        assert re.fullmatch(
+            r"Security violation: injection_attempt \(incident #777\) "
+            r"\[call [0-9a-f]{12}\]",
+            kwargs["reason"],
+        ), kwargs["reason"]
+        # Then: activation logged, and no other outcome record
+        outcome_calls = [
+            c
+            for c in mock_logger.warning.call_args_list
+            if c.args[0].startswith("event_bus.security_violation_emergency_")
+        ]
+        assert [c.args[0] for c in outcome_calls] == [
+            "event_bus.security_violation_emergency_activated"
+        ]
+        assert outcome_calls[0].kwargs == {
+            "violation_type": "injection_attempt",
+            "incident_id": 777,
+            "reason": kwargs["reason"],
+            "requested_level": "level_2",
+            "current_level": "level_2",
+        }
 
-    @patch("baldur.services.event_bus.bus.default_handlers.logger")
+    @patch("baldur.services.event_bus.bus.default_handlers.logger", spec=BoundLogger)
     def test_emergency_failure_stops_pipeline(self, mock_logger):
         """
-        Purpose: When activate_auto fails, pipeline stops before cache invalidation.
+        Purpose: When activate_auto fails, the pipeline stops at the failure record.
 
-        Expected: error logged, no cache invalidation attempted, no success log.
+        Expected: failure logged naming the violation, no outcome record.
         """
-        with (
-            patch(
-                "baldur_pro.services.emergency_mode.get_emergency_manager",
-            ) as mock_get_mgr,
-            patch(
-                "baldur_pro.services.governance.checks.invalidate_governance_cache",
-            ) as mock_cache,
-        ):
+        with patch(
+            "baldur_pro.services.emergency_mode.get_emergency_manager",
+        ) as mock_get_mgr:
             mock_manager = MagicMock()
             mock_manager.activate_auto.side_effect = ConnectionError("redis down")
             mock_get_mgr.return_value = mock_manager
@@ -124,10 +129,19 @@ class TestSecurityViolationEmergencyPipeline:
             # When
             _on_security_violation_critical(event)
 
-            # Then: failure logged with traceback (handler uses logger.exception)
-            mock_logger.exception.assert_called_once()
-            # Then: cache NOT invalidated (early return)
-            mock_cache.assert_not_called()
+        # Then: failure logged with traceback (handler uses logger.exception)
+        mock_logger.exception.assert_called_once()
+        failure = mock_logger.exception.call_args
+        assert failure.args == ("event_bus.security_violation_emergency_failed",)
+        assert failure.kwargs["violation_type"] == "token_forged"
+        assert failure.kwargs["incident_id"] == 1
+        assert failure.kwargs["requested_level"] == "level_2"
+        # Then: no outcome record (early return)
+        assert not [
+            c
+            for c in mock_logger.warning.call_args_list
+            if c.args[0].startswith("event_bus.security_violation_emergency_")
+        ]
 
 
 class TestErrorBudgetThreeStatusPipeline:

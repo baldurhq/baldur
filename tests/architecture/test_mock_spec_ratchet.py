@@ -195,7 +195,10 @@ _DECORATOR_PATCH_BUDGETS: dict[str, int] = {
     # audit WAL seam: -4 — the DLQ-compression audit suite stopped patching the
     # PRO audit writer per test and now stubs the WAL that writer resolves, so
     # the real delivery-ownership rule runs instead of a stand-in for it.
-    "oss": 661,
+    # security-violation outcome records: -6 — the cache-step test went with the
+    # step, and the handler's logger patches in both safety-event suites take
+    # the structlog BoundLogger interface as their spec.
+    "oss": 655,
     "pro": 434,
     "dormant": 144,
 }

@@ -2,7 +2,8 @@
 Safety Event Handler Tests (376).
 
 Tests for:
-1. _on_security_violation_critical — Emergency Mode LEVEL_2 activation
+1. _on_security_violation_critical — Emergency Mode LEVEL_2 activation and the
+   record of what the call did to the level
 2. _on_error_budget_warning — WARNING transition handler
 3. _on_error_budget_recovered — RECOVERED transition handler
 4. _on_error_budget_critical — Upgraded CRITICAL handler
@@ -12,10 +13,14 @@ Tests for:
 
 from __future__ import annotations
 
+import re
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from structlog.stdlib import BoundLogger
 
+from baldur.models.emergency import EmergencyLevel
 from baldur.services.event_bus import BaldurEvent, EventType
 from baldur.services.event_bus.bus.default_handlers import (
     _on_emergency_level_changed,
@@ -26,10 +31,33 @@ from baldur.services.event_bus.bus.default_handlers import (
 )
 from baldur.services.event_bus.bus.event_types import EventPriority
 
+_SV_ACTIVATED = "event_bus.security_violation_emergency_activated"
+_SV_ALREADY_ACTIVE = "event_bus.security_violation_emergency_already_active"
+_SV_NOT_RAISED = "event_bus.security_violation_emergency_not_raised"
+_SV_FAILED = "event_bus.security_violation_emergency_failed"
+_SV_OUTCOMES = (_SV_ACTIVATED, _SV_ALREADY_ACTIVE, _SV_NOT_RAISED)
+_SV_REASON = re.compile(
+    r"Security violation: (?P<violation>\S+) \(incident #(?P<incident>\S+)\) "
+    r"\[call (?P<call>[0-9a-f]{12})\]"
+)
+
 
 def _make_event(event_type: EventType, data: dict, source: str = "test") -> BaldurEvent:
     """Create a BaldurEvent for testing."""
     return BaldurEvent(event_type=event_type, data=data, source=source)
+
+
+def _state(level, reason: str | None) -> SimpleNamespace:
+    """The two fields the security handler reads off a returned state."""
+    return SimpleNamespace(level=level, activation_reason=reason)
+
+
+def _other_call(reason: str) -> str:
+    """The reason another handler call for the same incident would pass."""
+    match = _SV_REASON.fullmatch(reason)
+    assert match is not None, reason
+    other = "0" * 12 if match["call"] != "0" * 12 else "1" * 12
+    return reason[: match.start("call")] + other + "]"
 
 
 # =============================================================================
@@ -83,9 +111,8 @@ class TestSafetyEventHandlerContract:
             )
 
     def test_security_handler_activates_level_2(self):
-        """D1/Handler 1: Security violation triggers LEVEL_2 emergency."""
+        """D1/Handler 1: LEVEL_2, under today's text plus a per-call id."""
         pytest.importorskip("baldur_pro")
-        from baldur_pro.services.emergency_mode.enums import EmergencyLevel
 
         with (
             patch(
@@ -104,10 +131,55 @@ class TestSafetyEventHandlerContract:
             )
             _on_security_violation_critical(event)
 
-            mock_manager.activate_auto.assert_called_once_with(
-                level=EmergencyLevel.LEVEL_2,
-                reason="Security violation: token_forged (incident #42)",
+            mock_manager.activate_auto.assert_called_once()
+            kwargs = mock_manager.activate_auto.call_args.kwargs
+            assert kwargs["level"] is EmergencyLevel.LEVEL_2
+            assert re.fullmatch(
+                r"Security violation: token_forged \(incident #42\) "
+                r"\[call [0-9a-f]{12}\]",
+                kwargs["reason"],
+            ), kwargs["reason"]
+
+    @pytest.mark.parametrize(
+        ("returned", "record"),
+        [
+            (
+                lambda reason: _state(EmergencyLevel.LEVEL_2, reason),
+                "event_bus.security_violation_emergency_activated",
+            ),
+            (
+                lambda reason: _state(EmergencyLevel.LEVEL_3, "peer activation"),
+                "event_bus.security_violation_emergency_already_active",
+            ),
+            (
+                lambda reason: _state(EmergencyLevel.LEVEL_1, "operator drill"),
+                "event_bus.security_violation_emergency_not_raised",
+            ),
+        ],
+        ids=["activated", "already_active", "not_raised"],
+    )
+    def test_security_handler_outcome_records_are_warning(self, returned, record):
+        """D2: each outcome writes one WARNING record under its own name."""
+        pytest.importorskip("baldur_pro")
+
+        with (
+            patch(
+                "baldur_pro.services.emergency_mode.get_emergency_manager",
+            ) as mock_get_mgr,
+            patch(
+                "baldur.services.event_bus.bus.default_handlers.logger",
+            ) as mock_logger,
+        ):
+            mock_get_mgr.return_value.activate_auto.side_effect = lambda level, reason: (
+                returned(reason)
             )
+            _on_security_violation_critical(
+                _make_event(EventType.SECURITY_VIOLATION_CRITICAL, data={})
+            )
+
+        assert [c.args[0] for c in mock_logger.warning.call_args_list] == [record]
+        mock_logger.info.assert_not_called()
+        mock_logger.exception.assert_not_called()
 
     def test_critical_handler_event_name_is_event_bus_prefix(self):
         """D10: CRITICAL handler uses event_bus.* prefix, not event_handler.*."""
@@ -220,11 +292,142 @@ class TestSecurityViolationCriticalBehavior:
             source="security_service",
         )
 
+    @staticmethod
+    def _outcome_records(mock_logger) -> list:
+        return [
+            c for c in mock_logger.warning.call_args_list if c.args[0] in _SV_OUTCOMES
+        ]
+
+    @staticmethod
+    def _assert_failure_record_names_the_violation(mock_logger) -> None:
+        mock_logger.exception.assert_called_once()
+        failure = mock_logger.exception.call_args
+        assert failure.args == (_SV_FAILED,)
+        assert failure.kwargs["violation_type"] == "data_tampered"
+        assert failure.kwargs["incident_id"] == 100
+        assert _SV_REASON.fullmatch(failure.kwargs["reason"]), failure.kwargs
+        assert failure.kwargs["requested_level"] == "level_2"
+
+    @pytest.mark.parametrize(
+        ("returned", "record", "current_level"),
+        [
+            pytest.param(
+                lambda reason: _state(EmergencyLevel.LEVEL_2, reason),
+                _SV_ACTIVATED,
+                "level_2",
+                id="committed",
+            ),
+            pytest.param(
+                lambda reason: _state(EmergencyLevel.LEVEL_3, "peer activation"),
+                _SV_ALREADY_ACTIVE,
+                "level_3",
+                id="stored_level_3",
+            ),
+            pytest.param(
+                lambda reason: _state(
+                    EmergencyLevel.LEVEL_2, "Panic Threshold: 61.0% of circuits"
+                ),
+                _SV_ALREADY_ACTIVE,
+                "level_2",
+                id="level_2_other_trigger",
+            ),
+            pytest.param(
+                lambda reason: _state(EmergencyLevel.LEVEL_2, _other_call(reason)),
+                _SV_ALREADY_ACTIVE,
+                "level_2",
+                id="level_2_same_incident_other_call",
+            ),
+            pytest.param(
+                lambda reason: _state(EmergencyLevel.LEVEL_1, "operator drill"),
+                _SV_NOT_RAISED,
+                "level_1",
+                id="lower_level",
+            ),
+            pytest.param(
+                lambda reason: _state(EmergencyLevel.NORMAL, None),
+                _SV_NOT_RAISED,
+                "normal",
+                id="normal",
+            ),
+            pytest.param(
+                # An expired copy reads NORMAL but keeps the reason it was
+                # activated under — this call's own one included.
+                lambda reason: _state(EmergencyLevel.NORMAL, reason),
+                _SV_NOT_RAISED,
+                "normal",
+                id="expired_copy_with_this_calls_reason",
+            ),
+            pytest.param(
+                lambda reason: MagicMock(),
+                _SV_NOT_RAISED,
+                None,
+                id="no_emergency_level",
+            ),
+        ],
+    )
     @patch(
         "baldur.services.event_bus.bus.default_handlers.logger",
+        spec=BoundLogger,
+    )
+    def test_terminal_record_follows_the_returned_state(
+        self, mock_logger, returned, record, current_level
+    ):
+        """Only a state carrying this call's reason at LEVEL_2+ reads activated."""
+        with patch(
+            "baldur_pro.services.emergency_mode.get_emergency_manager",
+        ) as mock_get_mgr:
+            mock_get_mgr.return_value.activate_auto.side_effect = lambda level, reason: (
+                returned(reason)
+            )
+
+            _on_security_violation_critical(self._make_security_event())
+
+        passed_reason = mock_get_mgr.return_value.activate_auto.call_args.kwargs[
+            "reason"
+        ]
+        [terminal] = self._outcome_records(mock_logger)
+        assert terminal.args == (record,)
+        assert terminal.kwargs == {
+            "violation_type": "data_tampered",
+            "incident_id": 100,
+            "reason": passed_reason,
+            "requested_level": "level_2",
+            "current_level": current_level,
+        }
+        mock_logger.exception.assert_not_called()
+
+    @patch(
+        "baldur.services.event_bus.bus.default_handlers.logger",
+        spec=BoundLogger,
+    )
+    def test_two_calls_for_one_event_pass_different_reasons(self, mock_logger):
+        """Each call marks its reason with a fresh id after today's text."""
+        with patch(
+            "baldur_pro.services.emergency_mode.get_emergency_manager",
+        ) as mock_get_mgr:
+            event = self._make_security_event()
+            _on_security_violation_critical(event)
+            _on_security_violation_critical(event)
+
+        reasons = [
+            c.kwargs["reason"]
+            for c in mock_get_mgr.return_value.activate_auto.call_args_list
+        ]
+        assert len(reasons) == 2
+        for reason in reasons:
+            assert re.fullmatch(
+                r"Security violation: data_tampered \(incident #100\) "
+                r"\[call [0-9a-f]{12}\]",
+                reason,
+            ), reason
+        assert reasons[0] != reasons[1]
+
+    @patch(
+        "baldur.services.event_bus.bus.default_handlers.logger",
+        spec=BoundLogger,
     )
     def test_activate_auto_failure_returns_early(self, mock_logger):
-        """activate_auto() exception → error log + early return (no cache invalidation)."""
+        """activate_auto() exception → failure record, no outcome record."""
         with patch(
             "baldur_pro.services.emergency_mode.get_emergency_manager",
         ) as mock_get_mgr:
@@ -235,59 +438,14 @@ class TestSecurityViolationCriticalBehavior:
             event = self._make_security_event()
             _on_security_violation_critical(event)
 
-            # Error logged via .exception() for automatic traceback capture
-            mock_logger.exception.assert_called_once()
-            assert (
-                "event_bus.security_violation_emergency_failed"
-                in mock_logger.exception.call_args.args
-            )
-
-            # Success log NOT called (early return)
-            success_calls = [
-                c
-                for c in mock_logger.warning.call_args_list
-                if c.args[0] == "event_bus.security_violation_emergency_activated"
-            ]
-            assert len(success_calls) == 0
+        # Error logged via .exception() for automatic traceback capture
+        self._assert_failure_record_names_the_violation(mock_logger)
+        assert mock_logger.exception.call_args.kwargs["error"] == "db down"
+        assert self._outcome_records(mock_logger) == []
 
     @patch(
         "baldur.services.event_bus.bus.default_handlers.logger",
-    )
-    def test_cache_invalidation_failure_does_not_block_success_log(self, mock_logger):
-        """Governance cache failure is non-critical — success log still emitted."""
-        with (
-            patch(
-                "baldur_pro.services.emergency_mode.get_emergency_manager",
-            ) as mock_get_mgr,
-            patch(
-                "baldur_pro.services.governance.checks.invalidate_governance_cache",
-                side_effect=RuntimeError("cache error"),
-            ),
-        ):
-            mock_manager = MagicMock()
-            mock_get_mgr.return_value = mock_manager
-
-            event = self._make_security_event()
-            _on_security_violation_critical(event)
-
-            # Cache failure warning logged
-            cache_fail_calls = [
-                c
-                for c in mock_logger.warning.call_args_list
-                if c.args[0] == "event_bus.governance_cache_invalidation_failed"
-            ]
-            assert len(cache_fail_calls) == 1
-
-            # Success log still emitted
-            success_calls = [
-                c
-                for c in mock_logger.warning.call_args_list
-                if c.args[0] == "event_bus.security_violation_emergency_activated"
-            ]
-            assert len(success_calls) == 1
-
-    @patch(
-        "baldur.services.event_bus.bus.default_handlers.logger",
+        spec=BoundLogger,
     )
     def test_missing_event_data_uses_defaults(self, mock_logger):
         """Missing violation_type/incident_id defaults to 'unknown'."""
@@ -302,43 +460,46 @@ class TestSecurityViolationCriticalBehavior:
 
             mock_manager.activate_auto.assert_called_once()
             call_kwargs = mock_manager.activate_auto.call_args.kwargs
-            assert (
-                call_kwargs["reason"]
-                == "Security violation: unknown (incident #unknown)"
-            )
+            assert re.fullmatch(
+                r"Security violation: unknown \(incident #unknown\) "
+                r"\[call [0-9a-f]{12}\]",
+                call_kwargs["reason"],
+            ), call_kwargs["reason"]
 
     @patch(
         "baldur.services.event_bus.bus.default_handlers.logger",
+        spec=BoundLogger,
     )
     def test_get_emergency_manager_failure_returns_early(self, mock_logger):
-        """get_emergency_manager() init failure → error log + early return."""
-        with (
-            patch(
-                "baldur_pro.services.emergency_mode.get_emergency_manager",
-                side_effect=RuntimeError("singleton init failed"),
-            ),
-            patch(
-                "baldur_pro.services.governance.checks.invalidate_governance_cache",
-            ) as mock_cache,
+        """get_emergency_manager() init failure → failure record, no outcome record."""
+        with patch(
+            "baldur_pro.services.emergency_mode.get_emergency_manager",
+            side_effect=RuntimeError("singleton init failed"),
         ):
             event = self._make_security_event()
             _on_security_violation_critical(event)
 
-            # Error logged via .exception() for automatic traceback capture
-            mock_logger.exception.assert_called_once()
-            assert (
-                "event_bus.security_violation_emergency_failed"
-                in mock_logger.exception.call_args.args
-            )
+        self._assert_failure_record_names_the_violation(mock_logger)
+        assert self._outcome_records(mock_logger) == []
 
-            # Early return — cache NOT invalidated, success log NOT emitted
-            mock_cache.assert_not_called()
-            success_calls = [
-                c
-                for c in mock_logger.warning.call_args_list
-                if c.args[0] == "event_bus.security_violation_emergency_activated"
-            ]
-            assert len(success_calls) == 0
+    @patch(
+        "baldur.services.event_bus.bus.default_handlers.logger",
+        spec=BoundLogger,
+    )
+    def test_empty_manager_slot_returns_early(self, mock_logger):
+        """No emergency manager registered → failure record naming the violation."""
+        from baldur.factory.registry import ProviderRegistry
+
+        with patch.object(
+            ProviderRegistry.emergency_manager, "safe_get", return_value=None
+        ):
+            _on_security_violation_critical(self._make_security_event())
+
+        self._assert_failure_record_names_the_violation(mock_logger)
+        assert mock_logger.exception.call_args.kwargs["error"] == (
+            "baldur_pro EmergencyManager not registered"
+        )
+        assert self._outcome_records(mock_logger) == []
 
 
 class TestErrorBudgetWarningBehavior:

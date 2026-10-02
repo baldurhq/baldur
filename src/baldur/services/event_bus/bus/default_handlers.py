@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 import structlog
 
 from baldur.audit.helpers import (
@@ -9,6 +11,7 @@ from baldur.audit.helpers import (
     log_error_budget_recovered_audit,
     log_error_budget_warning_audit,
 )
+from baldur.models.emergency import EmergencyLevel
 
 from .event_types import EventPriority, EventType
 from .models import BaldurEvent
@@ -376,45 +379,66 @@ def _on_security_violation_critical(event: BaldurEvent):
     Triggers LEVEL_2 emergency on TOKEN_FORGED, DATA_TAMPERED, INJECTION_ATTEMPT.
     Security service follows "NEVER self-heal" — this handler bridges the gap
     via event bus, not direct coupling.
+
+    The terminal record says what this call did to the level, read from the
+    state ``activate_auto`` returns: ``..._activated`` when this call wrote the
+    level, ``..._already_active`` when a level at or above LEVEL_2 was already
+    in force, ``..._not_raised`` when the level this process acts on stays
+    below it (kill switch pulled, or a write the store did not confirm — the
+    manager logs the cause just before). Each record carries
+    ``requested_level`` and ``current_level``, the level this process acts on
+    when the call returns. With a distributed event bus every process runs
+    this handler for one violation, and only the one whose write landed
+    records an activation.
     """
     violation_type = event.data.get("violation_type", "unknown")
     incident_id = event.data.get("incident_id", "unknown")
-    reason = f"Security violation: {violation_type} (incident #{incident_id})"
+    # The reason is the only per-call value activate_auto writes into the
+    # state, so a fresh id in it tells this call's write apart from a level
+    # another trigger, or another process handling the same violation, set.
+    reason = (
+        f"Security violation: {violation_type} (incident #{incident_id}) "
+        f"[call {uuid4().hex[:12]}]"
+    )
+    requested_level = EmergencyLevel.LEVEL_2
 
-    # 1. Core state change — failure here is critical (emergency not activated)
     try:
         from baldur.factory.registry import ProviderRegistry
-        from baldur.models.emergency import EmergencyLevel
 
         manager = ProviderRegistry.emergency_manager.safe_get()
         if manager is None:
             raise RuntimeError("baldur_pro EmergencyManager not registered")
-        manager.activate_auto(level=EmergencyLevel.LEVEL_2, reason=reason)
+        state = manager.activate_auto(level=requested_level, reason=reason)
     except Exception as e:
         logger.exception(
             "event_bus.security_violation_emergency_failed",
+            violation_type=violation_type,
+            incident_id=incident_id,
+            reason=reason,
+            requested_level=requested_level.value,
             error=str(e),
         )
         return
 
-    # 2. Side-effect — failure is non-critical (cache expires naturally via 30s TTL)
-    # Note: activate_auto() internally emits EMERGENCY_LEVEL_CHANGED,
-    # which may also trigger cache invalidation via other handlers.
-    # Duplicate invalidation is harmless (dict.clear() is idempotent).
-    try:
-        from baldur.factory.registry import ProviderRegistry
-
-        ProviderRegistry.governance.get().invalidate_governance_cache()
-    except Exception:
-        logger.warning("event_bus.governance_cache_invalidation_failed")
-
-    logger.warning(
-        "event_bus.security_violation_emergency_activated",
-        violation_type=violation_type,
-        incident_id=incident_id,
-        emergency_level=EmergencyLevel.LEVEL_2.value,
-        reason=reason,
-    )
+    # Read defensively: the manager slot's return type is open, and a value
+    # with no EmergencyLevel on it reads as not raised.
+    level = getattr(state, "level", None)
+    at_or_above = isinstance(level, EmergencyLevel) and level >= requested_level
+    record = {
+        "violation_type": violation_type,
+        "incident_id": incident_id,
+        "reason": reason,
+        "requested_level": requested_level.value,
+        "current_level": level.value if isinstance(level, EmergencyLevel) else None,
+    }
+    if at_or_above and getattr(state, "activation_reason", None) == reason:
+        logger.warning("event_bus.security_violation_emergency_activated", **record)
+    elif at_or_above:
+        logger.warning(
+            "event_bus.security_violation_emergency_already_active", **record
+        )
+    else:
+        logger.warning("event_bus.security_violation_emergency_not_raised", **record)
 
 
 # =============================================================================
