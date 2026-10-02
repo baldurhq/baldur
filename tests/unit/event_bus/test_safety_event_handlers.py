@@ -363,6 +363,30 @@ class TestSecurityViolationCriticalBehavior:
                 None,
                 id="no_emergency_level",
             ),
+            pytest.param(
+                # The manager slot's return type is open: a manager that
+                # returns nothing still gets a record, not an AttributeError.
+                lambda reason: None,
+                _SV_NOT_RAISED,
+                None,
+                id="nothing_returned",
+            ),
+            pytest.param(
+                # A state with a level but no reason field was not written by
+                # this call.
+                lambda reason: SimpleNamespace(level=EmergencyLevel.LEVEL_3),
+                _SV_ALREADY_ACTIVE,
+                "level_3",
+                id="level_without_reason_field",
+            ),
+            pytest.param(
+                # A level string is not compared: "normal" sorts above
+                # "level_2" as text and would read as an activation.
+                lambda reason: _state(EmergencyLevel.NORMAL.value, reason),
+                _SV_NOT_RAISED,
+                None,
+                id="level_as_string_with_this_calls_reason",
+            ),
         ],
     )
     @patch(
