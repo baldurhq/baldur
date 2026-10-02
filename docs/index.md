@@ -1,6 +1,6 @@
 ---
-title: Self-healing reliability for Python
-description: Self-healing reliability for Python — circuit breaker, retry, fallback, and dead-letter queue behind one decorator. Framework-agnostic, zero infrastructure to start.
+title: Python LLM jobs that survive 429s and outages
+description: One line around your OpenAI, Anthropic or Gemini client — your workers share the provider's 429 wait instead of each retrying into it, and a job an outage stops is parked with its arguments and re-run when the provider is back. In-process Python, no proxy.
 hide:
   - navigation
   - toc
@@ -17,8 +17,15 @@ hide:
   is real intro content.
 -->
 
-Baldur is a self-healing reliability layer for Python applications: circuit
-breaker, retry, fallback, and dead-letter queue behind one decorator. With zero
+Baldur keeps the Python jobs a failing API stops. For LLM calls it is one line:
+`baldur.llm.wrap` puts one wait in front of every worker when OpenAI, Anthropic
+or Gemini answers 429 or "overloaded", and `@baldur.protected(..., replay=True)`
+parks a job an outage stopped, with its arguments, and re-runs it once the
+provider is back — automatically on a Celery worker, or from the console with a
+click. See [LLM rate limits](llm-rate-limits.md).
+
+Underneath, it is a reliability layer for any dependency: circuit breaker,
+retry, fallback, and dead-letter queue behind one decorator. With zero
 configuration it runs on an in-memory fallback — no Redis, no environment
 variables, no Docker. Add Redis when you go multi-process.
 

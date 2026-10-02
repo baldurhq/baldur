@@ -84,10 +84,10 @@ observe-only the would-store record shares its event with the would-have records
 breaker and the retry stage write for every call, so in a dry run of more than a few calls per ten
 seconds most would-store records are among those dropped.
 
-Two switches exclude every call of a process at once rather than one call, so they log no
-per-call record: the kill switch, which makes Baldur step aside and is logged once per process when
-it changes, and `BALDUR_PROTECT_ENABLED=false`, under which a protected function runs bare and
-nothing is logged. An async call cancelled from outside, by a task cancel or by the caller's own
+Two switches exclude every call of a process at once rather than one call, so neither writes a
+per-call record of the exclusion: the kill switch, which makes Baldur step aside and is logged once
+per process when it changes, and `BALDUR_PROTECT_ENABLED=false`, under which a protected function
+runs bare. An async call cancelled from outside, by a task cancel or by the caller's own
 `asyncio.wait_for` running out, is not parked either and leaves no record: the cancellation passes
 through Baldur untouched. Bound the call with Baldur's `timeout=` when its expiry should be parked.
 Capturing a failure is designed to
@@ -108,6 +108,8 @@ stateDiagram-v2
     REPLAYING --> PENDING: replay fails, attempts remain
     REPLAYING --> REQUIRES_REVIEW: replay attempts exhausted
     REPLAYING --> REQUIRES_REVIEW: automatic on-recovery replay fails
+    REPLAYING --> PENDING: held past the stale-release cutoff, attempts remain
+    REPLAYING --> REQUIRES_REVIEW: interrupted on its last allowed attempt
     REQUIRES_REVIEW --> REPLAYING: operator force-redrives after a fix
     PENDING --> EXPIRED: expiry window passes
     RESOLVED --> ARCHIVED: aged out / cleaned up
@@ -133,22 +135,50 @@ You have three ways to replay the queued work:
   with rate limiting and backpressure that your own code can pace replay work through.
 - **Automatic on recovery.** When a dependency's circuit breaker closes again after an outage, Baldur
   sweeps the queued failures tied to it (the calls its open breaker rejected, and the failure types
-  you mapped to it) and replays them, so recovery and catch-up happen together. The sweep works in
-  passes of a bounded size and keeps going, pass after pass, until the backlog is drained or a bound
-  stops it. How far one recovery goes, and how it tells you when it stopped early, is covered under
-  *Closing the loop* below.
+  you mapped to it) and replays them, so recovery and catch-up happen together. Not every outage
+  closes a breaker — one too short to open it, a batch that ended while it was open, a job with no
+  breaker at all — so Baldur also runs a **recovery trial**: about once a minute it replays one
+  parked job per job name, taken from the failures that name's sweep would replay, and when that
+  job succeeds it sweeps the rest. A sweep works in passes of
+  a bounded size and keeps going, pass after pass, until the backlog is drained or a bound stops it.
+  How far one recovery goes, how the trial is paced, and how a recovery tells you it stopped early
+  are covered under *Closing the loop* below.
 
 When a failure can't be replayed successfully (the dependency is still down, or the work itself is
 broken), the entry goes back to waiting, and every replay attempt spends part of a configurable
 replay budget. An entry that exhausts that budget is neither retried forever nor discarded: it
 converges to a terminal **needs-review** state, where it stays queryable so an operator can
-investigate. The automatic on-recovery sweep is stricter than the operator-driven and code paths: an
-entry that fails during the sweep is parked for review right away, without spending the rest of its
-budget. Once the root cause is fixed, an operator can deliberately **force-redrive** the parked
+investigate. The sweep a breaker's closing starts is stricter than the operator-driven and code
+paths: an entry whose job runs and fails during that sweep is parked for review right away, without
+spending the rest of its budget. On the automatic paths and in replay from code, a replay whose job
+never began (its own circuit breaker refused the call, or its own idempotency key kept it from
+starting) spends nothing and is not parked; the console and REST actions count it as an attempt. A
+function protected with `@baldur.protected(name, replay=True)`, which Baldur re-runs from its stored
+arguments, reports this by itself; a hand-written handler says so in its result (see step 1 under
+*Closing the loop*). A replay that was interrupted (its worker died, or its job stopped waiting
+on a run that is still going: its own `timeout=` gave up, or a Celery soft time limit or another
+interruption cut that wait short) stays in REPLAYING until the stale release returns it, once
+it has been held 30 minutes (the default; never less than 10): back to waiting, or to needs-review
+when that was its last allowed attempt. The stale release runs as a Celery task: Beat queues it
+every 15 minutes on the `maintenance` queue and each recovery-trial tick runs it too, so without a
+Celery worker an interrupted entry stays in REPLAYING. A replay you start yourself is held the same way: a
+single-entry retry or force-redrive whose job may still be running answers with the entry's
+status `replaying` (or with an error, when the job raised), and a console/REST batch replay
+(**PRO**) leaves each such entry replaying and counts it failed; the entry does not come back
+sooner when the job ends, and retrying it again is refused until the stale release. The hold has
+a limit: a job still running when the stale release returns its entry can be started again beside
+itself, so give the job's own outbound calls a timeout that ends a stuck run well inside that
+window. PRO's throttle-recovery replay, which replays entries a throttle rejected, runs them
+without taking them and holds none. Once the root cause is fixed, an operator can deliberately **force-redrive** the parked
 entry, an admin-level action (recorded in the audit trail when PRO is active) that grants it a fresh
 replay budget and sends it back through replay. If the underlying problem still isn't fixed, the
 entry spends that fresh budget the same way as the first one and re-converges to needs-review, so a
 force-redrive can never turn a poison-pill into an endless loop.
+
+With PRO active and its scheduled retention running, an entry captured more than 72 hours ago is
+marked expired at the next retention run (every six hours) and can no longer be replayed or
+force-redriven. On the Redis store only waiting entries expire; on the in-memory and SQL stores
+entries parked for review expire too.
 
 | What you observe | When it happens |
 |------------------|-----------------|
@@ -157,11 +187,12 @@ force-redrive can never turn a poison-pill into an endless loop.
 | You retry or resolve a single entry | an operator action from the Web Console DLQ panel or the REST API |
 | You force-redrive an entry parked for review | an admin action over the REST API |
 | A batch of queued entries replays in one call | `batch_replay_by_failure_type` from code (one failure type, 100 entries by default), or the console/REST batch replay (**PRO**; pending entries, 50 by default, optionally of one domain over REST) |
-| Queued work drains on its own | a dependency's circuit breaker recovers and an automatic replay sweep runs |
-| A drain stops with work still queued, and says why | the recovery's continuation bound was reached, a circuit for that domain re-opened, a pass made no progress, or a pass errored (a `DLQ_REPLAY_BLOCKED` event whose `block_reason` names which) |
+| Queued work drains on its own | a dependency's circuit breaker recovers, or a recovery trial finds the dependency answering again, and an automatic replay sweep runs |
+| One parked job of a name is replayed on its own while the others wait, first after a minute, then less and less often | the recovery trial testing whether the job's dependency answers again (one job per job name; 60 seconds, doubling up to 9 minutes while trials keep failing) |
+| A drain stops with work still queued, and says why | the recovery's continuation bound was reached, a circuit for that domain re-opened, the integrity gate blocked replay, governance blocked automation (**PRO**), a pass made no progress, or a pass errored (a `DLQ_REPLAY_BLOCKED` event whose `block_reason` names which) |
 | A batch replay grows or shrinks batch by batch | adaptive batch sizing was opted in (`use_adaptive=True`) and the recent replay success rate changes |
-| An entry stops being retried and is parked in a needs-review state | its replay attempts are exhausted, or it failed once during an automatic on-recovery sweep |
-| Old entries age out — expiring, then archiving | **PRO** — scheduled archive/purge retention is active |
+| An entry stops being retried and is parked in a needs-review state | its replay attempts are exhausted, its job ran and failed during the sweep a breaker's closing started, or it was interrupted on its last allowed attempt |
+| An entry expires and can no longer be replayed | **PRO**: 72 hours after capture, while the scheduled retention runs |
 | New failures displace the oldest entries, or are rejected | the queue hits its size limit and the overflow strategy applies |
 | Buffered entries are written out, or spilled to the local fallback, as a process exits | a worker stops or is recycled while its outbox still holds entries |
 
@@ -174,10 +205,11 @@ When the queue reaches its size limit, the **overflow strategy** decides what gi
   its size limit, so until then a domain at its own limit still takes about nine of every ten new
   failures.
 - `compress_oldest` (**PRO**) summarizes the oldest entries into a compact record before evicting
-  them, so an aggregate trace of what failed survives even after the raw entries are gone. These
+  them, so an aggregate trace of what failed survives even after the raw entries are gone. That
+  holds on the Redis and in-memory stores; on the SQL store it evicts them with no summary. The
   summaries are grouped by domain, failure type, and error code, stay queryable over the REST API,
-  and age through their own lifecycle (`ACTIVE`, then `STALE`, then `ARCHIVED`) so old aggregates
-  clean themselves up over time instead of accumulating forever. Without PRO, `compress_oldest`
+  and move through their own lifecycle (`ACTIVE`, then `STALE`, then `ARCHIVED`); an archived
+  summary is kept, not deleted. Without PRO, `compress_oldest`
   falls back to `drop_oldest`, with a one-time warning the first time the queue overflows.
 
 The queue lives in one of three stores, chosen once at startup: in-memory, Redis, or SQL.
@@ -195,7 +227,7 @@ every exit path (a signalled stop, a gunicorn or Celery worker recycle, and a pl
 when a script returns or calls `sys.exit()`, through an `atexit` hook the outbox registers when it
 starts) under one time budget, `BALDUR_DLQ_OUTBOX_JOIN_TIMEOUT_SECONDS` (5 seconds by default):
 buffered entries are flushed to the store, the writer is joined, and whatever is still unwritten at
-that point is spilled to the local on-disk fallback. Keep that budget **below the process watchdog
+that point is spilled to the local on-disk fallback (the manual-recovery record above). Keep that budget **below the process watchdog
 that will kill the worker anyway** (gunicorn `--timeout`, Kubernetes
 `terminationGracePeriodSeconds`): a teardown the watchdog cuts short loses its tail with no report,
 whereas a teardown that runs out of its own budget reports exactly what it lost. If the deadline
@@ -206,12 +238,8 @@ hooks when they are wired, and from the `atexit` hook when they are not; the
 [gunicorn graceful-shutdown runbook](https://github.com/baldurhq/baldur/blob/main/docs/runbooks/gunicorn-graceful-shutdown.md)
 shows the two ways to wire the hooks and how the budget fits gunicorn's own timeouts.
 
-With PRO active, two things change. The outbox gains an opt-in disk-durable mode, in which the
-background writer saves each entry it takes from the buffer to a local disk buffer before writing
-it to the store, so an entry already taken is kept on disk across a process crash, though, as with
-the local fallback, nothing moves it back into the queue on restart; one still waiting in the
-in-memory buffer is not kept. And the Meta-Watchdog daemon actively probes the liveness
-of that background writer, so a stalled drain is detected rather than silently backing up.
+With PRO active, the Meta-Watchdog daemon actively probes the liveness of that background
+writer, so a stalled drain is detected rather than silently backing up.
 
 ### Trace continuity: from the original failure to its replay
 
@@ -223,14 +251,14 @@ failure → DLQ capture → replay" reads as one connected story instead of two 
 **How the link is made.** At capture time Baldur records the failing request's trace on the entry
 (its `origin_trace_id`, plus the full W3C trace/span ids when an OpenTelemetry span is active). When
 that entry is later replayed — by any path: a targeted retry, a batch, an automatic on-recovery
-sweep, or a force-redrive — Baldur re-attaches that origin:
+sweep, a recovery trial, or a force-redrive — Baldur re-attaches that origin:
 
 - when OpenTelemetry is active and the entry carries its origin span ids, every replay path wraps
   the replay in a `dlq.replay` span carrying a **span link** back to the original failure's span,
   plus a searchable `baldur.dlq.origin_trace_id` attribute,
 - the log lines reporting the replay carry an `origin_trace_id` field, and
-- the replay paths that write an audit record (a batch replay, the automatic sweep, a
-  force-redrive, with PRO's audit trail active) record the origin trace there too; a targeted
+- the replay paths that write an audit record (a batch replay, the automatic sweep, a recovery
+  trial, a force-redrive, with PRO's audit trail active) record the origin trace there too; a targeted
   single-entry retry keeps its trail in the log line and the span instead of a per-entry audit record.
 
 The link is **additive**: the replay keeps its own trace (the operator request or circuit-breaker
@@ -270,7 +298,7 @@ replay without an origin link — the absence is the normal state, not an error.
 
 `@baldur.protected` does not send a call's final failures, or the calls its open circuit rejects, to
 the dead letter queue unless the call site asks for it with `dlq=True` (the `@dlq_protect` preset pins
-it on, together with retry and the circuit breaker). The queue itself is ready with no wiring — storage resolves to your configured
+it on, together with retry and the circuit breaker, and `replay=True` implies it). The queue itself is ready with no wiring — storage resolves to your configured
 backend or the in-memory fallback — so the flag is not about infrastructure. It is about what gets
 stored.
 
@@ -285,7 +313,7 @@ Persisting that data is therefore a decision Baldur leaves to you, made explicit
 rather than something an upgrade switches on silently.
 
 There is deliberately no "capture without the payload" middle ground. Replay re-runs the captured
-request data, so an entry that lost its payload (for example, cut off by the write-side size cap)
+request data, so an entry whose payload the write-side size cap cut off
 is refused replay rather than re-run half-blind — a payload-less capture would demote the queue
 from a work queue to a log. For call sites that should record the failure but must not snapshot
 arguments (say, a password-verification path), keep `dlq=True` and pass `context_from=False`: the
@@ -311,27 +339,31 @@ The knobs an operator sets most often. The full list lives in the API reference.
 | `BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_ENABLED` | `true` | Automatic replay of queued failures when a circuit breaker recovers |
 | `BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_MAX_ITEMS` | `100` | Entries one on-recovery pass replays |
 | `BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_MAX_CONTINUATIONS` | `100` | Passes one recovery may chain while work is still reachable; multiplied by the pass size, the most one recovery drains |
+| `BALDUR_REPLAY_AUTOMATION_RECOVERY_TRIAL_ENABLED` | `true` | The recovery trial: one parked job per job name replayed periodically to find out whether its dependency answers again; it also needs `BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_ENABLED` |
 
 If you don't use automatic replay, turn it off rather than leaving it half-configured: with
 `BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_ENABLED=false`, recovery events skip the replay dispatch
-entirely, and the per-recovery WARNING that Celery is missing disappears with it (the arming
-surface reports `disabled`).
+entirely, the recovery trial stops, and the WARNING that Celery is missing, raised on a recovery that
+leaves work parked, disappears with it (the arming surface reports `disabled`).
 
 ### Closing the loop — making automatic replay actually drain
 
-Automatic replay on circuit-breaker recovery is on by default, but it only *drains*
-your backlog once its prerequisites are in place. Until they are, a recovery leaves the entries
+Automatic replay — on a circuit breaker's recovery and by the recovery trial — is on by default, but
+it only *drains* your backlog once its prerequisites are in place. Until they are, a recovery leaves the entries
 parked — captured and safe, but not replayed. The Web Console DLQ panel and the
 `GET /dlq/cleanup/stats/` payload report an **armed / disarmed / unverified** state and name the
 prerequisite behind it, so you can tell at a glance whether the loop is live.
 
-Two sweeps can drain the queue, and they need different things: the open-circuit sweep replays what
-an open breaker rejected, and the mapped sweep replays the failure types you listed for the
-recovered service. Four prerequisites are shared — the enable flag, the Celery extra, a worker on
-the queue, and a registered handler — and each sweep adds one of its own: the mapped sweep needs a
-`service_failure_type_map` entry (`map_unconfigured` when it has none), and the open-circuit sweep
-needs open-circuit capture on (`open_circuit_capture_disabled` when it is off). `armed` is true when
-*either* sweep has everything it needs; the `lanes` block says which:
+Three lanes can drain the queue, and they need different things: the open-circuit sweep replays
+what an open breaker rejected, the mapped sweep replays the failure types you listed for the
+recovered service, and the recovery trial replays one parked job per job name, from those same
+failures, until one succeeds.
+Four prerequisites are shared — the enable flag, the Celery extra, a worker on the queue, and a
+registered handler — and each lane adds one of its own: the mapped sweep needs a
+`service_failure_type_map` entry (`map_unconfigured` when it has none), the open-circuit sweep needs
+open-circuit capture on (`open_circuit_capture_disabled` when it is off), and the recovery trial
+needs its switch on (`recovery_trial_disabled` when it is off). `armed` is true when *any* lane has
+everything it needs; the `lanes` block says which:
 
 1. **Register a replay handler per domain.** Baldur captures the failed work, but only *your* code
    knows how to re-run it. Register a handler for each domain you want replayed:
@@ -354,10 +386,22 @@ needs open-circuit capture on (`open_circuit_capture_disabled` when it is off). 
     register_replay_handler(PaymentReplayHandler())
     ```
 
-    Without a registered handler, every replay for that domain fails per-entry: an entry the
-    on-recovery sweep replays is parked for review at once, and one replayed by hand once its replay
-    budget is spent. The arming surface reports `handler_missing` only while no handler at all is
-    registered; it does not check that each domain you capture has one. Registration is per
+    A function protected with `@baldur.protected(name, replay=True)` registers its own handler,
+    which re-runs it from its stored arguments (see [LLM API rate limits](../../llm-rate-limits.md)).
+
+    Without a registered handler, nothing replays that domain's entries automatically: the sweeps
+    and the recovery trial select nothing for that domain, and batch replay from code asks the
+    domain's handler before it takes an entry, which the default handler refuses, so the entries
+    wait untouched. A single-entry retry from
+    the console or the REST API takes the entry first and spends one replay attempt failing. The
+    arming surface reports `handler_missing` only while no handler at all is registered; it does not
+    check that each domain you capture has one.
+
+    When your handler's call was refused by the job's own circuit breaker before the work began,
+    say so in the result, so the automatic paths and replay from code give the replay attempt back
+    and the entry waits for the next replay: `ReplayResult(success=False, dlq_id=failed_op.id, error="...", data={"job_started":
+    False, "rejected_by_breaker": True})` (`"job_started": False` alone for work that did not begin
+    for another reason). A result without these flags counts as work that ran. Registration is per
     process: the on-recovery sweep runs inside the Celery
     worker, so the worker must register the handler too, and the arming surface can only vouch
     for the process that answers it.
@@ -365,12 +409,17 @@ needs open-circuit capture on (`open_circuit_capture_disabled` when it is off). 
 2. **Map recovered services to their failure types.** When a circuit breaker closes, Baldur needs to
    know *which* captured entries the recovered dependency is responsible for. Configure that mapping
    with `BALDUR_REPLAY_AUTOMATION_SERVICE_FAILURE_TYPE_MAP` (see
-   [Environment Variables](../../reference/env-vars.md)). A mapped type is matched in every domain,
-   not only the recovered service's, and a `dlq=True` failure is typed `MAX_RETRIES_` plus its
-   exception's class name (`MAX_RETRIES_TIMEOUTERROR`, as an entry's detail view shows it), so map
-   only types that the recovered dependency alone raises. Unless the open-circuit lane below has
-   something to sweep, an empty mapping is surfaced as a blocked-with-signal event on recovery,
-   not a silent no-op; the arming surface reports `map_unconfigured` either way.
+   [Environment Variables](../../reference/env-vars.md)). A mapped type is matched only under the
+   mapped service's own domain — the name in its stored form, `payment_api` for `Payment-API` — and
+   only when a replay handler is registered for that domain. A handler can also name the types of
+   its own domain to replay, in its `auto_replay_failure_types` property, with no map entry (the
+   arming surface still reports `map_unconfigured`). A `dlq=True` failure is typed
+   `MAX_RETRIES_` plus its exception's class name (`MAX_RETRIES_TIMEOUTERROR`, as an entry's detail
+   view shows it); an entry whose type is neither mapped nor named by the handler stays parked
+   through a recovery without a signal. A recovery whose breaker name gets no lane at all (no
+   replay handler for its domain, or no domain of its own) and that leaves entries parked is
+   surfaced as a blocked-with-signal event naming which is missing, not a silent no-op; with no
+   mapping, the arming surface reports `map_unconfigured` either way.
 
     Entries captured because the circuit was open are the one exception: the circuit that just closed
     is the very one that rejected them, so they need no map entry. On recovery they are swept for
@@ -381,15 +430,15 @@ needs open-circuit capture on (`open_circuit_capture_disabled` when it is off). 
     `map_unconfigured` on its own — the sweep
     that drains its captures runs, the one that has nothing to select by does not.
 
-3. **Run a Celery worker on the `dlq_processing` queue.** On-recovery replay execution is dispatched to Celery.
-   A worker must be consuming the `dlq_processing` queue for the dispatched replay to run:
+3. **Run a Celery worker on the `dlq_processing` queue.** On-recovery replay and the recovery trial
+   run as Celery tasks. A worker must be consuming the `dlq_processing` queue for them to run:
 
     ```bash
     celery -A your_app worker -Q dlq_processing
     ```
 
-    If Celery itself is absent, the recovery logs a WARNING naming this remediation and the arming
-    surface reports `celery_missing`. If Celery is present but no worker is consuming the queue, the
+    If Celery itself is absent, the arming surface reports `celery_missing`, and a recovery that
+    leaves work parked logs a WARNING naming this remediation. If Celery is present but no worker is consuming the queue, the
     dispatch itself succeeds and the recovery logs nothing unusual; only the arming surface reports
     `worker_missing` (it asks the broker which queues the live workers consume). You can still drain
     the backlog manually with the single-entry **Retry** action.
@@ -411,27 +460,69 @@ its quota, ran up against the replay task's time limit, or stopped scanning befo
 every candidate. The chain runs to at most `BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_MAX_CONTINUATIONS`
 passes (100 by default), so one recovery clears up to 10,000 entries on the defaults; a domain that
 parks more than that wants a higher continuation count rather than a bigger pass. Both values are
-read once, when the breaker closes, so a change you make while a drain is running applies to the
-next recovery.
+read once, when the recovery is dispatched, so a change you make while a drain is running applies to
+the next recovery. A pass that a replay's own circuit breaker refused ends there, with that entry
+waiting, and the next pass is queued 30 seconds later instead of at once.
 
-Every pass starts by checking that the circuit is still closed. Live traffic can re-trip a breaker
-between passes, and replaying into a dependency that has just failed again would only park each
-entry for review, so the chain stops instead. It also stops when the continuation bound runs out,
-when a pass ends without moving forward, or when a pass raises. A drain that ends for any of these
-reasons with work still queued announces it: a WARNING log and a `DLQ_REPLAY_BLOCKED` event whose
-`block_reason` is `circuit_reopened`, `continuation_bound_reached`, `pass_made_no_progress` or
-`pass_errored`, on the same channel that reports a sweep with no failure-type mapping to select by.
-A drain that simply finds nothing left ends without an announcement.
+Every pass starts by reading the breakers of its domain from the breaker store. Live traffic
+can re-trip a breaker between passes, and replaying into a dependency that has just failed again
+would only park each entry for review, so the chain stops instead: a sweep a breaker's closing
+started stops when any breaker of the domain is not closed, and a sweep a recovery trial started
+stops on a breaker that refuses calls (its replays go through the job's own breaker, which admits a
+half-open probe). Every pass also asks the integrity gate and, with PRO active, governance (the
+kill switch, Emergency Mode, the error budget). The chain also stops when the
+continuation bound runs out, when a pass ends without moving forward, or when a pass raises. A
+drain that ends for any of these reasons with work still queued announces it: a WARNING log and a
+`DLQ_REPLAY_BLOCKED` event whose `block_reason` is `circuit_reopened`, `integrity_blocked`,
+`continuation_bound_reached`, `pass_made_no_progress`, `pass_errored` or the governance check
+that refused (`kill_switch`, for example), on the same channel that
+reports a recovery with no lane to replay its parked work. A drain that simply finds nothing left
+ends without an announcement, and so does one an operator's hold stops (below).
 
 Read `capped` on the `dlq_replay_batch_completed` event as a per-pass fact. It says that pass filled
 its quota or hit its time limit, not that the drain as a whole is over, and the last pass of a fully
 drained queue can carry it too. Whether more is coming is answered by the absence of a
 `DLQ_REPLAY_BLOCKED` stop, not by `capped`.
 
-Nothing re-drives a chain that stopped early. Until that breaker opens and closes again, the rest of
-the backlog stays parked, so treat a stop announcement as the cue to replay the remainder yourself
-(the single-entry **Retry** action, batch replay from code, or the console/REST batch replay with
-PRO active).
+A chain that stopped early is picked up by the recovery trial: once its job name is due, a trial
+replays one of the parked jobs and, when it succeeds, sweeps the rest. An entry the stopped chain
+was replaying stays in REPLAYING until the stale release returns it. To drain sooner, replay the
+remainder yourself (the single-entry **Retry** action, batch replay from code, or the console/REST
+batch replay with PRO active).
+
+**The recovery trial.** A breaker closing is evidence that a dependency answers again, but many
+outages never close one: a burst too short to open the breaker, a batch that ended while it was
+open (an open breaker closes only after successful calls), a job with no breaker. So about once a
+minute Baldur takes, for each job name with parked work and a replay handler, the next parked entry
+that name's sweep would select and its handler would replay, and replays it — the only call that
+can show the job's dependency answers is the job itself. The sweep selects only mapped or
+handler-named failure types and calls an open breaker rejected, so for a job with no breaker, map
+or name its failure types (step 2) or the trial finds nothing to take. A trial that succeeds resolves that job and starts the sweep for the rest — unless
+the trial itself closed the job's breaker, whose closing starts its own sweep. The trial's sweep
+leaves a replay whose job runs and fails waiting for its next attempt rather than parking it for
+review, since one success is weaker evidence than a breaker closing. After a trial that fails,
+the next trial of that job name waits 60 seconds, doubling up to 9 minutes, so a recovery starts
+within about ten minutes of the dependency answering, at about six trials an hour per job name once
+the wait is at its longest. The trials take a job name's parked jobs in turn, so a parked job that
+keeps failing for a reason of its own (a bad input, a bug in the job) takes its turn too: each such
+job the turn reaches before a good one adds up to nine more minutes. A trial whose dependency still
+fails, whose own `timeout=` cuts it off, or whose own breaker refuses the call spends none of the
+entry's replay attempts; a trial whose
+worker dies counts as one, so a job that kills its worker reaches needs-review at its cap instead of
+being tried forever. No trial starts while a breaker of the domain refuses calls or carries an
+operator's hold, while the kill switch is pulled or governance blocks automation, or while the
+integrity gate blocks replay. The trial runs on the `dlq_processing` worker, queued every minute by
+Celery Beat (`configure_baldur_celery(app)` installs the schedule) and by Baldur's own scheduler, so
+a deployment without Beat gets it too. Turn it off with
+`BALDUR_REPLAY_AUTOMATION_RECOVERY_TRIAL_ENABLED=false`.
+
+**An operator's hold.** Closing a breaker by hand without replay (the console's **Allow**, or
+`force_close(..., trigger_replay=False)`) pins it for the manual-override window, 90 minutes by
+default. For as long as the pin lasts, nothing replays that domain's parked work automatically: no
+trial runs, and a running chain stops at its next pass, logging `dlq.circuit_recovery_held` at INFO
+with no warning, event or audit record. When the pin lapses or you hand the breaker back to automatic control, the next
+trial picks the backlog up. Closing with replay (`trigger_replay=True`) starts the sweep even when
+the breaker was already closed, and your own pin does not stop the sweep you asked for.
 
 **Recommended alert:** the example alert rules in the Baldur repository ship
 `DLQAutoReplayDisarmed` (`baldur_dlq_auto_replay_armed == 0` for 10 minutes); the `for:` clause is
@@ -448,11 +539,13 @@ properties of the captured work decide whether it belongs in the automatic on-re
 **Is it safe to repeat?** A replayed operation executes a second time, so replaying one that can't
 safely repeat may double its effect: a second charge, a duplicate shipment, a repeated email. Map a
 failure type into automatic replay only when re-running it is a no-op once the work has already
-completed. The handler's `can_replay(failed_op)` check refuses unsafe entries on the operator-driven
-paths (the single-entry retry and force-redrive actions, and the console/REST batch replay,
-**PRO**), but neither the automatic on-recovery sweep nor batch replay from code consults it, so
-on those paths the guard is `replay()` itself: detect work that has already completed and report
-success without re-running it. Making an operation safe to repeat is a separate guarantee Baldur provides
+completed. The handler's `can_replay(failed_op)` check refuses an entry on every replay path: the
+automatic sweeps, the recovery trial and batch replay from code ask it before they take the entry,
+so a refused entry keeps waiting with its replay attempts untouched, and the operator-driven paths
+(the single-entry retry and force-redrive actions, and the console/REST batch replay, **PRO**) ask
+it after taking the entry. It decides *whether* an entry may run, not whether it already ran, so
+`replay()` itself should still detect work that has already completed and report success without
+re-running it. Making an operation safe to repeat is a separate guarantee Baldur provides
 (see [Idempotency](../oss/idempotency.md)), and money-equivalent operations should anchor their dedup
 on a database uniqueness constraint rather than a cache. The
 [what-belongs-in-Baldur-vs-your-database boundaries](https://github.com/baldurhq/baldur/blob/main/docs/runbooks/data-consistency-boundaries.md)
@@ -486,14 +579,15 @@ operate-at-scale surface on top.
   endpoints (list, detail, facet counts, cleanup stats), the single-entry actions (retry and resolve
   from the console or REST, force-redrive over REST), batch replay by failure type from code with opt-in adaptive
   (success-rate-driven) batch sizing, and automatic replay on circuit-breaker
-  recovery with its armed / disarmed / unverified surface.
+  recovery and by the periodic recovery trial, with its armed / disarmed / unverified surface.
 - **With PRO active**: batch replay becomes a one-click console action and REST endpoint, a
   standalone replay queue with rate limiting and backpressure is available to your code, the
   `compress_oldest` overflow strategy and its compressed summaries become available, evictions move
-  off the capture path to a background water-level worker, the outbox gains its disk-durable mode
-  and Meta-Watchdog probing of its drain worker's liveness, scheduled archive/purge retention ages
-  old entries out, and synthetic test entries can be created for debugging and load tests. The
-  background eviction, the compressed summaries' aging and the scheduled purge run only as Celery
+  off the capture path to a background water-level worker, Meta-Watchdog probes the outbox drain
+  worker's liveness, scheduled retention expires, archives and purges old entries (an expired
+  entry can no longer be replayed), and synthetic test entries can be created for debugging and load
+  tests. The background eviction, the expiry, the compressed summaries' aging and the scheduled
+  purge run only as Celery
   Beat tasks from Baldur's schedule (`configure_baldur_celery(app)` installs it): without Beat and
   a worker consuming the `maintenance` queue, a PRO queue past its size limit under `drop_oldest`
   or `compress_oldest` is never trimmed.

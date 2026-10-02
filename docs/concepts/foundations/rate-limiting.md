@@ -20,13 +20,13 @@ Five mechanisms make up Baldur's rate-limiting surface. Here is what each one li
 
 | Mechanism | What it limits | Scope across a fleet | Tier |
 |-----------|----------------|----------------------|------|
-| Per-endpoint cap (`@rate_limit`) | inbound requests to one endpoint in a window; over-limit requests get `429` | **per instance** — each process counts on its own, so N instances admit up to N× the number | OSS, off by default |
+| Per-endpoint cap (`@rate_limit`) | calls to one decorated endpoint or function in a window; an over-limit call raises `RateLimitExceeded`, which your code turns into a `429` | **per instance** — each process counts on its own, so N instances admit up to N× the number | OSS, off by default |
 | `429`-storm detection (circuit breaker) | watches for a burst of `429`s coming *back* from a dependency and trips the breaker | per instance by default; fleet-shared when opted in | OSS, on by default (built into the circuit breaker, not a separate toggle). A detection signal that trips protection, not an admission cap |
-| Admin / control API protection | Baldur's own management endpoints, per client | **fleet-shared** via Redis (one real count across workers) | OSS, on out of the box |
+| Control API protection (Django) | the management endpoints Baldur mounts under `/api/baldur/` in a Django app, per client | **fleet-shared** when Django's default cache is Redis; per instance otherwise | OSS, installed by `configure_baldur()` |
 | Adaptive Throttle | inbound admission, with the cap moving up and down on live latency | **per instance** — each process counts on its own *and* tunes its own limit value from the latency it observes | PRO |
 | Outbound cooldown coordination | calls your service makes to a dependency that rate-limits you; shares one backoff cooldown so the fleet backs off together | **fleet-shared** cooldown state — degrading to a per-worker cooldown while the shared store is unreachable, rather than to no cooldown | OSS, through the retry integration |
 
-The admin / control API row is worth calling out: Baldur rate-limits its *own* management API out of the box, and it is the one place Baldur enforces a genuinely shared, per-client count across all your workers by default (roughly 100 requests per minute per client). If the shared store is unavailable it falls back to a stricter per-instance limit rather than removing the limit, so an outage tightens the door instead of opening it.
+The control API row is worth calling out. On Django, Baldur rate-limits the management endpoints it mounts under `/api/baldur/`, and when Django's default cache is Redis that is the one place Baldur enforces a genuinely shared, per-client count across all your workers (100 requests per minute per client by default). Without a Redis default cache, or while that Redis is unreachable, each process enforces a stricter limit of its own (10 per minute by default) rather than removing the limit, so an outage tightens the door instead of opening it. The standalone admin server that serves the console, and Flask and FastAPI apps, have no such limit.
 
 ### The fleet-total question, answered honestly
 
@@ -60,14 +60,14 @@ There are no rate-limit-specific operator environment variables in the public al
 
 | Env Var | Default | What it controls |
 |---------|---------|------------------|
-| `BALDUR_REDIS_URL` | `redis://localhost:6379/0` | whether the admin-API count and the outbound cooldown are shared across workers; leave it unset and both stay per-instance — outside production Baldur skips Redis here rather than dialing that default address |
+| `BALDUR_REDIS_URL` | `redis://localhost:6379/0` | whether the outbound cooldown is shared across workers; leave it unset and it stays per-instance — outside production Baldur skips Redis here rather than dialing that default address. The control API count follows Django's default cache instead |
 | `BALDUR_LICENSE_KEY` |  | PRO entitlement (unset in OSS mode); Adaptive Throttle activates when Baldur initializes with a valid license |
 
-The individual limits and windows (the per-endpoint cap, the admin-API rate, the throttle's floor and ceiling) are set in code or through advanced settings that are not part of the public operator-tunable environment-variable allowlist.
+The individual limits and windows (the per-endpoint cap, the control-API rate, the throttle's floor and ceiling) are set in code or through advanced settings that are not part of the public operator-tunable environment-variable allowlist.
 
 ## Tier behavior
 
-- **In OSS**: the per-endpoint cap (`@rate_limit`, opt-in), the circuit breaker's `429`-storm detection, the always-on admin / control API protection, the outbound cooldown coordinator reached through Baldur's retry integration, and Bulkhead's per-dependency capacity isolation so one slow dependency can only saturate its own compartment instead of taking the whole service down.
+- **In OSS**: the per-endpoint cap (`@rate_limit`, opt-in), the circuit breaker's `429`-storm detection, the control API protection on Django, the outbound cooldown coordinator reached through Baldur's retry integration, and Bulkhead's per-dependency capacity isolation so one slow dependency can only saturate its own compartment instead of taking the whole service down.
 - **With PRO active**: Adaptive Throttle adds a self-adjusting inbound admission limit that tracks live latency (and sheds the least important traffic first when it tightens under pressure), and Bulkhead gains thread-pool isolation with execution-timeout containment. Neither adds a fleet-wide inbound quota, which stays at the gateway.
 
 ## See also

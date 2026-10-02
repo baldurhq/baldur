@@ -63,11 +63,26 @@ On top of that record, three properties make the trail safe to depend on:
 - **Trace correlation.** Each entry carries a trace ID. For a change made inside a traced request, that ID lines the audit record up with the request's distributed trace, connecting "this config changed" to the exact call that changed it.
 - **Tamper-evidence through a hash chain.** Each entry carries a cryptographic fingerprint: a SHA-256 hash computed over the entry's own contents *together with* the fingerprint of the entry immediately before it. The records are therefore linked into a chain, every entry bound to its predecessor back to the first. Editing a past entry changes its fingerprint, and deleting one leaves the entry after it pointing at a fingerprint that no longer exists; either way the chain breaks at that point, and hiding the break would mean recomputing every entry that follows. In production the fingerprints are also keyed: the signing key you configure turns each hash into an HMAC, so someone who can rewrite the log files still cannot recompute a chain that passes verification, because they do not hold the key.
 
-An integrity check walks the chain and reports whether it is intact, and where the first break is,
-so tampering is locatable rather than silent. Run it with the same signing key set, or every keyed
-entry reads as modified. The check starts each file at the chain's first entry, so it can vouch
-only for the file where the chain began: a later day's file, or one host's file in a distributed
-chain, reports its opening entries as missing even when nothing was touched.
+An integrity check reads every file of the chain together and links the entries in sequence
+order, so a trail of any age, spread over daily files or over the hosts of a distributed chain,
+verifies intact when nobody has touched it. An entry that was altered, removed or inserted is
+reported by sequence, with the file where the check met it, so tampering is locatable rather than
+silent. A row carrying no fingerprint at all among fingerprinted entries is reported too, since
+anyone can write one. The one removal the chain cannot show is at its end: nothing points at the
+newest entry, so deleting the most recent entries leaves no trace. The same holds for the last
+entries one host wrote on its own while Redis was unreachable and other hosts kept writing: the
+chain moved on without them. Run the check with the signing key the trail was
+written with: without it, or with a different key, the check reports the key problem instead of
+marking every entry modified.
+
+The full check is the command line, `python -m baldur.audit.verify_audit_integrity`; for a
+distributed chain, pass it every host's audit directory. It expects the trail to begin at the
+chain's first entry, so if you pruned the oldest files on purpose, name the first sequence you kept
+with `--starts-at` (the failure message prints it). The admin API's `/audit/integrity/verify`
+checks only the most recent 10,000 entries in its own host's files. On a distributed chain it
+lists every entry missing from those files as not held there, which covers both another host's
+entries and removed ones; only the command-line check over every host's directory tells them
+apart.
 
 Records persist to your configured storage backend, so the trail survives a restart as long as that
 storage does. The default backend writes its files under the application's working directory
@@ -88,7 +103,7 @@ with the export tool's date-range filter to carve out what to keep.
 | A structured entry recording who, what, when, and why | a configuration change or an automated healing decision occurs |
 | The acting client's IP address appears masked (last two parts hidden), not as a raw value | an entry records the IP of the client behind a change |
 | An entry can be matched to a request's distributed trace | the change happened in the context of a traced request |
-| An integrity check reports whether the hash chain is intact, and pinpoints the first broken link | you verify the file where the chain begins, with the signing key set |
+| An integrity check reports whether the hash chain is intact, and names each altered, removed or inserted entry by sequence and file, except a removal of the newest entries | you run the command-line check over every file of the chain, with the signing key set |
 
 ## Configuration
 

@@ -135,5 +135,15 @@ quickstart path. Declaring the environment is what turns the hazard above into a
 rule Baldur enforces: with `BALDUR_ENVIRONMENT=production` set and
 `BALDUR_REDIS_URL` missing, `baldur.init()` refuses to start rather than let a
 shared guarantee degrade to per-worker memory. For a deliberate single-process
-deployment on in-memory state, `BALDUR_TEST_MODE=true` opts out of that check,
-and of Baldur's other production configuration checks with it.
+deployment on in-memory state, `BALDUR_TEST_MODE=true` opts out of that check and
+of every other production check (the write-ahead log directory, backend
+construction, the PRO requirements below), and keeps every store in per-process
+memory even if you set a backend later.
+
+A container that cannot write `/var/log/baldur` keeps Baldur's write-ahead log in
+a writable fallback directory and says so in a warning at startup; one where
+nothing is writable (a read-only root filesystem with no writable mount) refuses to
+start. Set `BALDUR_RESILIENT_STORAGE_WAL_DIR` to point the log at a volume. With
+PRO active, production additionally needs `BALDUR_SECRETS_AUDIT_SIGNING_KEY` and
+`BALDUR_SQL_DSN` (or your `DATABASES`) — see
+[Environment Variables](../reference/env-vars.md#secrets-production-boot-gate).

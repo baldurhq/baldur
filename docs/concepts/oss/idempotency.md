@@ -32,43 +32,63 @@ blocked instead of executed again.
   own `retry=` on the same call: the key is checked once, when the call starts, so every attempt
   retry makes inside that call runs your function again. Turn `retry=` on only for work that is
   safe to repeat by itself (see the [Retry](retry.md) guide).
-- **Double-submits and duplicate webhooks are blocked, even concurrent ones.** The key is claimed
+- Double-submits and duplicate webhooks are blocked, even concurrent ones. The key is claimed
   atomically, so two requests racing in at the same instant can't both win. There is no
   check-then-act window for a duplicate to slip through.
 - **No hand-rolled dedup.** The homegrown "look it up, then insert" check is exactly the racy
   pattern that fails under concurrency. Baldur replaces it with an atomic claim plus an explicit,
   catchable duplicate error.
-- **A failure doesn't poison the key.** If a call raises, its key is released so a later call can
-  run the operation, and if several race for it, exactly one wins. The flip side: a call that
-  raised *after* its side effect took hold (the charge went through, then the response timed out)
-  releases the key too, so the repeat runs the charge again. The payment provider's own key is
-  what covers that case (below). The exception is an async call cancelled from outside, which
-  keeps its key held instead (below).
+- A failure doesn't poison the key. If your function raises, its key is released so a later call
+  can run the operation (once any work a timeout cut off has ended, below), and if several race
+  for it, exactly one wins. The flip side: a function that raised *after* its side effect took
+  hold (the charge went through, then the response timed out) releases the key too, so the repeat
+  runs the charge again. The payment provider's own key is what covers that case (below). A call
+  ended from outside rather than by an error (an async cancellation, or a sync `BaseException`
+  such as a gevent timeout) settles once nothing it started is still running: its key is
+  released, or completed if your function was running under the facade's own `timeout=` and went
+  on to return (below).
 
 ## How it works in Baldur
 
 You attach a key to the operation on whichever surface fits:
 
-- **Composed with the rest of the pipeline.** Pass `idempotency_key=` to the `@baldur.protected`
-  facade (or its call forms `protect` / `aprotect`). A string names a field on the call's context
-  (e.g. `"order_id"`); a callable builds a composite key. The key is checked once when the call
+- On the `@baldur.protected` facade (or its call forms `protect` / `aprotect`), pass
+  `idempotency_key=` to compose the key with the rest of the pipeline. A string names a field on
+  the call's context (e.g. `"order_id"`); a callable builds a composite key. The key is checked once when the call
   starts, before the circuit breaker and retry run, and marked once the call hands you its result
   or its error, so the retry attempts in between are not deduplicated. A call the `fallback=`
   answered after a failure or a circuit-breaker refusal releases its key like a call that raised,
-  so a genuine repeat runs the work. A fallback that answered a timeout marks the key completed
-  instead, because the timed-out work may still be running: a repeat is then blocked for the
-  memory window, even if that work never started or later fails. Without a fallback, a sync call
-  that `timeout=` cuts off hands you its error before your function has stopped: the sync path
-  cannot kill the function's thread, so the key is released while the work may still be running,
-  and a repeat that arrives then runs alongside it. The async path cancels the timed-out work
-  instead.
-- **Standalone decorator.** `@idempotent` wraps any sync or `async` function. Name the parameters
+  so a genuine repeat runs the work. A sync call that `timeout=` cut off (with or without a
+  fallback answer) hands you its error (or the fallback's answer) before your function has
+  stopped, because the sync path cannot kill the function's thread; its key stays held while that
+  work runs, so a repeat in that time is blocked with `"ABORT"` instead of running alongside it.
+  When the work ends, the key follows how it ended: completed (a repeat gets `"SKIP"`) if it
+  returned, released if it raised. The same holds when something else cuts that wait short while
+  your function runs (a Celery soft time limit, a gevent timeout, Ctrl-C): your wait ends at
+  once, the key stays held while the function runs, and then it follows how the function ended. Work the timeout cut off before it started, and an async
+  call's timed-out work (the async path cancels it), leave nothing running, so the key is
+  released at once and an immediate retry runs. A timeout inside your function (a nested
+  `protect(timeout=...)`, whether its timeout fired or an interruption cut its wait short) holds
+  the key the same way when the keyed call then ends in an error:
+  held while its work runs, then released, as long as that work runs in the function's own
+  thread or task, in `asyncio.to_thread`, in a Baldur timeout worker, or (with PRO) in a
+  thread-pool compartment's worker. Work started
+  with `loop.run_in_executor`, `threading.Thread` or a plain executor `submit`, and threads an
+  async function starts itself, are not tracked: the key is released while they may still run. A
+  hold lasts at most the execution window (`idempotency_execution_ttl`, 30 minutes by default);
+  work still running after that no longer holds the key, and a repeat can start the operation
+  again beside it. Set the window above your operation's worst-case run, and give the
+  operation's own outbound calls a timeout so a stuck run ends. Give each keyed call its own context
+  object, and don't pass it to the protected calls inside it: calls that share one can mark each
+  other's keys, and a timeout inside reads as the keyed call's own.
+- The standalone decorator `@idempotent` wraps any sync or `async` function. Name the parameters
   that identify the request (`key_args=["order_id"]`) or supply a `key_fn=` for a custom key, and
   pick a domain to namespace it. To combine it with the facade, stack it beneath
   `@baldur.protected`, or use the facade's own `idempotency_key=`. Stacked above a facade that has
   a `fallback=`, it sees the fallback's answer as your function's return and marks the key
-  completed.
-- **Programmatic.** `IdempotencyService` with `IdempotencyKey` gives you explicit
+  completed. A function that raised while work a timeout cut off inside it is still running keeps
+  its key held until that work ends, then releases it.
+- For programmatic use, `IdempotencyService` with `IdempotencyKey` gives you explicit
   check-then-mark control when a decorator doesn't fit (batch jobs, event consumers). Its
   contract is looser than the two surfaces above: a duplicate is reported in the returned
   result rather than raised, and because checking and marking are two separate steps, two
@@ -81,29 +101,38 @@ You attach a key to the operation on whichever surface fits:
 On the facade and decorator surfaces, the key's life is the same: the first call **claims** the
 key atomically and runs. Success marks the key **completed**, and it is remembered for a memory
 window (a TTL). A failure marks it **failed**, which releases it so a later call can claim it again.
-Only a raise counts as a failure, plus a returned value that the retry's `retry_on_result`
-predicate still rejects when the retries run out: a call that *returns* an error response (a 503
-object, say) that nothing rejects counts as a success, so raise on error statuses. An async call
-cancelled from outside Baldur (`asyncio.CancelledError`, such as an enclosing `asyncio.wait_for`
-giving up on it) is neither: its claim stays in place until the execution window runs out, so a
-repeat in the meantime is blocked with `"ABORT"`. Baldur's own `timeout=` is not that case; it
-follows the timeout rules above.
+Only a raised error (an `Exception`) counts as a failure, plus a returned value that the retry's
+`retry_on_result` predicate still rejects when the retries run out: a call that *returns* an error
+response (a 503 object, say) that nothing rejects counts as a success, so raise on error statuses.
+A call ended from outside Baldur by a `BaseException` (an async call's
+`asyncio.CancelledError` when an enclosing `asyncio.wait_for` gives up on it, say, or a gevent
+timeout interrupting a sync call) settles by the same rule as a failure: its key is
+released once nothing it started is still running, so a retry can run right away. While work the
+call stopped waiting for still runs, the key stays held, then settles as above: by how that work
+ended when the interrupted wait was the facade call's own `timeout=`, released otherwise. Like a
+call that raised, a call cancelled
+after its side effect took hold (the request reached the provider, or your function had just
+returned) is released too, so a retry runs the side effect again; the provider's own key covers
+that case (below). Two narrow exceptions leave the claim held until the execution window runs
+out: a sync interruption that lands while the dedup store is still answering the claim or the
+mark, and a coroutine closed without finishing (its event loop shut down with the call still
+pending).
 
 ```mermaid
 stateDiagram-v2
     [*] --> UNCLAIMED
     UNCLAIMED --> RUNNING: first call claims the key
-    RUNNING --> COMPLETED: the call succeeds
-    RUNNING --> FAILED: the call raises
+    RUNNING --> COMPLETED: your function returns
+    RUNNING --> FAILED: your function raises
     FAILED --> RUNNING: a later call claims the key again
     COMPLETED --> UNCLAIMED: the memory window (TTL) expires
 ```
 
 | What you observe | When it happens |
 |------------------|-----------------|
-| The call runs normally | the key's first arrival, or a later arrival after a call that raised (or whose failure the facade's fallback answered) |
-| The duplicate is blocked: `IdempotencyDuplicateError` with `decision` `"SKIP"` | the same key arrives again after a successful run (or a timeout the fallback answered), within the memory window |
-| The duplicate is blocked: `IdempotencyDuplicateError` with `decision` `"ABORT"` | the same key arrives while the first call is still running (on a sync call cut off by `timeout=`, only until the timeout fires), or after an async call holding it was cancelled, until the execution window runs out |
+| The call runs normally | the key's first arrival, or a later arrival after your function raised or the circuit breaker refused the call (even when the facade's fallback answered), after timed-out work that raised or never started, after an async call's timeout, or after a call ended from outside with nothing it started still running |
+| The duplicate is blocked: `IdempotencyDuplicateError` with `decision` `"SKIP"` | the same key arrives again after a successful run (or after work a `timeout=` cut off, or whose wait a soft time limit or another interruption cut short, went on to return), within the memory window |
+| The duplicate is blocked: `IdempotencyDuplicateError` with `decision` `"ABORT"` | the same key arrives while the first call is still running (including work a `timeout=` cut off, or work whose wait a soft time limit or another interruption cut short, that is still running, up to the execution window) or, in the two narrow cases above, after a call ended from outside, until the execution window runs out |
 | The call is blocked: `IdempotencyUnavailableError` | the dedup store could not be reached, under the default fail-closed posture |
 
 Where the guarantee holds, and where it stops:
@@ -118,7 +147,7 @@ Where the guarantee holds, and where it stops:
   call is blocked with `IdempotencyUnavailableError` rather than risking a duplicate side effect.
   If availability matters more than the guarantee, you can opt a facade call into fail-open with
   `idempotency_fail_open=True`, letting the unverifiable call proceed.
-- **Cluster-wide with Redis.** The seen-keys ledger lives in the cache `baldur.init()` wires, so
+- The seen-keys ledger lives in the cache `baldur.init()` wires, so
   with `BALDUR_REDIS_URL` set the same key is blocked across every worker and host. In production,
   `init()` refuses to start without it rather than let dedup shrink to per-worker memory: a dedup
   that only works within one process is a false promise. A production process with no shared
@@ -134,8 +163,8 @@ Where the guarantee holds, and where it stops:
   eventually goes stale and a later call may run the operation again, an essential
   at-least-once limit of any external dedup ledger. True end-to-end exactly-once requires a
   transactional outbox in the same datastore as your own side effect.
-- **Pair it with your payment provider's own key.** When the side effect is a call to an
-  external payment API, the crash window above, a call that raised after the charge went
+- Pair it with your payment provider's own key. When the side effect is a call to an
+  external payment API, the crash window above, a function that raised after the charge went
   through, and the attempts of Baldur's own `retry=` all have one practical fix: every major
   provider (Stripe, Adyen, PayPal, Toss Payments) accepts an idempotency key of its own and
   deduplicates on *its* side — and, unlike Baldur, replays the original response to a repeat.
@@ -143,7 +172,7 @@ Where the guarantee holds, and where it stops:
   random value generated per attempt), so every repeat sends the *same* key and the provider
   recognizes it. Baldur's dedup then covers your process (double-clicks, concurrent workers,
   duplicate webhooks), while the provider's key covers the in-doubt window Baldur cannot see.
-- **Two windows, two knobs.** A key lives under two independent clocks. The *memory window* is
+- A key lives under two independent clocks. The *memory window* is
   how long a completed operation is remembered — how long duplicates stay blocked after success.
   It defaults to 30 minutes, is tunable globally with
   `BALDUR_IDEMPOTENCY_GATE_MEMORY_TTL_SECONDS`, and per call with `ttl=` on `@idempotent` or

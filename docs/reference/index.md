@@ -25,6 +25,7 @@ source.
 | `baldur.core.exceptions` | Public | Exception hierarchy (nested-only classes here) |
 | `baldur.factory.registry` | Public | `ProviderRegistry` |
 | `baldur.services.replay_service` | Public | `ReplayService` |
+| `baldur.llm` | Public | `wrap`, `Endpoint` — loaded on first access, not by `import baldur` |
 | `baldur.resilience.policies` | Internal | Composer is private; `protect()` is the public surface |
 
 All other `baldur.*` sub-packages (`audit`, `audit/*`, `bridges`, `celery_tasks`,
@@ -145,15 +146,15 @@ public surface. Everything else stays in `baldur.core.exceptions`.
 |-----------|-------------|----------------------|---------------|
 | `BaldurError` | Catch-all base | `except BaldurError` | Last-resort logging + alert |
 | `AdapterError` | Adapter base (Redis/SQL misuse) | `except AdapterError` | Reconnect; fall back to in-memory |
-| `AdapterNotFoundError` | `ProviderRegistry.resolve(...)` finds no match | Bootstrap path | Wire the missing adapter |
+| `AdapterNotFoundError` | a `ProviderRegistry` slot's `get(...)` finds no provider by that name | Bootstrap path | Wire the missing adapter |
 | `CircuitBreakerError` | CB-base — domain-specific subclasses | `except CircuitBreakerError` | Do NOT retry — `non_retryable_exceptions()` includes this |
 | `DLQError` | DLQ-base | `except DLQError` | Inspect DLQ entry; manual replay if needed |
-| `DLQReplayError` | `ReplayService.replay(...)` could not complete | `except DLQReplayError` | Mark for manual review; surface in admin |
+| `DLQReplayError` | retrying a single DLQ entry (`retry_entry`) could not complete | `except DLQReplayError` | Mark for manual review; surface in admin |
 | `ResilienceError` | Resilience-pattern base (retry/timeout/rate-limit) | `except ResilienceError` | Domain-specific fallback |
 | `RetryExhaustedError` | All retry attempts failed | `except RetryExhaustedError` | Send to DLQ; alert on SLA breach |
 | `TimeoutPolicyError` | `protect(timeout=...)` exceeded | `except TimeoutPolicyError` | Cancel downstream; degrade |
 | `RateLimitExceeded` | `@rate_limit` rejected the call | `except RateLimitExceeded` | Surface a 429 to caller; honor `reset_at` |
-| `IdempotencyDuplicateError` | `@idempotent` detected a duplicate | `except IdempotencyDuplicateError` | Return cached result; do NOT retry |
+| `IdempotencyDuplicateError` | `@idempotent` or `idempotency_key=` detected a duplicate | `except IdempotencyDuplicateError` | Treat as "already happened" — no result is returned (`decision`: `SKIP` completed, `ABORT` still running); do NOT retry |
 | `DomainValidationError` | Domain-tag validation rejected the call | `except DomainValidationError` | Caller bug — fix the domain identifier; do NOT retry |
 | `ConfigurationError` | Settings or wiring misconfiguration | Bootstrap path | Crash fast — operator must fix env |
 

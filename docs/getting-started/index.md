@@ -36,9 +36,10 @@ from what actually happened, so it is also a smoke test of your install.
 - [Celery](celery.md) — background tasks (workers + scheduled jobs)
 
 Each quickstart assumes you have used the target framework at least once, and
-ends with a short "Going to production" appendix covering the one thing the
-zero-config path leaves out: a shared cache backend for multi-worker
-deployments.
+ends with a short "Going to production" appendix: the shared cache backend
+(Redis) that the zero-config path leaves out and a multi-worker deployment needs,
+the production declaration that makes Baldur enforce it, and what PRO production
+needs on top.
 
 ## Compatibility
 

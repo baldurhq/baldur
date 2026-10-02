@@ -1,13 +1,13 @@
 # baldur_pro.services.replay — Replay Queue
 
-Backpressure-aware replay of stored failures: `ReplayQueueService` with its
-`BackpressureStatus` and `RateLimitStatus` signals.
+`ReplayQueueService`: an in-memory queue with token-bucket rate limiting and
+`BackpressureStatus` / `RateLimitStatus` signals. Nothing in Baldur dequeues
+from it; code that enqueues also dequeues and processes the entries.
 
 Replaying stored failures is not PRO-only. The OSS `ReplayService`
 ([Service access](../services/access.md)) handles single-entry replay, batch
 replay by failure type, and the automatic sweep that runs when a circuit
-breaker recovers. This page documents the PRO replay queue layered on top, which paces
-replay at scale with backpressure and rate-limit signals. See
+breaker recovers, and that replay does not go through this queue. See
 [DLQ + Replay](../../concepts/foundations/dlq-replay.md) for the tier split.
 
 !!! info "🔒 PRO Feature — requires a baldur-pro license"

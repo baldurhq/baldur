@@ -1,6 +1,6 @@
 # baldur — Exceptions
 
-The fourteen top-level exceptions: domain base classes plus the leaf classes
+The fifteen top-level exceptions: domain base classes plus the leaf classes
 raised by the top-level public surface. Everything else stays in
 `baldur.core.exceptions`.
 
@@ -23,6 +23,8 @@ raised by the top-level public surface. Everything else stays in
 ::: baldur.TimeoutPolicyError
 
 ::: baldur.RateLimitExceeded
+
+::: baldur.LLMUnavailableError
 
 ::: baldur.IdempotencyDuplicateError
 

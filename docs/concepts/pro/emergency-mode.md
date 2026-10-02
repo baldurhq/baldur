@@ -79,8 +79,9 @@ straight through the gate.
 - **Automatic.** When Baldur detects a serious enough problem, it activates emergency mode itself,
   picking a level that matches the severity and attaching a default expiry (thirty minutes unless
   configured otherwise) so a transient blip self-clears without anyone watching the clock. An
-  automatic activation never *lowers* a higher level that the worker it fires in has read; it only
-  escalates from there. One of these detectors watches the circuit breakers as a fleet: a scheduled
+  automatic activation never *lowers* or repeats the level the shared state store holds (it
+  decides on the stored level, not on the worker's own copy), so it only escalates from there. One
+  of these detectors watches the circuit breakers as a fleet: a scheduled
   check reads every breaker's state from the shared store every ten seconds, and when at least 70%
   of the registered breakers (three or more of them) are OPEN on two consecutive checks, it declares
   LEVEL_3 on the grounds that this is no longer one dependency failing but the infrastructure
@@ -123,9 +124,13 @@ before each step the gate waits out a stabilization window and re-checks the met
 mid-recovery re-check fails, the descent **stops and holds the current level** rather than
 continuing down or snapping straight to NORMAL, so a system that destabilizes halfway through
 recovery keeps its remaining protection instead of shedding it at the worst moment. The walk runs in
-the process that received the request; if that process exits, the stored state still says a recovery
-is running, and a new one is refused until you stop the recovery. An operator who must exit
-regardless can **force** the release, deliberately bypassing the gate. One boundary to know: an
+the process that received the request, and a stop request served by any worker ends it. An
+activation made while it runs ends the walk instead of being walked back down. If the walking
+process exits without a graceful shutdown, a start the store could not confirm turns out to have
+landed (no process walks it), or a step's write ends with an outcome the store could not confirm,
+the stored state still says a recovery is running, and a new one is refused until you stop the
+recovery. An operator who must exit regardless can **force** the release, deliberately bypassing
+the gate. One boundary to know: an
 expiry is a hard deadline. When a timed activation lapses, the mode deactivates on the clock without
 consulting the recovery gate, so give an activation a duration only when a timed self-clear is
 acceptable; leave the duration unset to keep the gate in charge of the exit.
@@ -143,23 +148,25 @@ acceptable; leave the duration unset to keep the gate in charge of the exit.
 
 A level change does not stay inside Emergency Mode. Every transition, whether a manual or automatic
 activation, a release, an expiry, or a single step of a gradual recovery, is announced to the rest
-of Baldur as an event, and the [Governance](governance.md) gate is one of the listeners. The gate
-holds automated self-healing actions back while the system sits at or above a configured emergency
-level (LEVEL_2 by default), and it caches that answer briefly so the check stays cheap on a hot
-path. The announcement clears that cache on the spot: in the process where the level changed, the
-very next governance check already sees the new level, with no wait for the cached answer to expire.
-Other processes catch up on their own. Each keeps its own short-lived copy of the emergency state
-(thirty seconds by default) and re-reads the stored state once a check finds that copy expired. The
-store is the one [System Control](../oss/system-control.md) uses: a local file by default, which
-only processes reading the same state directory share, or Redis, which every server shares. Within
-that reach, the governance gate honors a level change made on one server everywhere within a cache
-lifetime or two at worst. HTTP shedding is the exception: a worker whose copy says emergency mode is
-off does not re-read it on the request path, so it keeps admitting every request until another read
-in that worker, such as a breaker's state change or a governance check, refreshes the copy. If the
-store cannot be written, an activation still takes effect (and reports success) in the process that
-made it, but no other process sees it; if it cannot be read, each process keeps the level it last
-read. The same announcement is what the other consumers named above (throttle tightening,
-notification escalation) react to.
+of Baldur as an event, and the event reaches the consumers named above (throttle tightening,
+notification escalation) in the process that made the change, and in the others only when the event
+bus is Redis-backed. The level itself reaches every
+process through the state store: each process keeps its own copy of the emergency state and re-reads
+the store on the emergency interval (thirty seconds by default), and once that copy is loaded
+(`baldur.init()` loads it at startup), reading the level never touches the store. The store is the
+one [System Control](../oss/system-control.md) uses: by default Redis when your deployment names
+one, otherwise a local file, which only processes reading the same state directory share. Within
+that reach, a level change made on one server takes effect everywhere within one interval — HTTP
+shedding in every worker, and the [Governance](governance.md) gate, which holds
+automated self-healing actions back while the system sits at or above a configured emergency level
+(LEVEL_2 by default) and reads that copy directly. **A change the store could not confirm is in force
+nowhere**: an activation, release, recovery start or stop from the console or the REST API answers
+`503` with `persisted: false`, and an automatic activation logs a warning instead of taking effect;
+when the outcome is unknown (`persisted: null` on the API, an outcome-unknown warning for an
+automatic activation), the next successful read of the store decides it, and a change that did land
+then takes effect everywhere. If the store
+cannot be read, each process keeps the level it last read, and the status view reports
+`store_reachable: false` with the copy's age.
 
 LEVEL_3 has one more consumer, one that reads the level directly instead of listening for the
 announcement: the [circuit breakers](../oss/circuit-breaker.md). While the level sits at LEVEL_3,
@@ -174,8 +181,8 @@ a gradual recovery is the exit for the level: its first step, to LEVEL_2, lifts 
 worker once the gate lets it through, and the walk then measures what the breakers report. The
 reasoning is the same as the recovery gate's: in a fleet-wide incident, dozens of breakers probing
 and flipping on their own add load and noise exactly when the system should stand still. Each
-breaker reads the level through the same short-lived per-process copy described above, so a worker
-can still decide a transition in the seconds before it learns of LEVEL_3; what the hold guarantees
+breaker reads the level through the same per-process copy described above, so a worker can still
+decide a transition in the seconds before it learns of LEVEL_3; what the hold guarantees
 is that no new automatic decision is taken once it knows. A worker that cannot reach the state store
 keeps the last level it read: it goes on holding if it had learned of LEVEL_3, and stays unheld if
 it had not. Failures are still counted during the hold, so once the level drops, the next failure

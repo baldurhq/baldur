@@ -25,7 +25,7 @@ relicenses anything in the core.
 | Precomputed cache | ✅ | ✅ |
 | Bulkhead isolation | ✅ | ✅ (＋thread-pool) |
 | Dead-letter queue + replay (capture, view, single-entry actions) | ✅ | ✅ |
-| DLQ at scale (batch replay from the console, adaptive pacing, durable outbox, archive/purge) | — | ✅ |
+| DLQ at scale (batch replay from the console, adaptive pacing, archive/purge) | — | ✅ |
 | Audit trail (hash-chained, exportable) | — | ✅ |
 | Unified notification / alerting | — | ✅ |
 | Emergency mode (coordinated load shedding) | — | ✅ |

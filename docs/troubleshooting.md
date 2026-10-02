@@ -70,6 +70,85 @@ you. On Django, add `baldur.adapters.django` to `INSTALLED_APPS` (its app config
 the lifespan handler. If you run plain Python with no adapter, call `baldur.init()`
 yourself at startup.
 
+### Production startup refusals
+
+With `BALDUR_ENVIRONMENT=production` set, `baldur.init()` refuses to start with a
+`ConfigurationError` when the deployment would otherwise run on something it did not
+ask for. Each entry below is keyed by the message text. `BALDUR_TEST_MODE=true` skips
+all of these checks and keeps every store in per-process memory, even one you
+configured; in production it says so in a `baldur.registry_wiring_skipped` warning
+naming the variables it ignored.
+
+**`ConfigurationError: BALDUR_REDIS_URL is not set in production for ProviderRegistry.cache`.**
+*Cause:* production with no `BALDUR_REDIS_URL`. The cache, idempotency keys, circuit
+breaker state and rate-limit windows would each fall back to per-worker memory, which
+diverges silently across workers.
+*Fix:* set `BALDUR_REDIS_URL=redis://<host>:<port>/<db>`. For a deliberate
+single-process deployment on in-memory state, set `BALDUR_TEST_MODE=true` instead.
+
+**`ConfigurationError: BALDUR_REDIS_URL is set, but the Redis driver is not installed`.**
+*Cause:* `BALDUR_REDIS_URL` names a Redis, but the `redis` extra is missing, so no
+Redis-backed store can be built. Outside production the same state is a
+`baldur.redis_driver_unavailable` warning, and the Redis-backed stores run in
+per-process memory.
+*Fix:* `pip install "baldur-framework[redis]"`.
+
+**`ConfigurationError: [Security] BALDUR_SECRETS_AUDIT_SIGNING_KEY is required in production …`.**
+*Cause:* a keyed audit chain can be written in this process — the audit trail is on
+(`BALDUR_AUDIT_ENABLED=true`), or a PRO entitlement is active, which turns it on — and
+the key that signs every chain entry is unset.
+*Fix:* set `BALDUR_SECRETS_AUDIT_SIGNING_KEY` to a long random secret; generation and
+rotation are in the secure-deployment runbook shipped in the repository's
+`docs/runbooks/` directory. With audit off and no PRO entitlement, production needs no
+signing key. `BALDUR_SECRETS_ENCRYPTION_KEY` is never required.
+
+**`ConfigurationError: Neither BALDUR_SQL_DSN nor Django DATABASES is configured in production while a PRO entitlement is active`.**
+*Cause:* an active PRO entitlement writes its incident records to a SQL store, and production has neither a DSN nor, on Django, a `DATABASES` setting.
+*Fix:* `pip install "baldur-framework[postgres]"` and set
+`BALDUR_SQL_DSN=postgresql://user:pass@host:5432/db`, or configure `DATABASES` on
+Django. Without an entitlement these stores run in per-process memory, announced at
+startup by `baldur.registry_memory_fallback` at INFO.
+
+**`ConfigurationError: ProviderRegistry.<store> selected backend 'sql', but it cannot be constructed`.**
+*Cause:* at startup Baldur builds the SQL stores it selected, and one could not be
+built: the driver for the DSN's scheme is missing (`psycopg2` for `postgresql://`,
+`mysql-connector-python` for `mysql://`), or a PostgreSQL `BALDUR_SQL_DSN` does not
+parse — a misspelled scheme, an unknown query parameter. The message never repeats the
+DSN, because it can carry a password. The same message names any other backend
+selected through `BALDUR_DLQ_BACKEND` that could not be built.
+*Fix:* install the driver (`pip install "baldur-framework[postgres]"` for PostgreSQL),
+correct `BALDUR_SQL_DSN`, or select another backend through the variable the message
+names. The check does not connect: a DSN that parses but names the wrong host,
+database or password still boots, and the first write to that store fails. Outside
+production the same failure is a `baldur.registry_backend_unusable` warning and the
+store runs in memory.
+
+**`ConfigurationError: WAL initialization failed for … in production`.**
+*Cause:* the resilient-storage write-ahead log could not start: the directory named by
+`BALDUR_RESILIENT_STORAGE_WAL_DIR` is not writable, or neither the default
+`/var/log/baldur/wal` nor any fallback directory is (a read-only root filesystem with no
+writable mount).
+*Fix:* point `BALDUR_RESILIENT_STORAGE_WAL_DIR` at a writable path, ideally a mounted
+volume. When only the default directory is unwritable — a container running as a
+non-root user, say — Baldur keeps the WAL in a writable per-user fallback directory and
+boots, with a `baldur.resilient_storage_wal_dir_relocated` warning naming both paths;
+set the variable to move the WAL onto a volume.
+
+**`ConfigurationError: Configured directory for '…' is not writable` / `No writable directory found for '…'`.**
+*Cause:* a durability surface (a write-ahead log, checkpoint storage, the DLQ disk
+buffer) could not get a directory. A directory you chose through its variable is used
+as given and never replaced, so an unwritable one stops startup. A default directory
+falls back to a writable per-user location, and startup stops only when none is
+writable.
+*Fix:* make the directory writable, or point the variable the message names at a
+writable path — a mounted volume for data you want to keep across restarts.
+
+**`ConfigurationError: BALDUR_ENVIRONMENT='prod' is a known legacy alias of 'production'`.**
+*Cause:* `prod`, `live`, `release` and `stable` meant production in older conventions.
+Baldur refuses them so a stale value cannot quietly leave every production check off.
+*Fix:* set `BALDUR_ENVIRONMENT=production` for production, or `staging` /
+`development` otherwise.
+
 ### Circuit breaker
 
 **The circuit breaker won't open even though the dependency is clearly failing.**
@@ -327,9 +406,11 @@ without PRO. Metrics for PRO subsystems (the adaptive-throttle family, for examp
 populate with PRO installed.
 
 **Health checks return `503` during a deploy / shutdown.**
-*Cause:* this is graceful-shutdown draining, working as designed. When the process gets
-`SIGTERM`, readiness flips to `503` so new traffic routes elsewhere while in-flight requests
-finish, and new requests get a `503` with a `Retry-After` header.
+*Cause:* this is graceful-shutdown draining on Django, working as designed. When a Django
+process gets `SIGTERM`, readiness flips to `503` so new traffic routes elsewhere while in-flight
+requests finish, and new requests get a `503` with a `Retry-After` header. Flask and FastAPI
+apps get no such drain answer from Baldur: their readiness and new requests are not turned to
+`503` on `SIGTERM`.
 *Fix:* nothing — keep it. Liveness (`health/live/`) and `health/ping/` deliberately stay
 `200` through the drain so the orchestrator doesn't hard-kill the pod mid-cleanup. On
 Kubernetes, set `terminationGracePeriodSeconds` comfortably above the drain window (30 s by
@@ -404,14 +485,22 @@ Baldur process wants the same default port.
 a different admin port. Nothing else degrades — the console is an operator surface, not a
 request path.
 
-**Nothing Baldur does has any effect — all self-healing is inert.**
-*Cause:* the **kill switch** is in its DISABLED state. Someone flipped it (an incident, a
-test) and it persists across restarts on purpose — Baldur won't silently re-arm automation
-while you're still working an incident.
-*Fix:* re-enable it from the admin console, the API, or `is_baldur_enabled()`'s matching
-enable call. Disabling requires a reason and records who/why/when; re-enabling clears it.
-Note that while disabled, even manual circuit-breaker actions are held back unless you
-explicitly override them.
+**Retries, breaker trips and dead-letter capture have all stopped — every call runs once.**
+*Cause:* the **kill switch** is in its DISABLED state, so Baldur's automatic interventions
+step aside: no retry, no circuit-breaker recording or refusal, no dead-letter capture. What
+you configured on the call itself — a fallback, a timeout, an idempotency key, a bulkhead —
+still applies, and so does a breaker an operator blocked: calls to that service are still
+refused while the switch is off. Someone flipped it (an incident, a test) and it persists across
+restarts on purpose — Baldur won't silently re-arm automation while you're still working an
+incident. Every process sharing the state store (Redis when your deployment names one,
+otherwise a local file) follows a flip within about five seconds.
+*Fix:* re-enable it from the admin console (**Enable automation**) or the system-control
+API. Disabling requires a reason and records who/why/when; re-enabling keeps that record and
+adds who re-enabled it and when. A re-enable the store cannot confirm answers `503` and is in
+force nowhere: check the status view for `store_reachable` and `last_store_error`, then retry
+once the store answers. Note that while disabled, forcing a breaker open or closed is refused
+unless code passes `override_kill_switch=True`; a reset still goes through. See
+[System control](concepts/oss/system-control.md).
 
 ### PRO operational controls
 
@@ -471,7 +560,7 @@ emergency / budget condition.
 Nothing in your application code. Install the PRO build emailed to you at checkout, set
 `BALDUR_LICENSE_KEY`, and the same `@baldur.protected` calls light up the PRO capabilities
 behind them: the OSS dead-letter queue gains its at-scale operations surface (adaptive batch
-replay, compressed retention, background eviction, a disk-durable outbox); notification
+replay, compressed retention, background eviction); notification
 delivery, audit, emergency mode, thread-pool bulkheads, canary, throttle, governance, and the
 meta-watchdog all activate. A PRO subscription includes every PRO feature — they aren't
 unlocked one at a time.
@@ -592,8 +681,9 @@ baldur report --json              # machine-readable output
 
 A calm day collapses to a single `"All quiet — 0 processed, 0 alerts."` line; severity is
 derived from contents (clean = info, task failures = warning, a critical alert = critical). With
-PRO active the same report is delivered to Slack each morning and gains an "Automated Actions"
-section.
+PRO active the same report is also delivered to Slack and gains an "Automated Actions" section.
+The built-in scheduler runs it every 24 hours counted from process start, not at a fixed time
+of day.
 
 **Reading the dashboard summary.**
 One read-only call rolls up the whole self-healing picture:

@@ -87,10 +87,13 @@ def charge(order_id: str) -> dict:
 `idempotency_key="order_id"` makes the dedup key *your* order id, the thing the network can't see.
 A second request for the same order while the first is still running, or within the dedup window
 (30 minutes by default) after it succeeded, is refused with `IdempotencyDuplicateError` instead of
-charging again; a mesh retry of a request that already went through is exactly that second
-request. The key deduplicates callers, not attempts: `retry=True` re-runs the charge inside the
-one call the key let through, so if an attempt can charge and still fail, the gateway call itself
-must be safe to repeat (pass the order id on as the gateway's own idempotency key).
+charging again. A mesh retry of a request that already went through is exactly that second
+request, and the mesh may route it to another replica: it is refused there only when the replicas
+share one key ledger, such as Redis through `BALDUR_REDIS_URL` (which `baldur.init()` requires in
+production). The key deduplicates callers, not attempts: `retry=True`
+re-runs the charge inside the one call the key let through, so if an attempt can charge and still
+fail, the gateway call itself must be safe to repeat (pass the order id on as the gateway's own
+idempotency key).
 
 `fallback=` hands the caller a domain answer when the charge still raises after its retries, or
 the breaker refuses it: `unavailable`, so the caller retries, rather than a promise to charge them

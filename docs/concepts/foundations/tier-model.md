@@ -81,7 +81,7 @@ team depends on. It leads with the operational problem each capability removes:
 
 | Production need | PRO capability |
 |-----------------|----------------|
-| Operate the failure backlog at scale, not one entry at a time | [DLQ at scale](dlq-replay.md) — batch replay from the console, archive/purge, an opt-in disk-durable outbox |
+| Operate the failure backlog at scale, not one entry at a time | [DLQ at scale](dlq-replay.md) — batch replay from the console, archive/purge |
 | Prove what changed, and what triggered it | [Audit trail](../pro/audit.md) |
 | Route incident alerts to the right channel instead of watching a dashboard | [Unified notification](../pro/unified-notification.md) |
 | Shed load and shrink the blast radius under stress | [Emergency mode](../pro/emergency-mode.md) · [Bulkhead thread-pool isolation](bulkhead.md) · [Throttle](../pro/throttle.md) |
@@ -105,7 +105,7 @@ and the capture is already real: a charge that still raises once retry gives up 
 the context needed to run it again, you can browse the backlog in the web console, and entries
 retry there one at a time through a replay handler you register. What changes with PRO is how you
 *operate* that backlog. With PRO active, the **exact same code** gains one-click batch replay and
-archive/purge retention in the console, plus a disk-durable outbox you can switch on: the difference between working a large backlog one entry at a time in the console
+archive/purge retention in the console: the difference between working a large backlog one entry at a time in the console
 and clearing it in one action. On either tier, a retried or replayed call executes the work again,
 so give `retry=` and `dlq=True` only to operations
 [safe to run a second time (a charge that must not double needs a dedup guard first)](dlq-replay.md).

@@ -40,8 +40,11 @@ into a fast, contained one:
 
 You wrap a call with the `@baldur.protected` facade (which combines the breaker with retry and
 fallback) or the `circuit_breaker` decorator directly — both work the same on synchronous and
-`async` calls, since each detects the call style and dispatches automatically. From then on,
-Baldur tracks that call's health and moves the breaker through three observable states:
+`async` calls, since each detects the call style and dispatches automatically. They hand back
+different things. The facade returns your function's value, and when the breaker refuses the call
+it raises `CircuitBreakerOpenError` or serves your fallback. The bare decorator returns a
+`PolicyResult` that carries either the value or the refusal. From then on, Baldur tracks that
+call's health and moves the breaker through three observable states:
 
 ```mermaid
 stateDiagram-v2
@@ -119,7 +122,7 @@ for that service, on top of the state-change line every open writes at the confi
 circuit-breaker log level.
 
 Returned error responses get the same treatment on the failure side. A protected call that returns
-a response with a status on the failure list (the 5xx codes by default) records a breaker failure
+a response with a status on the failure list (500, 502, 503 and 504 by default) records a breaker failure
 rather than a success. The value is still handed back to your code unchanged: a returned response
 never raises and never triggers the fallback.
 
@@ -145,9 +148,11 @@ five relayed 429s in a row trip that breaker like any other run of failures. A 4
 own app. Baldur's own rate-limit middleware labels its 429s that way; the DRF throttle bridge never
 builds the response it refuses with, so it marks the request instead, and the middleware reads both
 marks. Either way a limit your own app imposed never counts. The Flask and FastAPI middlewares do
-the same once you give them a service name, leaving out only the 429s Baldur itself rejected with;
-without a service name they record nothing. A 429 that reaches your code outside any protected call can still be reported by hand with
-`record_rate_limit(service_name)`.
+the same once you give them a service name, leaving out only the responses Baldur itself rejected
+with (its 503s as well as its 429s), so a 429 from a limiter of your own does count there. On
+FastAPI only a response the route actually started is classified, so an exception the route leaves
+unhandled records nothing. Without a service name they record nothing. A 429 that reaches your
+code outside any protected call can still be reported by hand with `record_rate_limit(service_name)`.
 
 ### Taking manual control
 
@@ -186,11 +191,13 @@ its own view, and a worker that cannot reach the shared store falls back to its 
 trips included. **When a force has to hold for every request from the first moment, which is usually
 the point of a maintenance window, run a single web worker.**
 
-!!! warning "Dry-run mode accepts a force but never rejects traffic"
-    Under [dry-run (observe-only) mode](system-control.md) Baldur reports what it *would* have done
-    and lets every protected call through, a forced-open breaker included. The force is applied and
-    logged, so the console shows the breaker held open while requests carry on reaching the
-    dependency. Turn dry-run off before you rely on a force to actually cut traffic.
+!!! note "A force still holds under dry-run and the kill switch"
+    Under [dry-run (observe-only) mode](system-control.md) Baldur holds back its own interventions,
+    but a breaker you forced open is still refused, on protected calls and in the web middleware:
+    the force is your instruction, not an automatic intervention. Forcing a breaker during dry-run
+    logs a `system_control.manual_override_under_dry_run` warning. While the kill switch is off, a
+    new force is refused unless code passes `override_kill_switch=True`; a force made before the
+    flip keeps holding.
 
 ### When the whole system is in lockdown (PRO)
 
@@ -207,8 +214,9 @@ flipping on their own add load and noise at exactly the moment you want the syst
 The hold is on Baldur's *automatic* decisions only. Your forces work unchanged during Level 3: force
 a breaker closed once you know its dependency is back, or open to take it out of rotation, and the
 change lands as it would at any other time. **Force-close is your exit for one dependency while the
-lockdown lasts** — in the worker that receives it, as with any force (above); the exit for the level itself is
-Emergency Mode's gradual recovery: its first step down lets every held breaker probe again. One
+lockdown lasts** — in the worker that receives it, as with any force (above). Leaving the level
+itself is Emergency Mode's business: once it drops below Level 3, whether through a gradual
+recovery's first step or any other exit, the breakers decide for themselves again. One
 interaction with force lifetimes is worth knowing: a forced-open breaker whose
 lifetime lapses during Level 3 stays open until the level drops, because lifting the force is itself
 an automatic step toward HALF_OPEN. Force it closed if that dependency needs traffic before then.
@@ -224,8 +232,8 @@ While the hold is on, this is what you can see:
   failure trips a breaker whose count is already over the threshold, and a success in between resets
   that count as it always does.
 
-The level lives in the shared state Emergency Mode writes. On the default file backend that state is
-per host; with the Redis backend it spans the cluster. Each process re-reads it on a short cache,
+The level lives in the shared state Emergency Mode writes. With `BALDUR_REDIS_URL` set that state
+spans the cluster; without one it is a file on each host. Each process re-reads it on a short cache,
 thirty seconds by default, so a worker can still decide a transition in the seconds before it learns
 of Level 3, and its peers then mirror that decision. What the hold guarantees is that no *new*
 automatic decision is taken while Level 3 holds; a worker catching its local copy up to a decision
@@ -252,18 +260,23 @@ store it cannot read declares nothing and logs a warning instead.
 
 Set a Slack webhook URL and Baldur posts to your channel the moment a breaker
 opens, then again when it recovers: a 🔴 when traffic is cut and a 🟢 when it is
-restored. This is the one notification the OSS tier delivers on its own, and it
-works on the most minimal install, with no message broker or background worker
-running. Set `BALDUR_META_WATCHDOG_SLACK_WEBHOOK_URL` to turn it on; the URL
-lives under the self-monitoring namespace, but on OSS the circuit-breaker push is
-what reads it. Leave it unset and the open and close events are still logged,
-just not posted.
+restored. This is the one notification the OSS tier delivers on its own. On an
+install without Celery it posts straight from the process, with no message broker
+or background worker running. Once Celery is importable, the post is handed to a
+Celery task on the `baldur` queue instead, so it goes out only where a broker is
+reachable and a worker serves that queue; with no broker the post is dropped and
+a warning logged. Set `BALDUR_META_WATCHDOG_SLACK_WEBHOOK_URL` to turn it on; the
+URL lives under the self-monitoring namespace, but on OSS the circuit-breaker push
+is the only thing posted to it. Leave it unset and the open and close events are
+still logged, just not posted.
 
 The OSS push is deliberately plain: one message per transition, with no grouping
 or rate-limiting, so a breaker that flaps posts every time. Deduplication,
 cooldown, multi-channel routing, and on-call escalation belong to [Unified
-Notification](../pro/unified-notification.md) on PRO. The [OSS vs PRO tier
-model](../foundations/tier-model.md) lays out the full split.
+Notification](../pro/unified-notification.md) on PRO, which takes this push over
+wherever Celery delivers it and posts to its own Slack target rather than the URL
+above. The [OSS vs PRO tier model](../foundations/tier-model.md) lays out the
+full split.
 
 ### Across a cluster (PRO)
 
@@ -285,8 +298,7 @@ trips, it does not make that first trip arrive any sooner. It is opt-in: set
 weigh before you do: a peer's CLOSED is applied without checking whether this
 worker is holding an operator's force, so
 [a manual block can be lifted while you still need it](#taking-manual-control).
-That makes propagation the one automatic path that does not defer to a force. A
-peer's *trip* is the contrast case: it meets your force in the shared store, is
+A peer's *trip* is the contrast case: it meets your force in the shared store, is
 declined, and that peer adopts the force instead.
 This coordinates the *same* breaker across workers; coordinating
 *different* breakers (so an open downstream breaker tightens the upstream ones)

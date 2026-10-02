@@ -56,42 +56,62 @@ On every exit path — a signalled stop, a worker recycle, or a plain interprete
 exit (a script returning, `sys.exit()`) — the outbox is torn down under one
 budget so buffered entries reach the store or the local fallback instead of
 dying with the process. On the `protect(dlq=True)` / `@dlq_protect`
-chain, capture has two triggers: the final failure after retries are exhausted,
-and a call an already-open circuit rejected, so that work is replayed on recovery
-instead of dropped. The second trigger is on by default and has its own switch;
-the Django middleware's preemptive store and the Celery terminal capture keep theirs.
+chain, a call that fails for good is captured whichever of these ended it:
+retries that ran out, retry switched off, Baldur's own `timeout=` cutting it
+off, or a full bulkhead refusing it. A call an already-open circuit rejected
+before it ran is captured too, so that work is replayed on recovery instead of
+dropped. That open-circuit capture is on by default and has its own switch; the
+Django middleware's preemptive store and the Celery terminal capture keep
+theirs. The failures that skip the queue, each by a stated rule, are listed in
+[DLQ + Replay](../concepts/foundations/dlq-replay.md).
 
 ```bash
 BALDUR_DLQ_ENABLED=true
 BALDUR_DLQ_MAX_SIZE=100000
 BALDUR_DLQ_OUTBOX_ENABLED=true
-BALDUR_DLQ_OPEN_CIRCUIT_CAPTURE_ENABLED=true  # park a call an OPEN circuit rejected for replay on recovery; false keeps only the retry-exhaustion capture. protect(dlq=True) / @dlq_protect chain only
+BALDUR_DLQ_OPEN_CIRCUIT_CAPTURE_ENABLED=true  # park a call an OPEN circuit rejected for replay on recovery; false stops parking those rejections only — calls that ran and failed are still captured. protect(dlq=True) / @dlq_protect chain only
 BALDUR_DLQ_OUTBOX_JOIN_TIMEOUT_SECONDS=5.0  # total teardown budget (s) per exiting process: flush buffered entries, join the writer, then spill the rest to the local fallback; 0.1-60. Keep it below the process watchdog (gunicorn --timeout, Kubernetes terminationGracePeriodSeconds); a non-zero remainder at the deadline is reported as dlq_outbox.shutdown_dump_incomplete
 ```
 
 ## Replay automation
 
-Automatic replay on circuit-breaker recovery. `ON_RECOVERY_ENABLED` is on by
-default; setting it to `false` disables the on-recovery dispatch and, with it,
-the per-recovery WARNING about a missing replay worker. A recovery drains in
-passes: each pass replays up to `ON_RECOVERY_MAX_ITEMS` entries, and the sweep
+Automatic replay on circuit-breaker recovery and by the recovery trial.
+`ON_RECOVERY_ENABLED` is on by default; setting it to `false` disables the
+on-recovery dispatch and the recovery trial and, with them, the WARNING, on a
+recovery that leaves work parked, about a missing replay worker.
+`RECOVERY_TRIAL_ENABLED` (on by default) switches the recovery trial alone: about
+once a minute it replays one parked job per job name to find out whether its
+dependency answers again, which brings jobs back after an outage that never
+closed a breaker; a trial that finds the dependency still failing spends none of
+the job's replay attempts. A recovery drains in passes: each pass replays up to
+`ON_RECOVERY_MAX_ITEMS` entries, and the sweep
 re-dispatches itself for the same service while work is still reachable, up to
 `ON_RECOVERY_MAX_CONTINUATIONS` passes, so one recovery clears up to the product
 of the two (10,000 entries on the defaults). A domain that parks more than that
 wants a higher continuation count, not a bigger pass: a pass also stops when it
 nears the replay task's own time limit, so a larger pass size buys little.
 `SERVICE_FAILURE_TYPE_MAP` maps each recovered service to the failure types
-whose captured entries it is responsible for — an empty mapping leaves the loop unable
-to select entries on recovery (surfaced as a blocked-with-signal event, not a silent
-no-op). See [DLQ + Replay → Closing the loop](../concepts/foundations/dlq-replay.md) for the
+whose captured entries it is responsible for. A `dlq=True` failure is typed
+`MAX_RETRIES_` plus its exception's class name in upper case (a
+`PaymentGatewayTimeout` becomes `MAX_RETRIES_PAYMENTGATEWAYTIMEOUT`, as an
+entry's detail view shows it), and a mapped type is matched only under the mapped
+service's own domain (the name in its stored form), when a replay handler is
+registered for that domain. Entries an open circuit
+rejected need no map entry: they are swept for the breaker that recovered,
+provided its name resolves to a domain of its own with a replay handler
+registered for it. A recovery that leaves entries parked with no lane to replay
+them is surfaced as a blocked-with-signal event naming what is missing — a replay
+handler for the breaker's domain, or a domain of its own — not a silent no-op. See
+[DLQ + Replay → Closing the loop](../concepts/foundations/dlq-replay.md) for the
 full set of prerequisites.
 
 ```bash
 BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_ENABLED=true
 BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_MAX_ITEMS=100          # entries one pass replays; 1-1000
 BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_MAX_CONTINUATIONS=100  # passes one recovery may chain while work is still reachable; 1-1000. Per-recovery bound = MAX_ITEMS x MAX_CONTINUATIONS
+BALDUR_REPLAY_AUTOMATION_RECOVERY_TRIAL_ENABLED=true        # one parked job per job name replayed periodically as a trial; needs ON_RECOVERY_ENABLED
 # JSON object: {"service_name": ["FAILURE_TYPE", ...]}
-BALDUR_REPLAY_AUTOMATION_SERVICE_FAILURE_TYPE_MAP='{"payment_api": ["TIMEOUT", "CONNECTION_ERROR"]}'
+BALDUR_REPLAY_AUTOMATION_SERVICE_FAILURE_TYPE_MAP='{"payment_api": ["MAX_RETRIES_PAYMENTGATEWAYTIMEOUT", "MAX_RETRIES_PAYMENTGATEWAYUNAVAILABLE"]}'
 ```
 
 ## Audit
@@ -99,7 +119,7 @@ BALDUR_REPLAY_AUTOMATION_SERVICE_FAILURE_TYPE_MAP='{"payment_api": ["TIMEOUT", "
 ```bash
 BALDUR_AUDIT_ENABLED=true
 BALDUR_AUDIT_DISTRIBUTED_HASH_CHAIN=true   # override only: inferred on an entitled install that names a Redis
-BALDUR_AUDIT_BUFFER_REDIS_ENABLED=true     # set-to-enable: Redis staging buffer for audit records
+BALDUR_AUDIT_BUFFER_REDIS_ENABLED=true     # set-to-enable: the tasks that drain an application-assembled Redis audit buffer
 ```
 
 An active PRO entitlement switches the audit subsystem on at startup and selects
@@ -120,8 +140,10 @@ either polarity wins, and an explicit `true` additionally makes a Redis that
 cannot be reached at all a startup error rather than a quiet fall back to the
 per-host chain. A Redis that is named but unreachable keeps writing either way,
 with every affected entry marked degraded and the
-`audit_distributed_chain_degraded` gauge at `1`. `BALDUR_AUDIT_BUFFER_REDIS_ENABLED` (default `false`) stages
-audit records in Redis and drains them to the terminal store in batches; it is
+`audit_distributed_chain_degraded` gauge at `1`. `BALDUR_AUDIT_BUFFER_REDIS_ENABLED` (default `false`) switches
+on the Celery tasks that drain a Redis audit buffer to the terminal store in
+batches. Baldur does not write audit records into that buffer itself: the
+buffer is assembled in your application code (see the audit trail guide). It is
 subordinate to the master switch, so it only takes effect while audit is
 enabled. Both resolve their Redis connection through `BALDUR_REDIS_URL` (see
 Storage below).
@@ -159,20 +181,24 @@ BALDUR_SECRETS_AUDIT_SIGNING_KEY=<high-entropy-string>
 BALDUR_SECRETS_ENCRYPTION_KEY=<fernet-key>
 ```
 
-Both are CRITICAL secrets: with `BALDUR_ENVIRONMENT=production` set, boot
-aborts (a `ConfigurationError` out of `baldur.init()`) when either is missing. The
-gate runs before the audit switch is read, so it applies to every production
-deployment whether or not audit is enabled. Outside production both may stay
-unset — the zero-config development boot.
-
 `BALDUR_SECRETS_AUDIT_SIGNING_KEY` keys the audit hash chain: each entry's
 fingerprint becomes an HMAC-SHA256 keyed by this secret, so an actor who can
 rewrite the stored files still cannot recompute a chain that passes
-verification. `BALDUR_SECRETS_ENCRYPTION_KEY` encrypts the recoverable
-(forensic-level) masked values; when it is unset, that masking degrades to a
-non-recoverable form. Key generation, rotation, and the full
-CRITICAL/IMPORTANT/OPTIONAL classification live in the secure-deployment
-runbook shipped in the repository's `docs/runbooks/` directory.
+verification. It is required in production wherever such a chain can be
+written: with `BALDUR_ENVIRONMENT=production` set, boot aborts (a
+`ConfigurationError` out of `baldur.init()`) when it is missing while the audit
+trail is on (`BALDUR_AUDIT_ENABLED`) or a PRO entitlement is active — an
+entitlement turns audit on. The check runs after the PRO startup hook, so it
+sees the entitlement and audit switch the process actually runs with. A
+production deployment with audit off and no entitlement writes no chain and
+needs no key. After installing a licence, restart the process: the requirement
+is checked at startup.
+
+`BALDUR_SECRETS_ENCRYPTION_KEY` is optional and never required. Outside
+production both may stay unset — the zero-config development boot. Key
+generation, rotation, and the full CRITICAL/IMPORTANT/OPTIONAL classification
+live in the secure-deployment runbook shipped in the repository's
+`docs/runbooks/` directory.
 
 ## Storage
 
@@ -187,16 +213,52 @@ BALDUR_REDIS_RETRY_ON_TIMEOUT=true        # retry timed-out Redis operations ins
 BALDUR_RESILIENT_STORAGE_RECOVERY_PROBE_INTERVAL=5.0  # cooldown between degraded-mode recovery probes
 BALDUR_SQL_DSN=postgresql://user:pass@host:5432/db
 BALDUR_DLQ_BACKEND=sql                    # memory | redis | sql — where captured failures are stored
+BALDUR_RESILIENT_STORAGE_WAL_DIR=/var/lib/baldur/wal  # write-ahead log directory (default /var/log/baldur/wal)
+BALDUR_SYSTEM_CONTROL_BACKEND=redis       # redis | file — where the kill switch, dry-run and emergency level live
+BALDUR_SYSTEM_CONTROL_REDIS_URL=redis://localhost:6379/0  # Redis for that state (default: BALDUR_REDIS_URL)
+BALDUR_SYSTEM_CONTROL_DIR=/var/lib/baldur/state  # file-store directory (default logs/baldur_state)
 ```
 
-`BALDUR_REDIS_URL` sits behind the same production boot gate as the secrets
-above: with `BALDUR_ENVIRONMENT=production` set, boot aborts (a
-`ConfigurationError` out of `baldur.init()`) when it is missing, because the
-framework will not fall back to per-worker memory for state that is meant to be
-shared. Outside production that same absence is an INFO-level fallback, which is
-the zero-config development boot. `BALDUR_TEST_MODE=true` accepts a memory-only
-process deliberately, skipping this check along with the other production
-configuration checks.
+`BALDUR_REDIS_URL` is a production requirement: with
+`BALDUR_ENVIRONMENT=production` set, boot aborts (a `ConfigurationError` out of
+`baldur.init()`) when it is missing, because the framework will not fall back to
+per-worker memory for state that is meant to be shared. It also aborts when the
+URL is set but the `redis` extra is not installed. Outside production those same
+states are an INFO-level fallback and a warning, which is the zero-config
+development boot. `BALDUR_TEST_MODE=true` accepts a memory-only process
+deliberately. It skips this check along with every other production check — the
+WAL directory, backend construction, the signing key and the SQL requirement
+below — and keeps every store in per-process memory even when a backend is set;
+in production it names the variables it ignored in a
+`baldur.registry_wiring_skipped` warning.
+
+`BALDUR_SQL_DSN` (or, on Django, `DATABASES`) is a production requirement only
+under an active PRO entitlement, which writes its incident records to it: with `BALDUR_ENVIRONMENT=production` set and neither configured, boot
+aborts. Without an entitlement those stores — and the security incidents your
+application records through the security API — are kept in per-process memory,
+announced at startup at INFO, until you set `BALDUR_SQL_DSN`.
+
+At startup Baldur builds the SQL stores it selected. That checks the driver
+imports and that a PostgreSQL DSN parses; it does not check that the database
+answers, so a wrong host or password surfaces at the first write. The SQL stores
+Baldur wires from `BALDUR_SQL_DSN` open their own connection per operation, with
+no pool, which suits the incident archives' write rate. To pool — a SQL
+dead-letter queue under a failure storm, a busy database — register the provider
+under the name `sql` before `baldur.init()`, for example
+`ProviderRegistry.failed_op_repo.register("sql", lambda: SQLFailedOperationRepository(engine.raw_connection))`.
+Discovery never replaces an existing registration, but the store must still
+select `sql`: the incident archives do when `BALDUR_SQL_DSN` is set, the
+dead-letter queue only with `BALDUR_DLQ_BACKEND=sql` (with Redis set, its chain
+prefers Redis).
+
+`BALDUR_RESILIENT_STORAGE_WAL_DIR` moves the resilient-storage write-ahead log.
+When the default directory is not writable — a container running as a non-root
+user, say — the log starts in a writable per-user fallback directory and startup
+logs a `baldur.resilient_storage_wal_dir_relocated` warning naming both paths.
+A directory you set is used as given: if it is not writable, or no directory is
+writable at all (a read-only root filesystem with no writable mount), production
+refuses to start. Point it at a mounted volume to keep the log across container
+restarts.
 
 `BALDUR_DLQ_BACKEND` selects the dead-letter store explicitly. Left unset,
 Baldur picks the first one the environment offers: `redis` when
@@ -204,7 +266,22 @@ Baldur picks the first one the environment offers: `redis` when
 It is read at `baldur.init()`, so it takes effect at startup and a restart is
 needed to change it. An unrecognized value is logged as a warning and the
 probe chain decides instead; a backend that cannot be constructed (a missing
-driver, say) fails the boot in production and steps down the chain elsewhere.
+driver, say) fails the boot in production and falls back to memory with a
+warning elsewhere.
+
+`BALDUR_SYSTEM_CONTROL_BACKEND` selects where the switch state — the kill
+switch, dry-run and, with PRO, the emergency level — is stored. Left unset,
+Baldur uses `redis` when a Redis URL is named for it
+(`BALDUR_SYSTEM_CONTROL_REDIS_URL`, or `BALDUR_REDIS_URL` as an environment
+variable or Django setting) and `file` otherwise. Every process sharing the
+store applies a flip within about five seconds. The file store lives in
+`BALDUR_SYSTEM_CONTROL_DIR`; a relative path resolves against each process's
+working directory, so set an absolute one when processes start from different
+directories. A deployment that moves to Redis this way leaves its file-store
+state unread (one warning names the directory); set
+`BALDUR_SYSTEM_CONTROL_BACKEND=file` to keep it, and set the backend explicitly
+before a rolling upgrade that would change it. See
+[System Control](../concepts/oss/system-control.md).
 
 `BALDUR_SQL_DSN` is the canonical full-connection input. The discrete
 `BALDUR_POSTGRES_HOST`, `BALDUR_POSTGRES_PORT`, `BALDUR_POSTGRES_DATABASE`, and
@@ -426,6 +503,21 @@ BALDUR_TIERING_MIDDLEWARE_ENABLED = False
 ```
 
 `SHEDDING_ENABLED` is the cross-framework decision switch.
+
+## Governance Break Glass (PRO)
+
+The override for an incident in which an operator must let automation run
+past the governance gate. While it is on, every action that runs the combined
+gate is allowed without its kill-switch, emergency-level and error-budget
+checks, and by default each bypass is written to the audit trail with a note
+that a post-incident review is required. Code that reads the kill switch or
+the emergency level directly, and the single-check decorators, is not
+bypassed. It is a deployment setting, not an admin-API toggle, and like every
+other variable here a change takes effect at the next process start.
+
+```bash
+BALDUR_GOVERNANCE_BREAK_GLASS_ENABLED=true
+```
 
 ## Runtime config delivery (PRO)
 

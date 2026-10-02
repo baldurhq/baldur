@@ -78,8 +78,8 @@ force-redrive — into the open-source core.
 The reasoning is that not losing work is the entire premise of the project. If
 the premise is behind a license key, the free tier is a demo of a problem
 rather than a solution to it. What stays paid is *operating* the queue at
-scale: batch replay from the console, archive and purge retention, a
-disk-durable outbox, compressed-summary overflow.
+scale: batch replay from the console, archive and purge retention,
+compressed-summary overflow.
 
 ### A decorator, not a sidecar
 

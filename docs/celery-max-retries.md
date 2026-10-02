@@ -152,13 +152,9 @@ there the task's outcome is Celery's again, retries included.
 
 With the handler in place, two ways to drain the queue:
 
-- **By hand**, once you know the provider is back:
-
-    ```bash
-    baldur dlq replay --domain billing
-    ```
-
-    or the per-entry Retry action in the console.
+- **By hand**, once you know the provider is back: the per-entry Retry action in the console.
+  It runs your handler in the process that serves the console, so register the handler there
+  too; a process without it fails the attempt and spends one of the entry's replay attempts.
 
 - **Automatically, when the dependency recovers.** Tell Baldur which failure
   types the outage produced for the domain, and run a worker on the
@@ -184,9 +180,14 @@ there is; a `VALIDATION_ERROR` entry waits for a person.
 
 **Replay is a bet that the first attempt did nothing.** For a task that
 charged a card and then timed out, that bet is not free — the charge may have
-gone through and the confirmation never came back. That is a different
-mechanism: an idempotency key on the protected call, so the second run returns
-the first run's result instead of charging again. It has its own page:
+gone through and the confirmation never came back. Baldur's idempotency key
+does not settle that case: a call that raised after the charge went through
+(the client's read timeout) releases its key, so the replay charges again.
+The payment provider's own idempotency key does — derive it from the order ID,
+and the provider answers the repeat with the original charge. Baldur's key
+covers the other repeat, a run that already completed: the repeat raises
+`IdempotencyDuplicateError` instead of running, and Baldur does not hand back
+the first run's result. It has its own page:
 [Idempotency keys for Python services](concepts/oss/idempotency.md).
 
 **Shared means shared storage.** Out of the box the queue lives in process

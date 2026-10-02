@@ -48,9 +48,6 @@ Adaptive Throttle replaces that frozen guess with a limit that tracks reality:
 - **Recovery doesn't cause a second outage.** When the pressure clears, the cap is raised back in
   gradual steps rather than flung wide open, so a recovering service isn't instantly buried by the
   backlog that was waiting on it — the classic "thundering herd" that turns one outage into two.
-- **Rejected work isn't thrown away.** A request turned away by the throttle can be parked and
-  automatically replayed once the system recovers, so a transient overload costs you latency, not
-  lost work.
 - **A Redis outage never changes what you admit.** The adaptive limit lives in each worker's own
   memory and is never waiting on a shared store, so there is no coordination store whose loss could
   remove the limit or block everything. What an outage costs is coordination: the retry cooldown
@@ -110,15 +107,9 @@ progress, but each scheduled stage brings the limit to its own target when it la
 already regained), so the ramp's schedule, not the gradient, is what sets the pace at which the
 floodgates reopen.
 
-**Rejected requests are preserved.** A request the throttle turns away can be captured — together
-with the context needed to run it again — into Baldur's dead-letter queue (critical-tier
-rejections always, standard-tier by a configurable sample; non-essential rejections are not
-parked). When the throttle's own limit climbs back off its floor and recovery has gone far enough
-(half the starting limit, by default), the parked requests are replayed automatically in batches,
-paced to the capacity actually available. A burst that was rejected because the system was briefly
-overloaded is run later instead of lost. One prerequisite: a replayed request executes again from
-scratch, so park only work that is
-[safe to run twice — non-idempotent operations need a dedup guard first](../foundations/dlq-replay.md).
+**A rejected request is turned away, not kept.** The caller receives the rejection and decides
+whether to retry. The throttle's built-in integrations do not park it in the dead-letter queue or
+run it again later.
 
 **It moves in step with the circuit breaker.** The breaker's state feeds directly into the cap:
 while the breaker is open the throttle clamps toward its floor, at half-open it admits only a
@@ -172,7 +163,6 @@ cooldown is active, make the call, and arm the next cooldown if it comes back `4
 | The limit stays at zero even after the kill switch is released | a hard stop is still in force; recovery starts only when the hard stop itself is released |
 | The limit ramps back in stages rather than jumping to full | a `429` cooldown ended or an emergency stood down; the dampened ramp avoids a thundering herd |
 | A request is rejected with the current limit, remaining count, and latest latency attached | the in-window count reached the current limit |
-| A rejected request runs successfully later | it was captured to the DLQ and auto-replayed once the throttle's limit recovered |
 | Critical-tier requests keep getting through while others are shed | a `429`-driven reduction is holding critical traffic to its earlier limit, or the error budget is rejecting non-essential work |
 | Outbound calls to a rate-limited dependency all pause, then resume, each worker's first call flagged as a canary | the Rate Limit Coordinator set a shared cooldown; the canary's outcome clears the backoff ladder or re-arms a longer cooldown |
 | A limit change appears in the audit trail with the latency and reason behind it | every SLA-driven adjustment is recorded |
@@ -200,7 +190,6 @@ not part of the public operator-tunable environment-variable allowlist yet.
 ## See also
 
 - [Circuit Breaker](../oss/circuit-breaker.md) — stops calling a dependency that keeps failing; Adaptive Throttle shares its latency data and moves its limit in step with the breaker's state
-- [DLQ + Replay](../foundations/dlq-replay.md) — where throttle-rejected requests are parked and from which they are auto-replayed on recovery
 - [Emergency Mode](emergency-mode.md) — the severity levels that scale the throttle's limit down during an incident and, at the top level, freeze it at the floor
 - [Adaptive Throttle API Reference](../../reference/pro/throttle.md) — full options and signatures
 - [Admin REST API](../../reference/api-admin.md) — the read-only status surface
