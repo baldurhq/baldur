@@ -46,7 +46,10 @@ from baldur.services.replay_service.arming import (
     get_dispatch_ledger,
     reset_dispatch_ledger,
 )
-from baldur.settings.replay_automation import ReplayAutomationSettings
+from baldur.settings.replay_automation import (
+    ReplayAutomationSettings,
+    get_replay_automation_settings,
+)
 
 _TASK_PATH = "baldur.adapters.celery.tasks.conditional_replay_on_circuit_close"
 _CELERY_TASKS_MODULE = "baldur.adapters.celery.tasks"
@@ -297,6 +300,121 @@ class TestOnRecoveryDispatchVisibilityBehavior:
         recorder.set_auto_replay_armed.assert_not_called()
         # What the path observed reaches the operator as last_dispatch instead.
         assert get_dispatch_ledger().service_name == "orders-api"
+
+
+# =============================================================================
+# 809 D5 — the celery-missing WARNING only when something waits for a worker
+# =============================================================================
+
+
+class TestCeleryMissingParkedGateBehavior:
+    """Without Celery, a recovery that left nothing parked is not told to run
+    a worker; anything else keeps the WARNING. The counter records
+    ``celery_missing`` either way, so the arming surface is unchanged.
+    """
+
+    @pytest.mark.parametrize(
+        ("parked", "warns"),
+        [
+            (0, False),
+            (1, True),
+            (None, True),
+            (RuntimeError("count unavailable"), True),
+        ],
+        ids=["nothing_parked", "one_parked", "count_unknown", "count_raises"],
+    )
+    def test_celery_missing_log_level_follows_what_is_parked(self, parked, warns):
+        # Given: armed, Celery not importable, and the closing name's count.
+        event = _make_event()
+        service = MagicMock(spec=ReplayService)
+        if isinstance(parked, Exception):
+            service.parked_count_for_recovery.side_effect = parked
+        else:
+            service.parked_count_for_recovery.return_value = parked
+
+        # When
+        with (
+            _patch_config({"on_recovery_enabled": True, "on_recovery_max_items": 50}),
+            patch(
+                "baldur.services.event_bus.bus._cb_handlers._record_dispatch_outcome"
+            ) as record,
+            patch(
+                "baldur.services.replay_service.get_replay_service",
+                return_value=service,
+            ),
+            patch.dict("sys.modules", {_CELERY_TASKS_MODULE: None}),
+            capture_logs() as cap,
+        ):
+            _on_circuit_breaker_closed(event)
+
+        # Then
+        blocked = _events(cap, "event_handler.replay_dispatch_blocked")
+        skipped = _events(cap, "event_handler.replay_dispatch_skipped")
+        if warns:
+            assert len(blocked) == 1
+            assert blocked[0]["log_level"] == "warning"
+            assert skipped == []
+        else:
+            assert blocked == []
+            assert len(skipped) == 1
+            assert skipped[0]["log_level"] == "debug"
+            assert skipped[0]["reason"] == "celery_missing"
+            assert skipped[0]["nothing_parked"] is True
+        service.parked_count_for_recovery.assert_called_once_with("payment-api")
+        record.assert_called_once_with("celery_missing", service_name="payment-api")
+
+    def test_celery_missing_with_no_replay_service_keeps_the_warning(self):
+        """A failure to reach the replay service at all reads as "parked"."""
+        event = _make_event()
+
+        with (
+            _patch_config({"on_recovery_enabled": True, "on_recovery_max_items": 50}),
+            patch(
+                "baldur.services.event_bus.bus._cb_handlers._record_dispatch_outcome"
+            ) as record,
+            patch(
+                "baldur.services.replay_service.get_replay_service",
+                side_effect=RuntimeError("registry unavailable"),
+            ),
+            patch.dict("sys.modules", {_CELERY_TASKS_MODULE: None}),
+            capture_logs() as cap,
+        ):
+            _on_circuit_breaker_closed(event)
+
+        assert len(_events(cap, "event_handler.replay_dispatch_blocked")) == 1
+        record.assert_called_once_with("celery_missing", service_name="payment-api")
+
+    def test_celery_importable_dispatches_even_with_nothing_parked(self):
+        """A count of 0 at CLOSED time cannot prove the worker will find
+        nothing — a capture still in its outbox lands after it — so the
+        dispatch never consults the count."""
+        event = _make_event()
+        task_mock = _make_task_mock()
+        service = MagicMock(spec=ReplayService)
+        service.parked_count_for_recovery.return_value = 0
+
+        with (
+            _patch_config({"on_recovery_enabled": True, "on_recovery_max_items": 50}),
+            patch(
+                "baldur.services.event_bus.bus._cb_handlers._record_dispatch_outcome"
+            ) as record,
+            patch(
+                "baldur.services.replay_service.get_replay_service",
+                return_value=service,
+            ),
+            patch(_TASK_PATH, new=task_mock),
+        ):
+            _on_circuit_breaker_closed(event)
+
+        task_mock.delay.assert_called_once_with(
+            service_name="payment-api",
+            max_items=50,
+            max_continuations=(
+                get_replay_automation_settings().on_recovery_max_continuations
+            ),
+        )
+        service.parked_count_for_recovery.assert_not_called()
+        record.assert_called_once_with("dispatched", service_name="payment-api")
 
 
 # =============================================================================

@@ -26,16 +26,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from baldur.adapters.memory.failed_operation import InMemoryFailedOperationRepository
-from baldur.audit.ring_buffer import RingBuffer
 from baldur.interfaces.governance import GovernanceChecker
 from baldur.interfaces.repositories import FailedOperationData
 from baldur.models.dlq import OPEN_CIRCUIT_FAILURE_TYPE, POLICY_CHAIN_CAPTURE_SOURCE
 from baldur.models.governance import GovernanceCheckResult
 from baldur.protect_facade import aprotect, protect
 from baldur.services.circuit_breaker.exceptions import CircuitBreakerOpenError
-from baldur.services.dlq_outbox import outbox as outbox_module
-from baldur.services.dlq_outbox.outbox import Outbox
-from baldur.services.dlq_outbox.worker import DLQOutboxWorker
 from baldur.services.event_bus.bus.event_bus import BaldurEventBus
 from baldur.services.replay_service import ReplayService
 from baldur.services.replay_service.handlers import (
@@ -46,107 +42,11 @@ from baldur.services.replay_service.handlers import (
 from baldur.services.replay_service.models import ReplayResult
 from baldur.services.retry_handler import sinks as baldur_sinks
 from baldur.services.retry_handler.models import RetryPolicyConfig
-from baldur.settings.backpressure import BackpressureStrategy
 from baldur.utils.domain_validation import resolve_stored_domain
 
 # =============================================================================
 # Fixtures
 # =============================================================================
-
-
-@pytest.fixture
-def repository() -> InMemoryFailedOperationRepository:
-    """A fresh in-memory DLQ repository — the instance both halves share."""
-    return InMemoryFailedOperationRepository()
-
-
-@pytest.fixture
-def oss_backing(monkeypatch, repository) -> Iterator[InMemoryFailedOperationRepository]:
-    """Wire the repository behind the canonical chain with both slots empty.
-
-    Simulates a pure-OSS install: ``resolve_dlq_backing()`` misses the PRO
-    ``dlq_service`` slot and falls through to the OSS capture singleton, which
-    is replaced here by one holding the test repository.
-    """
-    from baldur.factory.registry import ProviderRegistry
-    from baldur.services.dlq_capture import service as capture_module
-    from baldur.services.dlq_capture.service import (
-        DLQCaptureService,
-        reset_dlq_capture_service,
-    )
-
-    monkeypatch.setattr(ProviderRegistry.dlq_service, "safe_get", lambda: None)
-    monkeypatch.setattr(ProviderRegistry.dlq_repository, "safe_get", lambda: None)
-    monkeypatch.setattr(
-        capture_module,
-        "_capture_service",
-        DLQCaptureService(repository=repository),
-    )
-    yield repository
-    reset_dlq_capture_service()
-
-
-@pytest.fixture
-def started_outbox(oss_backing) -> Iterator[Outbox]:
-    """A real outbox draining into the OSS capture backing.
-
-    The sink stores without a ``mode``, which resolves to the async outbox by
-    default — the production path — so the drain has to be real for the entry
-    to reach the repository at all.
-    """
-    from baldur.services.dlq_capture.service import resolve_dlq_backing
-
-    def sync_writer(kwargs: dict) -> object:
-        return resolve_dlq_backing().store_failure(mode="sync", **kwargs)
-
-    buffer: RingBuffer = RingBuffer(
-        capacity=100, strategy=BackpressureStrategy.DROP_OLDEST
-    )
-    # batch_size=1 makes the drain deterministic: every popped batch flushes.
-    worker = DLQOutboxWorker(
-        buffer=buffer,
-        sync_writer=sync_writer,
-        batch_size=1,
-        flush_interval_seconds=0.01,
-    )
-    outbox = Outbox(buffer=buffer, worker=worker)
-    outbox.start()
-    outbox_module._outbox = outbox
-    outbox_module._worker_dead = False
-
-    yield outbox
-
-    try:
-        outbox.stop(timeout=1.0)
-    except Exception:
-        pass
-    outbox_module._outbox = None
-    outbox_module._worker_dead = False
-    outbox_module._worker_dead_coercions = 0
-
-
-@pytest.fixture
-def open_circuit() -> Iterator[object]:
-    """Force named circuits OPEN for the test and close them afterwards."""
-    from baldur.services.circuit_breaker.convenience import (
-        force_close_circuit,
-        force_open_circuit,
-    )
-
-    opened: list[str] = []
-
-    def _open(service_name: str) -> str:
-        force_open_circuit(service_name, reason="integration test")
-        opened.append(service_name)
-        return service_name
-
-    yield _open
-
-    for service_name in opened:
-        try:
-            force_close_circuit(service_name, reason="integration test teardown")
-        except Exception:
-            pass
 
 
 class _CollectingReplayHandler(ReplayHandler):

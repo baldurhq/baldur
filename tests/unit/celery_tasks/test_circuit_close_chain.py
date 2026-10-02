@@ -26,11 +26,12 @@ from __future__ import annotations
 
 import time
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
 from structlog.testing import capture_logs
 
+from baldur.adapters.cache.memory_adapter import InMemoryCacheAdapter
 from baldur.celery_tasks.dlq_tasks import (
     _CIRCUIT_CLOSE_DEADLINE_MARGIN_SECONDS,
     _affirm_circuit_closed,
@@ -38,12 +39,17 @@ from baldur.celery_tasks.dlq_tasks import (
     _should_continue_chain,
     conditional_replay_on_circuit_close,
 )
+from baldur.core.exceptions import DLQError
+from baldur.interfaces.repositories import FailedOperationRepository
 from baldur.services.circuit_breaker import CircuitBreakerService
+from baldur.services.event_bus.bus.event_bus import BaldurEventBus
+from baldur.services.event_bus.bus.event_types import EventType
 from baldur.services.replay_service import ReplayService
 from baldur.services.replay_service.models import BatchReplayResult
 from baldur.services.replay_service.service import (
     REASON_CIRCUIT_REOPENED,
     REASON_CONTINUATION_BOUND_REACHED,
+    REASON_NO_REPLAY_HANDLER,
     REASON_PASS_ERRORED,
     REASON_PASS_MADE_NO_PROGRESS,
 )
@@ -412,13 +418,17 @@ class TestContinuationPredicateBehavior:
 class _Chain:
     """One eager task run with the service and the re-dispatch both captured."""
 
-    def __init__(self, result=None, error=None, states=None):
-        self.service = MagicMock(spec=ReplayService)
-        self.service.recovery_is_idle.return_value = False
-        if error is not None:
-            self.service.replay_on_circuit_close.side_effect = error
+    def __init__(self, result=None, error=None, states=None, service=None):
+        if service is not None:
+            # A real service: the pass-start decision is the production one.
+            self.service = service
         else:
-            self.service.replay_on_circuit_close.return_value = result
+            self.service = MagicMock(spec=ReplayService)
+            self.service.recovery_is_idle.return_value = False
+            if error is not None:
+                self.service.replay_on_circuit_close.side_effect = error
+            else:
+                self.service.replay_on_circuit_close.return_value = result
         self.states = (
             states
             if states is not None
@@ -656,3 +666,154 @@ class TestCircuitCloseChainBehavior:
         ]
         assert len(completed) == 1
         assert completed[0]["continuation"] == 7
+
+
+# =============================================================================
+# The pass-start check: a recovery with no lane and nothing parked (809 D1)
+# =============================================================================
+
+_AFFIRM_PATH = "baldur.celery_tasks.dlq_tasks._affirm_circuit_closed"
+
+
+def _real_service(parked) -> ReplayService:
+    """A real replay service over a repository whose strict count answers
+    ``parked`` (or raises it)."""
+    repository = create_autospec(FailedOperationRepository, instance=True)
+    if isinstance(parked, Exception):
+        repository.get_cluster_pending_count_by_domain.side_effect = parked
+    else:
+        repository.get_cluster_pending_count_by_domain.return_value = parked
+    service = ReplayService(repository=repository, cache=InMemoryCacheAdapter())
+    service._event_bus = MagicMock(spec=BaldurEventBus)
+    return service
+
+
+def _runtime_map(value):
+    return patch.object(
+        ReplayService, "_load_failure_type_map", autospec=True, return_value=value
+    )
+
+
+class TestCircuitRecoveryIdlePassBehavior:
+    """An idle pass ends before anything that can only report a stop of nothing."""
+
+    def test_an_idle_pass_ends_before_the_circuit_read_and_the_sweep(self):
+        chain = _Chain()
+        chain.service.recovery_is_idle.return_value = True
+
+        with patch(_AFFIRM_PATH, autospec=True) as affirm:
+            result = chain.run(continuation=0)
+
+        assert result == {
+            "success": True,
+            "service_name": SERVICE,
+            "total": 0,
+            "nothing_parked": True,
+        }
+        chain.service.recovery_is_idle.assert_called_once_with(SERVICE)
+        affirm.assert_not_called()
+        chain.service.replay_on_circuit_close.assert_not_called()
+        chain.service.emit_circuit_close_chain_stopped.assert_not_called()
+        chain.dispatched.delay.assert_not_called()
+
+    def test_an_idle_pass_logs_one_info_completion_and_nothing_louder(self):
+        """The only trace of a finished no-lane recovery is an INFO line."""
+        chain = _Chain()
+        chain.service.recovery_is_idle.return_value = True
+
+        chain.run(continuation=4)
+
+        completed = [
+            e for e in chain.logs if e["event"] == "dlq.circuit_recovery_completed"
+        ]
+        assert len(completed) == 1
+        assert completed[0]["log_level"] == "info"
+        assert completed[0]["nothing_parked"] is True
+        assert completed[0]["dlq_total"] == 0
+        assert completed[0]["continuation"] == 4
+        assert [e for e in chain.logs if e["log_level"] not in ("debug", "info")] == []
+
+    def test_a_pass_that_is_not_idle_runs_the_affirmation_and_the_sweep(self):
+        chain = _Chain(_result(total=1))
+
+        with patch(_AFFIRM_PATH, autospec=True, return_value=(True, None)) as affirm:
+            result = chain.run()
+
+        affirm.assert_called_once_with(SERVICE)
+        chain.service.replay_on_circuit_close.assert_called_once()
+        assert "nothing_parked" not in result
+
+    def test_a_pass_carrying_positions_runs_even_when_idle_and_queues_the_cleared_pass(
+        self,
+    ):
+        """An earlier pass of the chain had a lane; its cleared-positions
+        successor may land on a worker that has one too."""
+        # Given: the no-lane result a pass with nothing to select returns.
+        chain = _Chain(BatchReplayResult())
+        chain.service.recovery_is_idle.return_value = True
+
+        # When
+        result = chain.run(continuation=1, cursors={"OPEN_CIRCUIT|payment_api": "c"})
+
+        # Then
+        chain.service.recovery_is_idle.assert_not_called()
+        chain.service.replay_on_circuit_close.assert_called_once()
+        assert result["continued"] is True
+        chain.dispatched.delay.assert_called_once_with(
+            service_name=SERVICE,
+            max_items=50,
+            max_continuations=10,
+            continuation=2,
+            cursors=None,
+        )
+
+    def test_a_mapped_name_with_nothing_parked_runs_the_pass(self):
+        """A mapped type selects in every domain, so an empty count under the
+        name's own domain proves nothing — the pass runs as before."""
+        service = _real_service(0)
+        chain = _Chain(service=service)
+
+        with (
+            _runtime_map({SERVICE: ["TIMEOUT"]}),
+            patch.object(
+                ReplayService,
+                "replay_on_circuit_close",
+                autospec=True,
+                return_value=BatchReplayResult(),
+            ) as sweep,
+            patch(_AFFIRM_PATH, autospec=True, return_value=(True, None)) as affirm,
+        ):
+            result = chain.run()
+
+        affirm.assert_called_once_with(SERVICE)
+        sweep.assert_called_once()
+        service.repository.get_cluster_pending_count_by_domain.assert_not_called()
+        assert "nothing_parked" not in result
+
+    def test_a_count_that_raises_runs_the_pass_and_the_sweep_reports_pending_none(
+        self,
+    ):
+        """An unanswerable count keeps today's path end to end: the pass
+        runs, and the no-lane sweep raises the blocked surface without a count."""
+        service = _real_service(DLQError("redis_inactive"))
+        chain = _Chain(service=service)
+
+        with (
+            _runtime_map({}),
+            patch(_AFFIRM_PATH, autospec=True, return_value=(True, None)) as affirm,
+            patch(
+                "baldur.services.replay_service.service.log_dlq_replay_blocked_audit",
+                autospec=True,
+            ),
+        ):
+            chain.run()
+
+        affirm.assert_called_once_with(SERVICE)
+        blocked = [
+            c.kwargs["data"]
+            for c in service._event_bus.emit.call_args_list
+            if c.args[0] == EventType.DLQ_REPLAY_BLOCKED
+        ]
+        assert len(blocked) == 1
+        assert blocked[0]["pending"] is None
+        assert blocked[0]["block_reason"] == REASON_NO_REPLAY_HANDLER

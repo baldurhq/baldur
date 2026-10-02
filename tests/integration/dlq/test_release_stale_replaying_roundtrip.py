@@ -22,44 +22,11 @@ from unittest.mock import patch
 
 import pytest
 
-from baldur.adapters.memory.failed_operation import InMemoryFailedOperationRepository
 from baldur.interfaces.repositories import FailedOperationStatus
 from baldur.settings.dlq import DLQSettings
 from baldur.utils.time import utc_now
 
 _STALE_THRESHOLD_MINUTES = 30
-
-
-@pytest.fixture
-def repository():
-    """A fresh in-memory DLQ repository — the single instance both paths share."""
-    return InMemoryFailedOperationRepository()
-
-
-@pytest.fixture
-def oss_backing(monkeypatch, repository):
-    """Wire the repository behind the canonical chain with both slots empty.
-
-    Simulates a pure-OSS install: ``resolve_dlq_backing()`` misses the PRO
-    ``dlq_service`` slot and falls through to the OSS capture singleton, which
-    is replaced here by one holding the test repository.
-    """
-    from baldur.factory.registry import ProviderRegistry
-    from baldur.services.dlq_capture import service as capture_module
-    from baldur.services.dlq_capture.service import (
-        DLQCaptureService,
-        reset_dlq_capture_service,
-    )
-
-    monkeypatch.setattr(ProviderRegistry.dlq_service, "safe_get", lambda: None)
-    monkeypatch.setattr(ProviderRegistry.dlq_repository, "safe_get", lambda: None)
-    monkeypatch.setattr(
-        capture_module,
-        "_capture_service",
-        DLQCaptureService(repository=repository),
-    )
-    yield repository
-    reset_dlq_capture_service()
 
 
 @pytest.fixture

@@ -20,21 +20,35 @@ Parametrized over the 3 upstream map shapes that converge on this branch:
 - target service mapped but value is an empty list
 
 Negative control: a populated map falls through to the governance check.
+
+809 D4 — the branch is loud only when work is left behind: nothing parked
+under the name ends it with one DEBUG line and no blocked channel; work parked
+under an addressable name names the missing handler; a name with no domain of
+its own names that, whatever the store holds. The retired map-unconfigured
+names appear in no channel.
 """
 
 from __future__ import annotations
 
-from unittest.mock import ANY, MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import ANY, MagicMock, create_autospec, patch
 
 import pytest
 from structlog.testing import capture_logs
 
+from baldur.adapters.cache.memory_adapter import InMemoryCacheAdapter
+from baldur.core.exceptions import DLQError
+from baldur.interfaces.repositories import FailedOperationRepository
+from baldur.services.event_bus.bus.event_bus import BaldurEventBus
 from baldur.services.event_bus.bus.event_types import EventType
 from baldur.services.replay_service import ReplayService
 from baldur.services.replay_service.service import (
+    _REMEDIATION_DOMAIN_NOT_ADDRESSABLE,
+    _REMEDIATION_NO_REPLAY_HANDLER,
     REASON_DOMAIN_NOT_ADDRESSABLE,
     REASON_NO_REPLAY_HANDLER,
 )
+from baldur.utils.domain_validation import FALLBACK_DOMAIN, resolve_stored_domain
 
 # =============================================================================
 # Fixtures
@@ -368,3 +382,170 @@ class TestReplayNoMappingDedupBehavior:
         # Misconfig audit NOT called — governance check IS called.
         mock_audit.assert_not_called()
         mock_governance.assert_called_once()
+
+
+# =============================================================================
+# Behavior — quiet with nothing parked, loud naming the cause otherwise (809 D4)
+# =============================================================================
+
+# An LLM endpoint identity: a domain of its own that nothing is parked under.
+LLM_ENDPOINT = "llm.api_example_com.gpt_4o"
+# 65 characters: over the domain length limit, so it has no domain of its own.
+UNADDRESSABLE = "a" * 65
+
+_RETIRED_LOG_EVENT = "replay_service.no_failure_types_mapped"
+_RETIRED_REASON = "service_failure_type_map_unconfigured"
+_RETIRED_KEY = "config_path"
+
+
+def _sweep_with_no_lane(service_name: str, parked) -> SimpleNamespace:
+    """Run one recovery pass for a name with no lane, capturing every channel.
+
+    ``parked`` is what the strict pending count answers, or an exception it
+    raises instead.
+    """
+    repository = create_autospec(FailedOperationRepository, instance=True)
+    if isinstance(parked, Exception):
+        repository.get_cluster_pending_count_by_domain.side_effect = parked
+    else:
+        repository.get_cluster_pending_count_by_domain.return_value = parked
+    service = ReplayService(repository=repository, cache=InMemoryCacheAdapter())
+    bus = MagicMock(spec=BaldurEventBus)
+    service._event_bus = bus
+
+    with (
+        patch(
+            "baldur.metrics.event_handlers.ReplayEventHandler.on_replay_blocked",
+            autospec=True,
+        ) as metric,
+        patch(
+            "baldur.services.replay_service.service.log_dlq_replay_blocked_audit",
+            autospec=True,
+        ) as audit,
+        capture_logs() as logs,
+    ):
+        result = service.replay_on_circuit_close(
+            service_name=service_name, service_failure_type_map={}
+        )
+
+    blocked_events = [
+        c.kwargs["data"]
+        for c in bus.emit.call_args_list
+        if c.args[0] == EventType.DLQ_REPLAY_BLOCKED
+    ]
+    return SimpleNamespace(
+        result=result,
+        repository=repository,
+        logs=logs,
+        blocked_events=blocked_events,
+        metric=metric,
+        audit=audit,
+    )
+
+
+class TestNoLaneRecoverySignalBehavior:
+    """The no-lane branch speaks only for work it leaves behind."""
+
+    def test_no_lane_with_nothing_parked_logs_debug_and_writes_no_blocked_channel(
+        self,
+    ):
+        """A recovery of a breaker that parked nothing is a finished recovery."""
+        sweep = _sweep_with_no_lane(LLM_ENDPOINT, 0)
+
+        skipped = [
+            e
+            for e in sweep.logs
+            if e["event"] == "replay_service.circuit_close_replay_skipped"
+        ]
+        assert len(skipped) == 1
+        assert skipped[0]["log_level"] == "debug"
+        assert skipped[0]["reason"] == "nothing_parked"
+        assert skipped[0]["healing_domain"] == resolve_stored_domain(LLM_ENDPOINT)
+        assert [e for e in sweep.logs if e["log_level"] not in ("debug", "info")] == []
+        assert sweep.blocked_events == []
+        sweep.metric.assert_not_called()
+        sweep.audit.assert_not_called()
+        assert sweep.result.total == 0
+
+    @pytest.mark.parametrize(
+        ("parked", "pending"),
+        [(2, 2), (DLQError("redis_inactive"), None)],
+        ids=["two_parked", "count_unavailable"],
+    )
+    def test_no_lane_with_work_left_names_the_missing_handler_on_every_channel(
+        self, parked, pending
+    ):
+        """Parked work under an addressable name waits for its handler."""
+        service_name = "payment_api"
+        sweep = _sweep_with_no_lane(service_name, parked)
+        domain = resolve_stored_domain(service_name)
+        details = {
+            "healing_domain": domain,
+            "pending": pending,
+            "remediation": _REMEDIATION_NO_REPLAY_HANDLER,
+        }
+
+        blocked = [
+            e
+            for e in sweep.logs
+            if e["event"] == "replay_service.circuit_close_replay_blocked"
+        ]
+        assert len(blocked) == 1
+        assert blocked[0]["log_level"] == "warning"
+        assert blocked[0]["block_reason"] == REASON_NO_REPLAY_HANDLER
+        assert blocked[0]["pending"] == pending
+        assert sweep.blocked_events == [
+            {
+                "trigger": "circuit_close",
+                "service_name": service_name,
+                "block_reason": REASON_NO_REPLAY_HANDLER,
+                **details,
+            }
+        ]
+        sweep.metric.assert_called_once_with(service_name, REASON_NO_REPLAY_HANDLER)
+        sweep.audit.assert_called_once_with(
+            domain="dlq",
+            reason=REASON_NO_REPLAY_HANDLER,
+            service_name=service_name,
+            trigger="circuit_close",
+            details=details,
+        )
+
+    def test_no_lane_name_without_a_domain_stays_loud_whatever_the_store_holds(
+        self,
+    ):
+        """The pooled bucket is never counted, so an empty store cannot quiet it."""
+        sweep = _sweep_with_no_lane(UNADDRESSABLE, 0)
+
+        sweep.repository.get_cluster_pending_count_by_domain.assert_not_called()
+        assert sweep.blocked_events == [
+            {
+                "trigger": "circuit_close",
+                "service_name": UNADDRESSABLE,
+                "block_reason": REASON_DOMAIN_NOT_ADDRESSABLE,
+                "healing_domain": FALLBACK_DOMAIN,
+                "pending": None,
+                "remediation": _REMEDIATION_DOMAIN_NOT_ADDRESSABLE,
+            }
+        ]
+        sweep.metric.assert_called_once_with(
+            UNADDRESSABLE, REASON_DOMAIN_NOT_ADDRESSABLE
+        )
+
+    def test_no_lane_blocked_surface_carries_none_of_the_retired_names(self):
+        """The map-unconfigured signal pointed at a remedy that escalates the work."""
+        sweep = _sweep_with_no_lane("payment_api", 1)
+
+        audit_kwargs = sweep.audit.call_args.kwargs
+        channels = [
+            *sweep.logs,
+            *sweep.blocked_events,
+            audit_kwargs,
+            audit_kwargs["details"],
+        ]
+        assert [e for e in sweep.logs if e["event"] == _RETIRED_LOG_EVENT] == []
+        assert all(_RETIRED_KEY not in channel for channel in channels)
+        assert all(
+            _RETIRED_REASON not in map(str, channel.values()) for channel in channels
+        )
+        assert _RETIRED_REASON not in sweep.metric.call_args.args
