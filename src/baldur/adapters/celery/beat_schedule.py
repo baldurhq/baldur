@@ -146,12 +146,22 @@ _QUEUE_DEFINITIONS: list[Queue] = [
     ),
 ]
 
+
+def _queue_arguments(q: Queue) -> dict[str, Any]:
+    """Copy of the queue's declare arguments (empty when it has none).
+
+    kombu sets ``queue_arguments`` at runtime from ``Queue.attrs``, so the
+    type information kombu ships does not declare it.
+    """
+    return dict(getattr(q, "queue_arguments", None) or {})
+
+
 # Backward-compatible dict (gradual migration support)
 BALDUR_QUEUE_CONFIG = {
     q.name: {
         "exchange": q.exchange.name,
         "routing_key": q.routing_key,
-        "queue_arguments": q.queue_arguments or {},
+        "queue_arguments": _queue_arguments(q),
     }
     for q in _QUEUE_DEFINITIONS
 }
@@ -191,7 +201,7 @@ def get_baldur_queues(
             exchange = q.exchange
             routing_key = q.routing_key
 
-        args = dict(q.queue_arguments or {})
+        args = _queue_arguments(q)
         args["x-queue-type"] = queue_type
         if not enable_dlx:
             args.pop("x-dead-letter-exchange", None)
