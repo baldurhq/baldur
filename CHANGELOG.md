@@ -10,6 +10,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+## [1.18.0] - 2026-11-15
+
 ### Changed
 
 - PyPI package renamed `baldur-framework` → `baldur`; install with `pip install baldur`.
