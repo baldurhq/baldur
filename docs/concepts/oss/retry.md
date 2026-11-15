@@ -7,7 +7,7 @@ description: >-
 
 # Retry with exponential backoff in Python
 
-> Automatically tries a failed operation again — with smart, growing pauses between attempts — so a brief hiccup doesn't turn into a user-facing error in your Python service.
+> Automatically tries a failed operation again, with growing pauses between attempts, so a brief hiccup doesn't turn into a user-facing error in your Python service.
 
 ## What is it?
 
@@ -95,11 +95,15 @@ That loop is the easy half. What decides whether retrying is *safe* is everythin
   outlast its cap (60 seconds, or the remaining retry budget when one is set), retry stops rather
   than sleep through it.
 - **Retryable vs. non-retryable.** The default is deliberately broad: every exception is retried
-  except a circuit-breaker rejection and Baldur's own 429 deferral, which stop the ladder at once
-  (retrying a call the breaker has already cut off is the thing the breaker exists to prevent).
-  Errors that cannot succeed on a second attempt, a validation failure being the usual one, keep
-  costing attempts until you say otherwise. Name them with `non_retryable_exceptions=` on `@retry`,
-  or narrow `retryable_exceptions=` to the transient set you actually want.
+  except the few that stop the ladder at once. Those are a circuit-breaker rejection (retrying a
+  call the breaker has already cut off is the thing the breaker exists to prevent), Baldur's own
+  429 deferral, and an LLM provider's answer that a resend cannot change: an exhausted quota, a
+  refused key or a rejected request raised by the OpenAI, Anthropic or Google Gen AI SDK, and the
+  `LLMUnavailableError` a [`baldur.llm.wrap`](../../llm-rate-limits.md) client raises when no
+  endpoint answers. Other errors that cannot succeed on a second attempt, a validation failure
+  being the usual one, keep costing attempts until you say otherwise. Name them with
+  `non_retryable_exceptions=` on `@retry`, or narrow `retryable_exceptions=` to the transient set
+  you actually want.
 - A timeout bounds the whole sequence, not each attempt. When you add a timeout under
   `@baldur.protected` (or `protect()` / `aprotect()`), it wraps the entire retry sequence: the
   fallback sits outermost, the circuit breaker next, then the timeout, then retry. The clock covers
@@ -119,9 +123,11 @@ That loop is the easy half. What decides whether retrying is *safe* is everythin
   `idempotency_key=` solves the neighboring problem, one level up. It blocks a duplicate *call*
   (a double-submit, a redelivered queue message, a client that retried the request itself) from
   entering the pipeline at all, while the first call is still running or after it succeeded. A first
-  call that raised releases its key, so a duplicate sent after that failure runs the function again.
-  The guard is evaluated once per call, before the retry stage runs, so it deduplicates callers
-  rather than attempts.
+  call releases its key when your function raises, once nothing it started is still running, so a
+  duplicate sent after that failure runs the function again. A call that `timeout=` cut off follows
+  its work rather than the error you saw: if that work goes on to return, the key completes and a
+  duplicate is still blocked. The guard is evaluated once per call, before the retry stage runs,
+  so it deduplicates callers rather than attempts.
 
   ```python
   @baldur.protected("payments", retry=True, idempotency_key="order_id")
@@ -141,9 +147,9 @@ That loop is the easy half. What decides whether retrying is *safe* is everythin
   runs your fallback, if you supplied one). With DLQ routing enabled and no fallback answering, the
   failed operation is also preserved in the Dead Letter Queue (DLQ) for inspection or later replay.
 - **DLQ routing is opt-in, not automatic.** Retry and backoff run on their own; the Dead Letter
-  Queue captures an exhausted operation only where you asked for it (`dlq=True`). Without that flag,
-  an exhausted retry still surfaces the error to the caller, and the pipeline doesn't capture the
-  operation for replay. Even with it, a failure your fallback answered never reaches the queue; a
+  Queue captures an exhausted operation only where you asked for it (`dlq=True`, which `replay=True`
+  also turns on). Without either flag, an exhausted retry still surfaces the error to the caller,
+  and the pipeline doesn't capture the operation for replay. Even with it, a failure your fallback answered never reaches the queue; a
   call a `timeout=` cuts off mid-retry is parked once, at the bound, and the abandoned ladder's
   later failure adds no second entry. The other calls that stay out, each by a stated rule, are
   listed in [DLQ + Replay](../foundations/dlq-replay.md).
@@ -151,7 +157,7 @@ That loop is the easy half. What decides whether retrying is *safe* is everythin
 | What you observe | When it happens |
 |------------------|-----------------|
 | The call is retried after a growing pause, or after a 429's `Retry-After` | a retryable error was raised and attempts remain |
-| The call fails with no further attempt | the circuit breaker rejected the call, the error is one you declared non-retryable, a 429's wait would outlast its cap, or the next wait would overrun the time budget (`BALDUR_RETRY_MAX_ELAPSED`, or a deadline the request carried in) |
+| The call fails with no further attempt | the circuit breaker rejected the call, the error is one you declared non-retryable or an LLM provider's answer a resend cannot change, a 429's wait would outlast its cap, or the next wait would overrun the time budget (`BALDUR_RETRY_MAX_ELAPSED`, or a deadline the request carried in) |
 | An error is raised, and with DLQ routing enabled the operation lands in the DLQ | every attempt was used up, with no fallback |
 | Your fallback's value comes back, and nothing lands in the DLQ | every attempt was used up under a `fallback=` |
 | The call succeeds with no error surfaced | a later attempt finally worked |
@@ -163,7 +169,7 @@ The most common knobs an operator sets. The full list lives in the API reference
 | Env Var | Default | What it controls |
 |---------|---------|------------------|
 | `BALDUR_RETRY_MAX_ATTEMPTS` | `3` | The maximum number of attempts, the first one included, before retry gives up on the operation |
-| `BALDUR_RETRY_BASE_DELAY` | `1.0` | The first backoff wait; later waits follow the chosen strategy |
+| `BALDUR_RETRY_BASE_DELAY` | `1.0` | The first backoff wait, before jitter; later waits follow the chosen strategy |
 | `BALDUR_RETRY_BACKOFF_STRATEGY` | `exponential` | Which backoff curve the waits follow: `exponential`, `linear`, `constant` or `decorrelated_jitter` |
 | `BALDUR_IDEMPOTENCY_ENABLED` | `true` | Master switch for duplicate-call blocking. Covers both `@idempotent` and `idempotency_key=` on the facade; set it to `false` and neither one checks or records a key |
 

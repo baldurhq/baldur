@@ -133,13 +133,13 @@ backends](concepts/foundations/storage-backends.md) for the trade-offs.
 
 **Classification reads the provider's answer, not its wording.** An error
 raised by one of the three SDKs is classified by the HTTP status it carries,
-plus the error code where a status alone is ambiguous:
+plus the error code or body where a status alone is ambiguous:
 
 | The provider answered | Read as | Retried on the same endpoint | Every worker waits | Counts against the breaker | Moves to the next endpoint |
 |---|---|---|---|---|---|
 | 429 whose code is `insufficient_quota`, a Gemini per-day quota, any 402, Anthropic's "credit balance" 400 | quota exhausted | no | no | yes | at once |
-| any other 429 | rate limit | yes, after the wait | yes, at least as long as the provider asked | when retries run out, and each one toward the storm trip below | when the wait is longer than a call may sleep, or retries run out |
-| 529, 503 | overload | yes, after the wait | yes, on Baldur's escalating wait (the provider's hint as a floor) | when retries run out, and each one toward the storm trip below | when the wait is longer than a call may sleep, or retries run out |
+| any other 429 | rate limit | yes, after the wait | yes, at least as long as the provider's hint asked, up to an hour | when retries run out or a wait too long to sleep ends them, and each one toward the storm trip below | when the wait is longer than a call may sleep, or retries run out |
+| 529, 503 | overload | yes, after the wait | yes, on Baldur's escalating wait (the provider's hint as a floor) | when retries run out or a wait too long to sleep ends them, and each one toward the storm trip below | when the wait is longer than a call may sleep, or retries run out |
 | 401, 403 | key refused | no | no | yes | at once |
 | 408, 409, 500, 502, 504, other 5xx, a connection error or timeout | transient | yes, on the retry ladder | no | when retries run out | when retries run out |
 | any other 4xx (400, 404, 413, 422, …) | request rejected | no | no | no | no — the error is raised to your code |
@@ -166,13 +166,16 @@ move past that endpoint at once until its breaker recovers.
 
 **The provider's hint is honored when it sends one.** Baldur reads
 `retry-after-ms` (OpenAI and Anthropic send it), then `Retry-After` in both
-forms the HTTP spec allows — a number of seconds, or a date — then the
-`RetryInfo.retryDelay` Gemini puts in its error body instead of a header. The
-provider's number is a floor under the cooldown, not a replacement for it:
-Baldur never waits less than the provider asked, and its own escalating
-cooldown can still be the longer of the two. The provider knows the earliest
-legal time; it knows nothing about how many of you are still colliding. A
-Gemini per-day quota is the exception: it is an exhausted quota even when the
+forms the HTTP spec allows — a number of seconds, or a date — then, on an
+error from the Google Gen AI SDK, the `RetryInfo.retryDelay` Gemini puts in its
+error body instead of a header. The provider's number is a floor under the
+cooldown, not a replacement for it: Baldur waits at least as long as the hint
+asks, up to an hour by default, and its own escalating cooldown can still be the
+longer of the two. The provider knows the earliest legal time; it knows nothing
+about how many of you are still colliding. Gemini's OpenAI-compatible endpoint
+sends no header and its body is not read, so a Gemini 429 through the OpenAI SDK
+waits on Baldur's escalating cooldown alone. A Gemini per-day quota read from a
+Google Gen AI SDK error is the exception: it is an exhausted quota even when the
 body also names a short delay, since waiting a minute cannot restore a daily
 quota.
 
@@ -198,11 +201,12 @@ client = baldur.llm.wrap(
 
 The table above says when a call moves: at once on an exhausted quota or a
 refused key, after the retries on a rate limit, an overload or a failure, and
-at once when an endpoint's breaker is open or its wait is longer than a call may
-sleep. A rejected request never moves. `Endpoint(model=...)` replaces the call's
-`model=` on that endpoint, so a fallback provider gets the name it knows the
-model by; only a call that names a model moves at all — listing models or
-uploading a file runs on the primary alone. Every endpoint has its own name, so
+at once when an endpoint's breaker is open or a wait already in force there is
+longer than a call may sleep. A rejected request never moves.
+`Endpoint(model=...)` replaces the call's `model=` on that endpoint, so a
+fallback provider gets the name it knows the model by; only a call that names a
+model moves at all — listing models or uploading a file runs on the primary
+alone. Every endpoint has its own name, so
 its own wait and its own breaker; two endpoints of one wrap that would always
 share a name (two keys on one host and model) are refused with a `ValueError`
 when you wrap them, because the fallback would wait out the primary's wait and
@@ -216,9 +220,9 @@ cooldown already say why. A call a later endpoint answered counts once in
 `baldur_protect_fallback_total` under the first endpoint's name.
 
 When no endpoint answers, the call raises `baldur.LLMUnavailableError`, chained
-to the last endpoint's error, with `attempts` listing each endpoint and why it
-did not answer. It is not retried by an enclosing retry stage: every endpoint
-already ran its own.
+to the last endpoint's error, with `attempts` listing each endpoint it reached
+and why it did not answer. It is not retried by an enclosing retry stage: every
+endpoint already ran its own.
 
 The wrapped object answers like the client but is not an instance of the SDK's
 class: a library that type-checks the client it is given (an agent framework's
@@ -250,14 +254,16 @@ breaker opens, later calls are rejected without calling the provider and are
 parked too. When the provider is back, the recovery sweep re-runs every parked
 call of both kinds, with the same arguments, under the same retry, breaker,
 timeout and idempotency settings as the decorator — without capture or the
-fallback, so a replay that fails again adds no second entry. The sweep starts
-when the job's breaker closes, or when the recovery trial finds the provider
-answering: about once a minute it re-runs one parked job of the name — less
-often while that keeps failing, nine minutes apart at most — so jobs come back
-after an outage too short to open the breaker, or one that ended with no later
-job to close it. A trial that finds the provider still down costs the job none
+fallback, so a replay that fails again adds no second entry; in the sweep a
+closing breaker starts, it is moved to review rather than replayed again. The
+sweep starts when the job's breaker closes, or when the recovery trial finds
+the provider answering: about once a minute it re-runs one parked job of the
+name — less often while that keeps failing, nine minutes apart at most — so
+jobs come back after an outage too short to open the breaker, or one that ended
+with no later job to close it. A trial that finds the provider still down costs the job none
 of its replay attempts. Arguments up to 256 KiB are kept for such a job by
-default, so a prompt or a document is not cut short.
+default, so a prompt or a document is not cut short; a job whose arguments are
+larger is parked cut short and is not replayed.
 
 Everything else parked under the same name — a rejected request, an error in
 the job's own code, a job-level `timeout=` whose work may still be running — is
@@ -326,7 +332,7 @@ Both shapes install the shared cooldown, except a raised 429 the table above
 reads as an exhausted quota. Where a raised exception is classified as above, a
 returned response is classified by its status code (`429` by default;
 `BALDUR_MIDDLEWARE_RATE_LIMIT_CODES` is the list). Either way the cooldown is
-written, and the rest of the fleet waits on it.
+written, and every worker on the same store waits on it.
 
 The difference is the retry. A raised 429 is a failure, so the retry ladder
 runs and, unless it is an exhausted quota, the call is tried again once the
