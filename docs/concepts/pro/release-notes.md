@@ -1,7 +1,7 @@
 # PRO Release Notes
 
 Release notes for Baldur **PRO** — the licensed tier. The open-source core has
-its own changelog in the [`baldur-framework` repository](https://github.com/baldurhq/baldur/blob/main/CHANGELOG.md).
+its own changelog in the [`baldur` repository](https://github.com/baldurhq/baldur/blob/main/CHANGELOG.md).
 Each entry describes an operator-visible capability; a PRO license is required.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).

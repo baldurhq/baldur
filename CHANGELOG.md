@@ -5,10 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-This changelog covers the open-source core (`baldur-framework`). PRO release
+This changelog covers the open-source core (`baldur`). PRO release
 notes are published separately at <https://baldur.sh/concepts/pro/release-notes/>.
 
 ## [Unreleased]
+
+### Changed
+
+- PyPI package renamed `baldur-framework` → `baldur`; install with `pip install baldur`.
+- Uninstall `baldur-framework` before installing `baldur`: both ship the `baldur` package.
 
 ## [1.17.1] - 2026-10-02
 

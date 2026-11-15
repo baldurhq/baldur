@@ -67,7 +67,7 @@ with it — see
 
 ## OSS and PRO
 
-The core is free and Apache-2.0 licensed (`pip install baldur-framework`), and
+The core is free and Apache-2.0 licensed (`pip install baldur`), and
 covers the resilience patterns themselves: circuit breaker, retry, fallback,
 idempotency, health checks, metrics, the durable dead-letter queue with replay,
 and the web console. **Baldur PRO** is a separate package you add on top for

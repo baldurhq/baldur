@@ -113,7 +113,7 @@ where each probe should point:
 Health Check has no switch to turn on: the admin-server checks start with `baldur.init()`. On
 Django, the `/api/baldur/` endpoints appear once you mount Baldur's REST API in your `urls.py`
 with `path("api/baldur/", include("baldur.api.django.urls"))`, which needs the
-`baldur-framework[django-api]` extra. Flask and FastAPI get no `/api/baldur/` routes, so they use
+`baldur[django-api]` extra. Flask and FastAPI get no `/api/baldur/` routes, so they use
 the admin server. A drain flips readiness to `503` only where Baldur's drain middleware runs:
 `configure_baldur()` from `baldur.adapters.django` installs it, while adding the app to
 `INSTALLED_APPS` alone does not.

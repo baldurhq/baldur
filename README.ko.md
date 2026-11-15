@@ -3,7 +3,7 @@
 [![CI](https://github.com/baldurhq/baldur/actions/workflows/ci-oss-mirror.yml/badge.svg)](https://github.com/baldurhq/baldur/actions/workflows/ci-oss-mirror.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
-[![PyPI](https://img.shields.io/pypi/v/baldur-framework.svg)](https://pypi.org/project/baldur-framework/)
+[![PyPI](https://img.shields.io/pypi/v/baldur.svg)](https://pypi.org/project/baldur/)
 [![Docs](https://img.shields.io/badge/docs-baldur.sh-1f6feb.svg)](https://baldur.sh)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13522/badge)](https://www.bestpractices.dev/projects/13522)
 
@@ -64,7 +64,7 @@ Redis도, Docker도, 설정도 없이 시작합니다. 저 두 줄은 멀티 프
 *실제 실행을 실제 시간 그대로 녹화했습니다. 직접 재현해 보세요:*
 
 ```bash
-pip install "baldur-framework[celery]" openai
+pip install "baldur[celery]" openai
 python -m baldur.scripts.demo_llm_outage
 ```
 
@@ -94,18 +94,18 @@ Baldur는 재시도를 대체하지 않습니다 — 재시도가 못 하는 것
 
 ## 설치
 
-Python 패키지 이름은 `baldur`이고(`import baldur`), PyPI 배포 이름은
-`baldur-framework`입니다.
+PyPI 배포 이름과 Python 패키지 이름이 모두 `baldur`입니다
+(`pip install baldur` 후 `import baldur`).
 
 ```bash
-pip install baldur-framework                 # 프레임워크 독립 코어
-pip install baldur-framework[django]         # Django 연동
-pip install baldur-framework[django-api]     # Baldur의 Django REST API (baldur.api.django.urls)
-pip install baldur-framework[fastapi]        # FastAPI 연동
-pip install baldur-framework[flask]          # Flask 연동
-pip install baldur-framework[celery]         # Celery 태스크 보호
-pip install baldur-framework[redis]          # Redis 기반 공유 상태
-pip install baldur-framework[prometheus]     # Prometheus 메트릭
+pip install baldur                 # 프레임워크 독립 코어
+pip install baldur[django]         # Django 연동
+pip install baldur[django-api]     # Baldur의 Django REST API (baldur.api.django.urls)
+pip install baldur[fastapi]        # FastAPI 연동
+pip install baldur[flask]          # Flask 연동
+pip install baldur[celery]         # Celery 태스크 보호
+pip install baldur[redis]          # Redis 기반 공유 상태
+pip install baldur[prometheus]     # Prometheus 메트릭
 ```
 
 ## 같은 데코레이터, 어떤 의존성이든
@@ -138,12 +138,12 @@ def charge(order_id: str, amount_cents: int) -> dict:
 995건을 게이트웨이를 부르지 않고 거절하며, 1,000건이 전부 인자와 함께 포착되어
 데모가 등록한 재실행 핸들러를 통해 복구 시점에 전부 재실행됩니다. 유실 0건. 실제 실행을 실제 시간 그대로 녹화한
 화면이고, 브레이커 상태와 DLQ 집계는 프레임워크에서 실시간으로 읽어온 값입니다.
-데코레이터 자체는 `pip install baldur-framework`가 전부입니다. 데모는 프로세스
+데코레이터 자체는 `pip install baldur`가 전부입니다. 데모는 프로세스
 안의 대역 워커를 위해 `celery` extra를 추가할 뿐, 여전히 프로세스 하나에 Redis도
 브로커도 없습니다. 직접 재현해 보세요:*
 
 ```bash
-pip install "baldur-framework[celery]"
+pip install "baldur[celery]"
 python -m baldur.scripts.demo_self_healing --outage-charges 1000
 ```
 

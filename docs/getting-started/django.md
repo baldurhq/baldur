@@ -9,11 +9,11 @@ environment variables. The in-memory fallback covers the whole first run.
 ## 1. Install
 
 ```bash
-pip install baldur-framework[django]
+pip install baldur[django]
 ```
 
 `[django]` installs Django only. Mounting Baldur's REST API
-(`baldur.api.django.urls`) also needs `baldur-framework[django-api]`; this
+(`baldur.api.django.urls`) also needs `baldur[django-api]`; this
 quickstart does not use it.
 
 ## 2. Add Baldur to your settings
@@ -125,7 +125,7 @@ Point Baldur at Redis so all workers share state. No code changes needed: set on
 environment variable before starting the server:
 
 ```bash
-pip install baldur-framework[django,redis]
+pip install baldur[django,redis]
 export BALDUR_REDIS_URL=redis://localhost:6379/0
 export BALDUR_ENVIRONMENT=production
 ```

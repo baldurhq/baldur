@@ -3,7 +3,7 @@
 CLAUDE.md § Pattern Compliance — the OSS source tree (``src/baldur/``) must
 not depend on ``baldur_pro`` or ``baldur_dormant`` at module-load time.
 Both are shipped as private-distribution sibling packages and are absent
-from a clean ``pip install baldur-framework`` wheel — module-level
+from a clean ``pip install baldur`` wheel — module-level
 ``from baldur_pro ... import ...`` / ``from baldur_dormant ... import ...``
 raises ``ModuleNotFoundError`` on every user machine that omits the
 private extras.

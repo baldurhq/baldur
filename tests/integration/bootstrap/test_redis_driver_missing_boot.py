@@ -115,7 +115,7 @@ class TestRedisDriverMissingProductionBootIntegration:
 
         assert report["raised"] == "baldur.core.exceptions.ConfigurationError"
         assert "BALDUR_REDIS_URL" in report["message"]
-        assert "pip install baldur-framework[redis]" in report["message"]
+        assert "pip install baldur[redis]" in report["message"]
 
 
 # =============================================================================

@@ -2,7 +2,7 @@
 Generate the third-party license inventory (THIRD_PARTY_LICENSES.md).
 
 Resolves the dependency closure of an installed distribution (default
-``baldur-framework[all]``) from local package metadata and renders a Markdown
+``baldur[all]``) from local package metadata and renders a Markdown
 inventory of every third-party dependency with its version and license.
 
 The license string mirrors the ``license-check`` CI gate in
@@ -49,7 +49,7 @@ DEFAULT_OUTPUT = PROJECT_ROOT / "THIRD_PARTY_LICENSES.md"
 
 # Distributions that are the project itself, never third-party.
 SELF_DISTRIBUTIONS = {
-    "baldur-framework",
+    "baldur",
     "baldur-pro",
     "baldur-dormant",
     "baldur",
@@ -287,8 +287,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[1])
     parser.add_argument(
         "--package",
-        default="baldur-framework",
-        help="root distribution to resolve (default: baldur-framework)",
+        default="baldur",
+        help="root distribution to resolve (default: baldur)",
     )
     parser.add_argument(
         "--extras",

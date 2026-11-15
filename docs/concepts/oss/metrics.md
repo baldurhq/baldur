@@ -98,7 +98,7 @@ soon as Baldur is initialized. The one thing you add is the optional Prometheus 
 text-exposition endpoint has something to render:
 
 ```bash
-pip install "baldur-framework[prometheus]"
+pip install "baldur[prometheus]"
 ```
 
 (The quotes matter in `zsh`/`fish`, which would otherwise treat the brackets as a glob.)

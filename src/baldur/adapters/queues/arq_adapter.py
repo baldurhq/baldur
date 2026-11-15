@@ -76,7 +76,7 @@ def _parse_cron_to_arq_fields(cron_expr: str) -> dict[str, set[int] | None]:
         # from None: suppress chained ImportError — user-actionable message only
         raise ImportError(
             "croniter is required for cron expression parsing. "
-            "Install it with: pip install baldur-framework[arq]"
+            "Install it with: pip install baldur[arq]"
         ) from None
 
     try:

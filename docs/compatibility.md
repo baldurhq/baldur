@@ -26,9 +26,9 @@ Baldur's core is framework-agnostic; the framework adapters are optional extras.
 
 | Framework | Extra | Minimum | Tested in CI |
 |-----------|-------|---------|--------------|
-| Django | `baldur-framework[django]` | 4.2 | 4.2 LTS · 5.2 LTS · 6.0 · 6.1 |
-| FastAPI | `baldur-framework[fastapi]` | 0.100 | latest ≥ floor (smoke) |
-| Flask | `baldur-framework[flask]` | 2.3 | latest ≥ floor (smoke) |
+| Django | `baldur[django]` | 4.2 | 4.2 LTS · 5.2 LTS · 6.0 · 6.1 |
+| FastAPI | `baldur[fastapi]` | 0.100 | latest ≥ floor (smoke) |
+| Flask | `baldur[flask]` | 2.3 | latest ≥ floor (smoke) |
 
 Django is tested against the 4.2 and 5.2 LTS lines plus the 6.0 and 6.1
 feature releases. FastAPI and Flask run a quickstart smoke test (install the extra, start
@@ -37,13 +37,13 @@ floor; that lane runs whenever the package or a quickstart app changes rather
 than on every commit.
 
 `[django]` installs Django only; mounting Baldur's REST API
-(`baldur.api.django.urls`) also needs `baldur-framework[django-api]`.
+(`baldur.api.django.urls`) also needs `baldur[django-api]`.
 
 ## Background tasks
 
 | Component | Extra | Minimum | Tested in CI |
 |-----------|-------|---------|--------------|
-| Celery | `baldur-framework[celery]` | 5.3 | 5.4 |
+| Celery | `baldur[celery]` | 5.3 | 5.4 |
 
 ## Infrastructure (optional)
 
@@ -59,10 +59,10 @@ optional and only needed to share state across multiple workers.
 
 The distinction matters: **Redis server 7.x** is the data store Baldur's
 integration suite runs against, while **`redis-py` 4.2** is the floor for the
-client library installed by `baldur-framework[redis]` (and by the `celery` and
+client library installed by `baldur[redis]` (and by the `celery` and
 `arq` extras; the `rq` extra gets the client transitively through `rq` itself). The same split applies to PostgreSQL: **server 16.x**
 is what the integration suite provisions, and **`psycopg2-binary` 2.9** is the
-client floor installed by `baldur-framework[postgres]`.
+client floor installed by `baldur[postgres]`.
 
 ## Test matrix shape
 

@@ -68,7 +68,7 @@ stateDiagram-v2
 | `baldur_shutdown_drain_duration_seconds` histogram records the drain | Every shutdown reports how long it actually took — worth an alert if it creeps toward the window limit |
 
 The metrics in the table are exported when the `prometheus` extra is installed
-(`pip install "baldur-framework[prometheus]"`); without it the drain behaves the same and exports
+(`pip install "baldur[prometheus]"`); without it the drain behaves the same and exports
 nothing. A few operational details:
 
 - **The drain is bounded on purpose.** A clean drain loses nothing; a forced one tells you how

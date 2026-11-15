@@ -2,7 +2,7 @@
 Django integration for the baldur system: middleware and the REST API.
 
 The middleware under this package imports with only Django installed
-(``baldur-framework[django]``)::
+(``baldur[django]``)::
 
     # In your Django project's settings.py:
     MIDDLEWARE = [
@@ -17,7 +17,7 @@ The middleware under this package imports with only Django installed
     ]
 
 The REST API (DRF views, serializers and ``baldur.api.django.urls``) is built
-on Django REST framework and needs ``baldur-framework[django-api]``::
+on Django REST framework and needs ``baldur[django-api]``::
 
     # In your Django project's urls.py:
     from baldur.api.django import urls as baldur_urls

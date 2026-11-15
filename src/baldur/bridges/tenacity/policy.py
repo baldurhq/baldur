@@ -146,7 +146,7 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
 
         if not _TENACITY_AVAILABLE:
             raise ImportError(
-                "baldur-framework[tenacity] extra required — pip install baldur-framework[tenacity]"
+                "baldur[tenacity] extra required — pip install baldur[tenacity]"
             )
 
         self._stop = stop

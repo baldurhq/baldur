@@ -1,7 +1,7 @@
 """G43 — shipped Grafana dashboard queries MUST name live registry metrics.
 
 The sample dashboards under ``examples/monitoring/`` (the OSS overview and the
-PRO operations board) ship with the ``baldur-framework[prometheus]`` extra. Every
+PRO operations board) ship with the ``baldur[prometheus]`` extra. Every
 Prometheus panel query in them references framework metric series by name. Those
 names were once authored by guessing — before the recorder layer existed — and
 silently rotted (``baldur_retry_total`` / ``baldur_requests_total`` never

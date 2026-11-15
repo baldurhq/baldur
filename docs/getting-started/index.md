@@ -18,7 +18,7 @@ Before wiring anything into your app, watch the whole loop run in one
 process — no Redis, no database, no broker:
 
 ```bash
-pip install "baldur-framework[celery]"
+pip install "baldur[celery]"
 python -m baldur.scripts.demo_self_healing
 ```
 

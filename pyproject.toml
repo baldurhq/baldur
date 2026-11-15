@@ -7,7 +7,7 @@ requires = ["hatchling<1.32"]
 build-backend = "hatchling.build"
 
 [project]
-name = "baldur-framework"
+name = "baldur"
 dynamic = ["version"]
 description = "Keeps the Python calls that fail while an API is down, LLM rate limits and outages included, and re-runs them when it recovers. Circuit breaker, retry and dead-letter replay in one decorator."
 readme = "README.md"
@@ -183,7 +183,7 @@ docs = [
 # advertises only OSS extras; users who need K8s/Kafka/AWS/ML integrations
 # should install ``baldur-pro[<extra>]``.
 all = [
-    "baldur-framework[django,django-api,fastapi,flask,celery,arq,prometheus,opentelemetry,fast-json,caching,disk-buffer,crypto,rq,postgres,chaos,export,databases,tenacity,redis,openapi]",
+    "baldur[django,django-api,fastapi,flask,celery,arq,prometheus,opentelemetry,fast-json,caching,disk-buffer,crypto,rq,postgres,chaos,export,databases,tenacity,redis,openapi]",
 ]
 # Browser-driven admin-console lane (tests/e2e/). Deliberately NOT in [dev]:
 # it needs a ~130 MB Chromium download on top of the wheel, which no other
@@ -194,7 +194,7 @@ test-e2e = [
 ]
 
 dev = [
-    "baldur-framework[all]",
+    "baldur[all]",
     # Host-integration packages Baldur's Django path uses when the host has
     # them. No extra installs them; the suite exercises both states and the
     # optional-import gate classifies them optional through this list.

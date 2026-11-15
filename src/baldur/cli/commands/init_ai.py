@@ -70,7 +70,7 @@ one pipeline. `name` is a stable identifier for that dependency. For an inline
   and Flask adapters do this for you; a plain script calls it explicitly.
 - **Config** — `BALDUR_*` environment variables. Zero-config runs on an
   in-memory backend (no Redis). Set `BALDUR_REDIS_URL=...` (and
-  `pip install baldur-framework[redis]`) so circuit-breaker state is shared
+  `pip install baldur[redis]`) so circuit-breaker state is shared
   across workers.
 - **Tuning** — pass keywords to the decorator: `fallback=` (a zero-argument
   callable returning a default value), `retry=`, `circuit_breaker=`, `timeout=`,
@@ -143,7 +143,7 @@ def summarize(doc_id: str) -> str:
   is a silent correctness bug (keying on `user_id` would block a customer's
   legitimate second order).
 - The importable package is `baldur` (`import baldur`); the PyPI distribution is
-  `baldur-framework`.
+  `baldur`.
 - More: https://baldur.sh/ — run `baldur init-ai` to refresh this file.
 """
 

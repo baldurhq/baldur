@@ -4,7 +4,7 @@ without a gating marker.
 CLAUDE.md § Test Location Rules + impl doc 528 D7/D11. After the
 ``tests/`` + ``tests/pro/`` + ``tests/dormant/`` publication split, the
 public-repo test root MUST stay collectable on a clean
-``pip install baldur-framework``
+``pip install baldur``
 environment where ``baldur_pro`` and ``baldur_dormant`` are absent. A test
 under ``tests/`` that module-level-imports either sibling package without
 a gating mechanism crashes ``pytest --collect-only`` with

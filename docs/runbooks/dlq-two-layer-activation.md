@@ -237,7 +237,7 @@ Two sweeps can drain the queue on recovery, and they do not need the same things
 | Link | Lane | What is missing | How to satisfy it |
 |---|---|---|---|
 | `disabled` | both | on-recovery replay is switched off | `BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_ENABLED=true` |
-| `celery_missing` | both | the on-recovery dispatch task cannot be imported — the Celery extra is not installed | `pip install 'baldur-framework[celery]'` |
+| `celery_missing` | both | the on-recovery dispatch task cannot be imported — the Celery extra is not installed | `pip install 'baldur[celery]'` |
 | `worker_missing` | both | no worker consumes the `dlq_processing` queue | `celery -A <app> worker -Q dlq_processing` |
 | `handler_missing` | both | no replay handler is registered for the entry's domain | `register_replay_handler(YourHandler())` |
 | `map_unconfigured` | mapped | no `service_failure_type_map` entry names which failure types to sweep when that service's circuit closes | add one — **except for `CIRCUIT_BREAKER_OPEN`; see below** |

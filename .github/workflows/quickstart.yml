@@ -91,7 +91,7 @@ jobs:
         run: |
           python -m venv /tmp/qs
           /tmp/qs/bin/python -m pip install --upgrade pip
-          WHEEL=$(ls dist/baldur_framework-*.whl)
+          WHEEL=$(ls dist/baldur-*.whl)
           # Only pytest is added beyond the framework extra — its deps
           # (pluggy/iniconfig/packaging) share no surface with the framework,
           # so they cannot perturb the installed Django/FastAPI/Flask version.
@@ -204,7 +204,7 @@ jobs:
         run: |
           python -m venv /tmp/bare
           /tmp/bare/bin/python -m pip install --upgrade pip
-          WHEEL=$(ls dist/baldur_framework-*.whl)
+          WHEEL=$(ls dist/baldur-*.whl)
           /tmp/bare/bin/python -m pip install "${WHEEL}"
       - name: Measure both zero-config paths
         run: |

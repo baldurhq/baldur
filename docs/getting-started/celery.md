@@ -20,7 +20,7 @@ you without touching each task.
 ## 1. Install
 
 ```bash
-pip install baldur-framework[celery]
+pip install baldur[celery]
 ```
 
 ## 2. Protect a task body
@@ -149,7 +149,7 @@ place, no further code changes — set one environment variable before starting
 the workers:
 
 ```bash
-pip install baldur-framework[celery,redis]
+pip install baldur[celery,redis]
 export BALDUR_REDIS_URL=redis://localhost:6379/0
 export BALDUR_ENVIRONMENT=production
 ```

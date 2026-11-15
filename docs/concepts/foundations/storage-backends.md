@@ -49,7 +49,7 @@ bookkeeping lives in one store that every process shares. It is a single
 variable, no code change:
 
 ```bash
-pip install baldur-framework[redis]
+pip install baldur[redis]
 export BALDUR_REDIS_URL=redis://localhost:6379/0
 ```
 
@@ -101,7 +101,7 @@ lands there too when Redis is not configured. Postgres, MySQL, and SQLite are su
 selected by the DSN scheme:
 
 ```bash
-pip install baldur-framework[postgres]
+pip install baldur[postgres]
 export BALDUR_SQL_DSN=postgresql://user:pass@host:5432/db
 ```
 

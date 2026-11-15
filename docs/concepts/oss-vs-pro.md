@@ -6,7 +6,7 @@
 > the detailed reference it points to.
 
 Baldur is one library with one API (`@baldur.protected`). OSS is the free,
-Apache-2.0 core (`pip install baldur-framework`); PRO is a separate package you
+Apache-2.0 core (`pip install baldur`); PRO is a separate package you
 add on top in production. PRO **adds** capability — it never replaces or
 relicenses anything in the core.
 
@@ -42,7 +42,7 @@ one at a time.
 The free tier is the **resilience patterns themselves**, with zero
 infrastructure to start. A single service can survive a failing dependency,
 tell a load balancer the truth, drain cleanly on restart, and expose metrics —
-all on `pip install baldur-framework` alone, no license and no sign-up.
+all on `pip install baldur` alone, no license and no sign-up.
 
 See the individual guides: [Circuit Breaker](oss/circuit-breaker.md),
 [Retry](oss/retry.md), [Idempotency](oss/idempotency.md),

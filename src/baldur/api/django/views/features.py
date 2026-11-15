@@ -7,7 +7,7 @@ without bleeding into the OOS #530-3 campaign across the other ~50 views.
 
 When drf-spectacular is not installed the import falls back to an
 identity decorator so the view module remains importable in OSS installs
-that don't add ``baldur-framework[openapi]``.
+that don't add ``baldur[openapi]``.
 """
 
 from __future__ import annotations

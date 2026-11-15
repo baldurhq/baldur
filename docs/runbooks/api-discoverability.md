@@ -9,7 +9,7 @@
 ## TL;DR
 
 ```bash
-pip install 'baldur-framework[django,openapi]'
+pip install 'baldur[django,openapi]'
 ```
 
 Add `"drf_spectacular"` to your project's `INSTALLED_APPS`, restart the worker, and browse to `/api/baldur/docs/`. Click **Authorize** in Swagger UI, paste `Bearer <jwt>`, then exercise endpoints.
@@ -23,7 +23,7 @@ To hide the surface in a hardened environment, set `BALDUR_OPENAPI_ENABLED=0` â€
 The Django adapter ships without drf-spectacular by default. Pull it in via the `[openapi]` extras:
 
 ```bash
-pip install 'baldur-framework[django,openapi]'
+pip install 'baldur[django,openapi]'
 ```
 
 The `[openapi]` extras adds `drf-spectacular>=0.27`. Without it, the `/api/baldur/{schema,docs,redoc}/` routes silently return an empty pattern list (the conditional-import gate in `src/baldur/api/django/urls/schema.py`).
@@ -122,7 +122,7 @@ These pass through verbatim to drf-spectacular. The equivalent `BALDUR_OPENAPI_T
 
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
-| `/schema/` returns 404 | drf-spectacular not installed OR `BALDUR_OPENAPI_ENABLED=0` | `pip install 'baldur-framework[openapi]'` and unset the env var |
+| `/schema/` returns 404 | drf-spectacular not installed OR `BALDUR_OPENAPI_ENABLED=0` | `pip install 'baldur[openapi]'` and unset the env var |
 | `/schema/` returns 403 | Caller is unauthenticated | Pass a valid `Authorization: Bearer <jwt>` |
 | `/features/` returns 403 for an authenticated caller | Caller is not in the `baldur_admin` group | Add the user to `baldur_admin` (or use a Django superuser) |
 | `/features/` returns an empty `features` array | Manifest YAML unreachable (force-include broke, env override points at a non-existent file) | Verify `python -c "from importlib.resources import files; print(files('baldur._data').joinpath('V1_LAUNCH_MANIFEST.yaml').is_file())"` returns `True` |

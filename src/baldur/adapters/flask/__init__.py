@@ -7,7 +7,7 @@ Provides:
   ``before_request`` / ``after_request`` handlers that delegate to the
   framework-free helpers in ``baldur.api.middleware``.
 
-Install: ``pip install baldur-framework[flask]``
+Install: ``pip install baldur[flask]``
 
 Example:
     .. code-block:: python

@@ -311,7 +311,7 @@ To watch it end to end on your machine, against the real `openai` SDK and a
 local fake provider — a rate limit, then an outage, then the replay:
 
 ```bash
-pip install "baldur-framework[celery]" openai
+pip install "baldur[celery]" openai
 python -m baldur.scripts.demo_llm_outage
 ```
 
@@ -390,5 +390,5 @@ waiting out.
   stage itself, and what composes with it
 - [Circuit breaker for Python](concepts/oss/circuit-breaker.md) — what happens
   when the 429s stop being a blip
-- [Getting Started](getting-started/index.md) — `pip install baldur-framework`
+- [Getting Started](getting-started/index.md) — `pip install baldur`
   and a protected call

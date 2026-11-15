@@ -200,7 +200,7 @@ production checklist.
 ## Where to go next
 
 - [Celery quickstart](getting-started/celery.md) — `pip install
-  baldur-framework[celery]`, the signal setup, and Baldur's maintenance on your
+  baldur[celery]`, the signal setup, and Baldur's maintenance on your
   beat
 - [DLQ + replay](concepts/foundations/dlq-replay.md) — how capture, the
   outbox, and the on-recovery sweep work end to end

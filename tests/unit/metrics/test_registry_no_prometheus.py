@@ -81,7 +81,7 @@ class TestHelpersRaiseWhenPrometheusAbsentContract:
             except ImportError as e:
                 msg = str(e)
                 assert 'prometheus_client is required' in msg, msg
-                assert 'baldur-framework[prometheus]' in msg, msg
+                assert 'baldur[prometheus]' in msg, msg
                 print('OK')
             else:
                 print('NO_RAISE')

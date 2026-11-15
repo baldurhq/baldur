@@ -6,7 +6,7 @@
 
 Baldur ships in **two tiers**:
 
-- **OSS.** The free, open-source core. Run `pip install baldur-framework`, `import baldur`, and
+- **OSS.** The free, open-source core. Run `pip install baldur`, `import baldur`, and
   you have the resilience building blocks: circuit breaker, retry, idempotency, health checks,
   graceful shutdown, and more. No license, no sign-up, no cost.
 - **PRO.** A paid package you add on top of the OSS core once you run Baldur in production with a

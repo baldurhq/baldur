@@ -7,7 +7,7 @@ Public API:
     instrument_tenacity  — Level-1 monkey-patch for global observation.
 
 Import safety:
-    ``tenacity`` is an optional dependency (``pip install baldur-framework[tenacity]``).
+    ``tenacity`` is an optional dependency (``pip install baldur[tenacity]``).
     The module always imports successfully so IDE auto-import / symbol
     discovery works without the extra. ``TenacityBridgePolicy.__init__()`` and
     ``instrument_tenacity()`` raise (or skip) at first use when tenacity is

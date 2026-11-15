@@ -108,7 +108,7 @@ class AsyncRedisCacheAdapter(AsyncCacheProviderInterface):
         except ImportError as e:
             raise ImportError(
                 "AsyncRedisCacheAdapter requires redis>=4.2 (redis.asyncio). "
-                "Install baldur-framework[redis]."
+                "Install baldur[redis]."
             ) from e
 
         connect_kwargs: dict[str, Any] = {

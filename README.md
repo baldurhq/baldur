@@ -3,7 +3,7 @@
 [![CI](https://github.com/baldurhq/baldur/actions/workflows/ci-oss-mirror.yml/badge.svg)](https://github.com/baldurhq/baldur/actions/workflows/ci-oss-mirror.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
-[![PyPI](https://img.shields.io/pypi/v/baldur-framework.svg)](https://pypi.org/project/baldur-framework/)
+[![PyPI](https://img.shields.io/pypi/v/baldur.svg)](https://pypi.org/project/baldur/)
 [![Docs](https://img.shields.io/badge/docs-baldur.sh-1f6feb.svg)](https://baldur.sh)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13522/badge)](https://www.bestpractices.dev/projects/13522)
 
@@ -66,7 +66,7 @@ then an outage, then every parked job replayed:
 *A real run, recorded in real time. Run it yourself:*
 
 ```bash
-pip install "baldur-framework[celery]" openai
+pip install "baldur[celery]" openai
 python -m baldur.scripts.demo_llm_outage
 ```
 
@@ -98,18 +98,18 @@ replaces them.
 
 ## Install
 
-The Python package is `baldur` (you `import baldur`); the PyPI distribution is
-`baldur-framework`.
+The PyPI distribution and the Python package are both `baldur`
+(`pip install baldur`, then `import baldur`).
 
 ```bash
-pip install baldur-framework                 # framework-agnostic core
-pip install baldur-framework[django]         # Django integration
-pip install baldur-framework[django-api]     # Baldur's Django REST API (baldur.api.django.urls)
-pip install baldur-framework[fastapi]        # FastAPI integration
-pip install baldur-framework[flask]          # Flask integration
-pip install baldur-framework[celery]         # Celery task protection
-pip install baldur-framework[redis]          # Redis-backed shared state
-pip install baldur-framework[prometheus]     # Prometheus metrics
+pip install baldur                 # framework-agnostic core
+pip install baldur[django]         # Django integration
+pip install baldur[django-api]     # Baldur's Django REST API (baldur.api.django.urls)
+pip install baldur[fastapi]        # FastAPI integration
+pip install baldur[flask]          # Flask integration
+pip install baldur[celery]         # Celery task protection
+pip install baldur[redis]          # Redis-backed shared state
+pip install baldur[prometheus]     # Prometheus metrics
 ```
 
 ## The same decorator, any dependency
@@ -144,12 +144,12 @@ arrive. Five reach it and fail, the open breaker rejects the other 995 without
 calling it, all 1,000 are captured with their arguments, and through the replay
 handler the demo registers, all 1,000 are replayed on recovery. Zero lost. A
 real run, recorded in real time, with the breaker states and DLQ tallies read
-live from the framework. The decorator itself is `pip install baldur-framework`
+live from the framework. The decorator itself is `pip install baldur`
 and nothing else; the demo adds the `celery` extra for its in-process stand-in
 worker — still one process, no Redis, no broker. Run it yourself:*
 
 ```bash
-pip install "baldur-framework[celery]"
+pip install "baldur[celery]"
 python -m baldur.scripts.demo_self_healing --outage-charges 1000
 ```
 

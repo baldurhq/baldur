@@ -2554,7 +2554,7 @@ class TestRedisDriverMissingBehavior:
 
         message = str(excinfo.value)
         assert "BALDUR_REDIS_URL" in message
-        assert "pip install baldur-framework[redis]" in message
+        assert "pip install baldur[redis]" in message
 
     def test_elsewhere_the_redis_rows_run_on_memory_with_one_warning(
         self, monkeypatch, dlq_wiring_env, isolated_all_wired_registries

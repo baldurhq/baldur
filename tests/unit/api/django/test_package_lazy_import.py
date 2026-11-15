@@ -1,6 +1,6 @@
 """``baldur.api.django`` imports and boots without Django REST framework.
 
-``baldur-framework[django]`` installs Django only; Django REST framework (DRF)
+``baldur[django]`` installs Django only; Django REST framework (DRF)
 ships in ``[django-api]``. Every middleware the Django adapter injects lives
 under ``baldur.api.django``, so the package init must not import the DRF-backed
 views or serializers, or a ``[django]`` app fails when its WSGI server builds
@@ -300,7 +300,7 @@ class TestRestApiWithoutRestFrameworkContract:
 
         # Then
         assert report["raised"] == "ImportError"
-        assert "baldur-framework[django-api]" in report["message"]
+        assert "baldur[django-api]" in report["message"]
         assert report["cause"] == "ModuleNotFoundError"
         assert report["cause_name"] == "rest_framework"
 

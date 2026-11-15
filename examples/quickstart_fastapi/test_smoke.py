@@ -1,7 +1,7 @@
 """Smoke test for the Baldur FastAPI quickstart (531 D5).
 
 Uses FastAPI's in-process ``TestClient`` (backed by ``httpx``, shipped by the
-``baldur-framework[fastapi]`` extra) — no running server, no infra. Bare ``pip install
+``baldur[fastapi]`` extra) — no running server, no infra. Bare ``pip install
 pytest`` is enough on top of the extra. Entering the ``TestClient`` context
 manager runs ``fastapi_lifespan``, which calls ``baldur.init()``.
 

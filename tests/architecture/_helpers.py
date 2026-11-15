@@ -406,19 +406,18 @@ _DIST_TO_MODULE_OVERRIDES: dict[str, str] = {
 }
 
 
-# Self-distribution names of the OSS package. The PyPI distribution was
-# renamed ``baldur`` -> ``baldur-framework`` in 531 D8 (importable package name
-# stays ``baldur``); both are matched so recursive extras keep flattening if
-# ``baldur`` is later published as a forward-compat alias.
-_SELF_DISTRIBUTION_NAMES: frozenset[str] = frozenset({"baldur", "baldur-framework"})
+# Self-distribution name of the OSS package: the PyPI distribution and the
+# importable package are both ``baldur``, so recursive extras such as
+# ``all = ["baldur[...]"]`` resolve to the package itself.
+_SELF_DISTRIBUTION_NAMES: frozenset[str] = frozenset({"baldur"})
 
 
 def _distribution_to_module(distribution: str) -> str | None:
     """Map a PyPI distribution name to its top-level import module.
 
-    Returns None for self-references such as ``"baldur-framework"`` (the package
+    Returns None for self-references such as ``"baldur"`` (the package
     itself referenced by recursive extras like
-    ``all = ["baldur-framework[...]"]``).
+    ``all = ["baldur[...]"]``).
     """
     canonical = distribution.lower()
     if not canonical or canonical in _SELF_DISTRIBUTION_NAMES:
@@ -465,7 +464,7 @@ def optional_extras_modules() -> dict[str, frozenset[str]]:
 
     Reads ``[project.optional-dependencies]`` via stdlib ``tomllib`` (Python
     3.11+ per pyproject ``requires-python``). Recursive extras such as
-    ``baldur-framework[ml]`` are flattened across the chain. Modules also present in
+    ``baldur[ml]`` are flattened across the chain. Modules also present in
     ``[project.dependencies]`` are excluded so each entry truly represents an
     optional-only dependency.
     """

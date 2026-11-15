@@ -8,7 +8,7 @@ By participating you agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md)
 
 ## What this repository is
 
-This repository is the **open-source core** of Baldur (`baldur-framework`),
+This repository is the **open-source core** of Baldur (`baldur`),
 licensed under Apache-2.0. It develops in the open, accepts pull requests, and
 has a real, forward-growing history.
 

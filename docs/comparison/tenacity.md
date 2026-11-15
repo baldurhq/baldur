@@ -117,7 +117,7 @@ The stop and wait strategies are still tenacity's. What changes is what surround
 `async def` function the same policy works — Baldur converts the bridge to its async twin rather
 than running a sync retry loop unawaited.
 
-The bridge needs the extra: `pip install baldur-framework[tenacity]`.
+The bridge needs the extra: `pip install baldur[tenacity]`.
 
 ## What Baldur costs you
 

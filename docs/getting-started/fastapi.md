@@ -8,7 +8,7 @@ environment variables. The in-memory fallback covers the whole first run.
 ## 1. Install
 
 ```bash
-pip install baldur-framework[fastapi]
+pip install baldur[fastapi]
 ```
 
 ## 2. Wire Baldur into the app
@@ -103,7 +103,7 @@ Point Baldur at Redis so all workers share state. No code changes needed: set on
 environment variable before starting the server:
 
 ```bash
-pip install baldur-framework[fastapi,redis]
+pip install baldur[fastapi,redis]
 export BALDUR_REDIS_URL=redis://localhost:6379/0
 export BALDUR_ENVIRONMENT=production
 ```

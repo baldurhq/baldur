@@ -2,7 +2,7 @@
 
 Runs entirely in this process — no Redis, no database, no message broker::
 
-    pip install "baldur-framework[celery]"
+    pip install "baldur[celery]"
     python -m baldur.scripts.demo_self_healing
 
 What it shows:
@@ -157,7 +157,7 @@ def _setup_eager_celery() -> bool:
         from celery import Celery
     except ImportError:
         _say("This demo needs the Celery extra for the auto-replay leg:")
-        _say('    pip install "baldur-framework[celery]"')
+        _say('    pip install "baldur[celery]"')
         return False
 
     celery_app = Celery("baldur_demo", broker="memory://", backend="cache+memory://")
@@ -351,7 +351,7 @@ class _Demo:
         )
         _say(f"{DIM}  circuit breaker + DLQ capture in one decorator. No Redis,{R}")
         _say(f"{DIM}  no DB, no broker — this process is everything. Reproduce it:{R}")
-        _say(f'{DIM}      pip install "baldur-framework[celery]"{R}')
+        _say(f'{DIM}      pip install "baldur[celery]"{R}')
         _say(f"{DIM}      python -m baldur.scripts.demo_self_healing{R}")
         _say()
         time.sleep(1.0)

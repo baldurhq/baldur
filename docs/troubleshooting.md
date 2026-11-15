@@ -38,8 +38,8 @@ ships framework-agnostic; integrations are opt-in extras.
 *Fix:* install the extra you need (quote the brackets in `zsh` / `fish`):
 
 ```bash
-pip install "baldur-framework[django]"      # or [fastapi], [flask], [redis], [celery], [prometheus]
-pip install "baldur-framework[django,redis]"  # combine extras with commas
+pip install "baldur[django]"      # or [fastapi], [flask], [redis], [celery], [prometheus]
+pip install "baldur[django,redis]"  # combine extras with commas
 ```
 
 **A PRO feature does nothing — no error, no effect. `(PRO)`**
@@ -91,7 +91,7 @@ single-process deployment on in-memory state, set `BALDUR_TEST_MODE=true` instea
 Redis-backed store can be built. Outside production the same state is a
 `baldur.redis_driver_unavailable` warning, and the Redis-backed stores run in
 per-process memory.
-*Fix:* `pip install "baldur-framework[redis]"`.
+*Fix:* `pip install "baldur[redis]"`.
 
 **`ConfigurationError: [Security] BALDUR_SECRETS_AUDIT_SIGNING_KEY is required in production …`.**
 *Cause:* a keyed audit chain can be written in this process — the audit trail is on
@@ -104,7 +104,7 @@ signing key. `BALDUR_SECRETS_ENCRYPTION_KEY` is never required.
 
 **`ConfigurationError: Neither BALDUR_SQL_DSN nor Django DATABASES is configured in production while a PRO entitlement is active`.**
 *Cause:* an active PRO entitlement writes its incident records to a SQL store, and production has neither a DSN nor, on Django, a `DATABASES` setting.
-*Fix:* `pip install "baldur-framework[postgres]"` and set
+*Fix:* `pip install "baldur[postgres]"` and set
 `BALDUR_SQL_DSN=postgresql://user:pass@host:5432/db`, or configure `DATABASES` on
 Django. Without an entitlement these stores run in per-process memory, announced at
 startup by `baldur.registry_memory_fallback` at INFO.
@@ -116,7 +116,7 @@ built: the driver for the DSN's scheme is missing (`psycopg2` for `postgresql://
 parse — a misspelled scheme, an unknown query parameter. The message never repeats the
 DSN, because it can carry a password. The same message names any other backend
 selected through `BALDUR_DLQ_BACKEND` that could not be built.
-*Fix:* install the driver (`pip install "baldur-framework[postgres]"` for PostgreSQL),
+*Fix:* install the driver (`pip install "baldur[postgres]"` for PostgreSQL),
 correct `BALDUR_SQL_DSN`, or select another backend through the variable the message
 names. The check does not connect: a DSN that parses but names the wrong host,
 database or password still boots, and the first write to that store fails. Outside
@@ -397,7 +397,7 @@ returns `503` — your app keeps running exactly as before.
 *Fix:*
 
 ```bash
-pip install "baldur-framework[prometheus]"
+pip install "baldur[prometheus]"
 ```
 
 The circuit-breaker, retry, cardinality-guard, dead-letter-queue, and replay metrics are
@@ -594,7 +594,7 @@ implemented — this is a wiring principle, not a setting.)
 The zero-config in-memory store is **single-process only** — copy it into a multi-worker
 deployment and idempotency keys, rate-limit counters, and breaker state diverge silently per
 worker, which breaks **correctness**, not just scale. Before running more than one worker, point
-Baldur at Redis (`pip install "baldur-framework[...,redis]"`, then
+Baldur at Redis (`pip install "baldur[...,redis]"`, then
 `export BALDUR_REDIS_URL=redis://localhost:6379/0`) — no code changes — and understand the
 DEGRADED-window semantics from the adoption callout at the top.
 

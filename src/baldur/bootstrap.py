@@ -208,9 +208,9 @@ def init(
               thread. Zero extra dependency; matches Sentry / OTEL precedent.
             - ``"celery"``: scheduled ticks enqueue via the corresponding
               Celery ``@shared_task``'s ``.delay()`` instead of running inline.
-              Requires ``pip install baldur-framework[celery]`` / an already-configured
+              Requires ``pip install baldur[celery]`` / an already-configured
               Celery app.
-            - ``"arq"``: reserved for future ``baldur-framework[arq]`` extra; currently
+            - ``"arq"``: reserved for future ``baldur[arq]`` extra; currently
               falls back to inline with a WARNING log.
     """
     global _init_done, _init_in_progress
@@ -2511,13 +2511,13 @@ def _refuse_or_announce_missing_redis_driver(runtime: BaldurRuntime) -> None:
         raise ConfigurationError(
             "BALDUR_REDIS_URL is set, but the Redis driver is not installed, "
             "so no Redis-backed store can be built. Install it with "
-            "pip install baldur-framework[redis]."
+            "pip install baldur[redis]."
         )
     logger.warning(
         "baldur.redis_driver_unavailable",
         env_var="BALDUR_REDIS_URL",
         hint=(
-            "pip install baldur-framework[redis]; until then the "
+            "pip install baldur[redis]; until then the "
             "Redis-backed stores run on per-process memory."
         ),
     )
@@ -3985,7 +3985,7 @@ def _start_default_scheduler(task_backend: str = "inline") -> None:  # noqa: C90
         logger.warning(
             "scheduler.arq_backend_not_implemented",
             fallback="inline",
-            reason="baldur-framework[arq] extra not yet shipped",
+            reason="baldur[arq] extra not yet shipped",
         )
         task_backend = "inline"
 

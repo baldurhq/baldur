@@ -746,7 +746,7 @@ def run_cell(  # noqa: C901
                 duration_s=time.monotonic() - started,
                 stderr_tail=(
                     f"must_not_import={module} unexpectedly succeeded "
-                    f"(extras leak in baldur-framework[{extras or 'baseline'}])"
+                    f"(extras leak in baldur[{extras or 'baseline'}])"
                 ),
             )
 

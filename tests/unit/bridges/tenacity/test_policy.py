@@ -523,7 +523,7 @@ class TestTenacityBridgePolicyImportGuardContract:
         """ImportError mentions the install command from impl 451 D2."""
         monkeypatch.setattr("baldur.bridges.tenacity._TENACITY_AVAILABLE", False)
 
-        with pytest.raises(ImportError, match=r"baldur-framework\[tenacity\]"):
+        with pytest.raises(ImportError, match=r"baldur\[tenacity\]"):
             TenacityBridgePolicy(stop=tenacity.stop_after_attempt(1))
 
 

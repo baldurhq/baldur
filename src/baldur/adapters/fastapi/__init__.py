@@ -14,7 +14,7 @@ Provides:
   helpers from ``baldur.api.middleware`` (rate limit, admission / backpressure,
   CB pre-flight + observation) into a single mountable middleware.
 
-Install: ``pip install baldur-framework[fastapi]``
+Install: ``pip install baldur[fastapi]``
 
 Example:
     .. code-block:: python

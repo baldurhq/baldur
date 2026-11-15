@@ -1,7 +1,7 @@
 """G48 — shipped Prometheus alert rules MUST name live registry metrics.
 
 The sample alert file ``examples/monitoring/prometheus-alerts.yml`` ships with
-the ``baldur-framework[prometheus]`` extra alongside the two Grafana dashboards. Every
+the ``baldur[prometheus]`` extra alongside the two Grafana dashboards. Every
 alert ``expr`` references framework metric series by name. Like the dashboard
 panels G43 guards, those names were once authored against a guessed metric set
 and silently rotted — rules dividing by the never-existent ``baldur_requests_total``

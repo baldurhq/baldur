@@ -2,7 +2,7 @@
 
 Runs entirely in this process — no Redis, no message broker, no API key::
 
-    pip install "baldur-framework[celery]" openai
+    pip install "baldur[celery]" openai
     python -m baldur.scripts.demo_llm_outage
 
 A local HTTP server speaks the OpenAI chat-completions API and the real
@@ -229,7 +229,7 @@ class _Demo:
         )
         _say(f"{DIM}  play the workers. They share one in-process store — separate{R}")
         _say(f"{DIM}  worker processes share waits and parked jobs through Redis.{R}")
-        _say(f'{DIM}      pip install "baldur-framework[celery]" openai{R}')
+        _say(f'{DIM}      pip install "baldur[celery]" openai{R}')
         _say(f"{DIM}      python -m baldur.scripts.demo_llm_outage{R}")
         _say()
 
@@ -433,7 +433,7 @@ def main(argv: list[str] | None = None) -> int:
         import openai
     except ImportError:
         _say("This demo talks to its fake provider through the openai SDK:")
-        _say('    pip install "baldur-framework[celery]" openai')
+        _say('    pip install "baldur[celery]" openai')
         return 1
 
     if not _start_demo_process():

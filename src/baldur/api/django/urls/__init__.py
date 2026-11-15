@@ -1,7 +1,7 @@
 """Baldur API URL configuration.
 
 The REST API is built on Django REST framework: install
-``baldur-framework[django-api]``, then include it in your Django project's
+``baldur[django-api]``, then include it in your Django project's
 ``urls.py``::
 
     from baldur.api.django import urls as baldur_urls
@@ -39,7 +39,7 @@ try:
 except ImportError as e:
     raise ImportError(
         "Baldur's Django REST API needs Django REST framework. "
-        "Install baldur-framework[django-api]."
+        "Install baldur[django-api]."
     ) from e
 
 from baldur.api.django.urls import (

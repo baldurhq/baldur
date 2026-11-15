@@ -36,7 +36,7 @@ except ImportError:
 
 PROMETHEUS_INSTALL_HINT = (
     "prometheus_client is required for metric registration but is not installed. "
-    'Install with: pip install "baldur-framework[prometheus]" '
+    'Install with: pip install "baldur[prometheus]" '
     "(quotes required in zsh/fish to prevent bracket glob expansion)."
 )
 

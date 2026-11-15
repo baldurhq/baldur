@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes how the Baldur open-source core (`baldur-framework`) is
+This document describes how the Baldur open-source core (`baldur`) is
 structured and the patterns the codebase enforces. It is the orientation map
 referenced from [CONTRIBUTING.md](CONTRIBUTING.md); read it before opening a
 non-trivial pull request.

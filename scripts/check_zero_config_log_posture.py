@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Zero-config log posture harness — measure (and gate) a first-contact run.
 
-A clean ``pip install baldur-framework`` with no environment variables, no
+A clean ``pip install baldur`` with no environment variables, no
 Redis and no optional extras must not greet its first user with WARNING,
 ERROR or CRITICAL lines. This script executes that posture for real, in a
 child interpreter, and counts what a user would actually see on the console.
@@ -118,7 +118,7 @@ def _core_distribution_closure() -> set[str]:
     from importlib.metadata import PackageNotFoundError, distribution
 
     closure: set[str] = set()
-    pending = [_normalize_dist("baldur-framework")]
+    pending = [_normalize_dist("baldur")]
     while pending:
         name = pending.pop()
         if name in closure:
@@ -151,7 +151,7 @@ def _optional_extra_distributions() -> set[str]:
     """
     from importlib.metadata import distribution
 
-    requires = distribution("baldur-framework").requires or []
+    requires = distribution("baldur").requires or []
     blocked = {
         _normalize_dist(_requirement_name(requirement))
         for requirement in requires

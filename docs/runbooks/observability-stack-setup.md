@@ -56,7 +56,7 @@ This phase gives you live metrics and a control panel with zero external depende
 1. Install with the Prometheus extra:
 
    ```bash
-   pip install "baldur-framework[prometheus]"
+   pip install "baldur[prometheus]"
    ```
 
 2. Set environment:
@@ -129,7 +129,7 @@ log correlation (Loki) on top.
 1. Install the OpenTelemetry extra (keep prometheus):
 
    ```bash
-   pip install "baldur-framework[opentelemetry,prometheus]"
+   pip install "baldur[opentelemetry,prometheus]"
    ```
 
 2. Set environment (OTel settings follow the standard `OTEL_*` convention):
