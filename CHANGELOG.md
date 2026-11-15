@@ -10,6 +10,12 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+## [1.17.2] - 2026-11-15
+
+### Changed
+
+- Last `baldur-framework` release: the README points to the new PyPI name `baldur`. No code changes from 1.17.1.
+
 ## [1.17.1] - 2026-10-02
 
 ### Fixed

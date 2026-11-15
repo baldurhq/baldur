@@ -9,6 +9,8 @@
 
 **English** | [한국어](https://github.com/baldurhq/baldur/blob/main/README.ko.md)
 
+> **`baldur-framework` is now [`baldur`](https://pypi.org/project/baldur/).** This name gets no further releases. Both distributions ship the same `baldur` package, so uninstall this one first: `pip uninstall baldur-framework`, then `pip install baldur`.
+
 > **Early access — feedback wanted.** Trying Baldur on a real service? If anything gets in your way — installing, the docs, behavior you didn't expect — tell us in [Discussions](https://github.com/baldurhq/baldur/discussions) or [open an issue](https://github.com/baldurhq/baldur/issues/new/choose).
 
 **An API you depend on goes down for an hour. What happens to your app?**
