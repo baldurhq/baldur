@@ -70,6 +70,15 @@ pip install "baldur[celery]" openai
 python -m baldur.scripts.demo_llm_outage
 ```
 
+Against a real provider the 429 half did not hold up as well. On the Gemini
+free tier (`gemini-3.5-flash-lite`, 15 requests per minute; Baldur 1.17.1,
+8 workers, 24 jobs; 2026-10-03), the 8-to-1 above did not reproduce. No job was
+lost, but the run took 61–85 s, against 13.6–21.6 s with google-genai's own
+retries: when the shared wait ended, every waiting worker retried at once into
+a quota that was refilling slowly, and each new 429 lengthened the wait. The
+outage half held: with a local proxy injecting the outage in front of the real
+Gemini API, 12 jobs were parked and all 12 re-ran, in 3 of 3 runs.
+
 **If Baldur breaks, does my call break?** No. A fault in Baldur's own
 bookkeeping, such as a failed dead-letter write, is logged: your call still
 returns its own result or raises its own error. If Redis is unreachable, calls
